@@ -1,5 +1,9 @@
 # tetra3rs
 
+[![Crates.io](https://img.shields.io/crates/v/tetra3)](https://crates.io/crates/tetra3)
+[![docs.rs](https://img.shields.io/docsrs/tetra3)](https://docs.rs/tetra3)
+[![License](https://img.shields.io/crates/l/tetra3)](LICENSE)
+
 A fast, robust lost-in-space star plate solver written in Rust.
 
 Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required.
