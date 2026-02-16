@@ -48,7 +48,7 @@
 //!
 //! let result = db.solve_from_centroids(&centroids, &solve_config);
 //! if result.status == SolveStatus::MatchFound {
-//!     let q = result.quaternion.unwrap();
+//!     let q = result.qicrs2cam.unwrap();
 //!     println!("Attitude: {q}");
 //!     println!("Matched {} stars in {:.1} ms",
 //!         result.num_matches.unwrap(), result.solve_time_ms);
