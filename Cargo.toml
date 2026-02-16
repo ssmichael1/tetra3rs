@@ -7,7 +7,7 @@ keywords = [
     "image-processing",
     "pattern-recognition",
 ]
-name = "tetra3rs"
+name = "tetra3"
 version = "0.1.0"
 edition = "2021"
 description = "Rust implementation of Tetra3: Fast and robust star plate solver"
@@ -18,9 +18,6 @@ repository = "https://github.com/ssmichael1/tetra3rs"
 categories = ["aerospace", "algorithms", "mathematics", "science"]
 exclude = ["data/", "download_hip2.sh"]
 
-
-[lib]
-name = "tetra3"
 
 [dependencies]
 rkyv = { version = "0.8", features = ["bytecheck"] }
