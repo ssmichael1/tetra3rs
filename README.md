@@ -1,8 +1,8 @@
-# tetra3-rs
+# tetra3rs
 
 A fast, robust lost-in-space star plate solver written in Rust.
 
-Given a set of star centroids extracted from a camera image, tetra3-rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required.
+Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required.
 
 ## Features
 
@@ -85,7 +85,7 @@ if result.status == SolveStatus::MatchFound {
 
 This project is a Rust implementation of the **tetra3** / **cedar-solve** algorithm.
 
-- **[cedar-solve](https://github.com/smroid/cedar-solve)** — Steven Rosenthal's C++/Rust star plate solver, which this implementation closely follows
+- **[cedar-solve](https://github.com/smroid/cedar-solve)** — Steven Rosenthal's C++/Rust star plate solver, which this implementation closely follows (excellent work!)
 - **[tetra3](https://github.com/esa/tetra3)** — the original Python implementation by Gustav Pettersson at ESA
 - **Paper**: G. Pettersson, "Tetra3: a fast and robust star identification algorithm," ESA GNC Conference, 2023
 

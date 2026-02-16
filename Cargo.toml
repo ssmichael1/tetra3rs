@@ -13,9 +13,10 @@ edition = "2021"
 description = "Rust implementation of Tetra3: Fast and robust star plate solver"
 readme = "README.md"
 license-file = "LICENSE"
-#homepage = "https://github.com/ssmichael1/tetra3-rs"
-#repository = "https://github.com/ssmichael1/tetra3-rs"
+homepage = "https://github.com/ssmichael1/tetra3rs"
+repository = "https://github.com/ssmichael1/tetra3rs"
 categories = ["aerospace", "algorithms", "mathematics", "science"]
+exclude = ["data/", "download_hip2.sh"]
 
 
 [lib]
