@@ -526,6 +526,42 @@ fn test_statistical_1000_random_orientations() {
     );
 }
 
+#[test]
+fn test_save_and_load_database() {
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+
+    let config = GenerateDatabaseConfig {
+        max_fov_deg: 12.0,
+        min_fov_deg: None,
+        star_max_magnitude: Some(7.0),
+        pattern_max_error: 0.005,
+        lattice_field_oversampling: 100,
+        patterns_per_lattice_field: 60,
+        verification_stars_per_fov: 50,
+        multiscale_step: 1.5,
+        epoch_proper_motion_year: Some(2025.0),
+        catalog_nside: 16,
+    };
+
+    let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+        .expect("Failed to generate database");
+
+    // Save to a temporary file
+    let tmp_path = "temp_db.bin";
+    db.save_to_file(tmp_path).expect("Failed to save database");
+
+    // Load it back
+    let loaded_db = SolverDatabase::load_from_file(tmp_path).expect("Failed to load database");
+
+    // Verify properties match
+    assert_eq!(db.star_catalog.len(), loaded_db.star_catalog.len());
+    assert_eq!(db.props.num_patterns, loaded_db.props.num_patterns);
+    assert_eq!(db.pattern_catalog.len(), loaded_db.pattern_catalog.len());
+
+    // Clean up temporary file
+    std::fs::remove_file(tmp_path).expect("Failed to delete temporary file");
+}
+
 /// Solve 1000 random orientations with a 10° FOV camera and 4"/axis centroid noise.
 #[test]
 fn test_statistical_1000_noisy_centroids() {
@@ -540,12 +576,12 @@ fn test_statistical_1000_noisy_centroids() {
         min_fov_deg: None,
         star_max_magnitude: Some(7.0),
         pattern_max_error: 0.003,
-        lattice_field_oversampling: 50,
-        patterns_per_lattice_field: 50,
-        verification_stars_per_fov: 40,
+        lattice_field_oversampling: 100,
+        patterns_per_lattice_field: 100,
+        verification_stars_per_fov: 60,
         multiscale_step: 1.5,
         epoch_proper_motion_year: Some(2025.0),
-        catalog_nside: 8,
+        catalog_nside: 16,
     };
 
     let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
