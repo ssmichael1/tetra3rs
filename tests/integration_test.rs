@@ -3,7 +3,7 @@
 
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 use rand::rngs::StdRng;
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use tetra3::{Centroid, GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 
