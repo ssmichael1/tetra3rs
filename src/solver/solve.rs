@@ -353,7 +353,7 @@ impl SolverDatabase {
                     let quat = UnitQuaternion::from_rotation_matrix(&rot3);
 
                     return SolveResult {
-                        quaternion: Some(quat),
+                        qicrs2cam: Some(quat),
                         fov_rad: Some(fov),
                         num_matches: Some(num_matches as u32),
                         rmse_rad: Some(rmse),

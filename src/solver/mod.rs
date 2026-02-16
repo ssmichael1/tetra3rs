@@ -195,8 +195,8 @@ impl SolveConfig {
 pub struct SolveResult {
     /// Quaternion rotating ICRS vectors to camera-frame vectors.
     /// Camera frame: +X right, +Y down, +Z boresight.
-    /// Usage: `camera_vec = quaternion * icrs_vec`
-    pub quaternion: Option<Quaternion>,
+    /// Usage: `camera_vec = qicrs2cam * icrs_vec`
+    pub qicrs2cam: Option<Quaternion>,
     /// Estimated field of view (radians).
     pub fov_rad: Option<f32>,
     /// Number of matched stars in the verification step.
@@ -223,7 +223,7 @@ impl SolveResult {
     /// Create a failure result with the given status and elapsed time.
     pub(crate) fn failure(status: SolveStatus, solve_time_ms: f32) -> Self {
         Self {
-            quaternion: None,
+            qicrs2cam: None,
             fov_rad: None,
             num_matches: None,
             rmse_rad: None,

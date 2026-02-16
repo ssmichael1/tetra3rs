@@ -141,7 +141,7 @@ fn test_generate_and_solve_hipparcos() {
 
     // ── Step 4: Verify the recovered quaternion ──
     let solved_quat = result
-        .quaternion
+        .qicrs2cam
         .expect("Should have quaternion on MatchFound");
 
     // Compare the solved boresight direction with the true one.
@@ -356,7 +356,7 @@ fn test_statistical_1000_random_orientations() {
                 // Compute boresight error
                 let true_quat =
                     UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot));
-                let solved_quat = result.quaternion.unwrap();
+                let solved_quat = result.qicrs2cam.unwrap();
                 let solved_boresight = solved_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
                 let true_boresight = true_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
                 let err_rad = angular_separation(&solved_boresight, &true_boresight);
@@ -625,7 +625,7 @@ fn test_statistical_1000_noisy_centroids() {
 
                 let true_quat =
                     UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot));
-                let solved_quat = result.quaternion.unwrap();
+                let solved_quat = result.qicrs2cam.unwrap();
                 let solved_boresight = solved_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
                 let true_boresight = true_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
                 let err_rad = angular_separation(&solved_boresight, &true_boresight);
