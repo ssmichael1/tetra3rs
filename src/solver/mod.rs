@@ -165,16 +165,25 @@ pub struct SolveConfig {
     pub match_max_error: Option<f32>,
 }
 
-impl SolveConfig {
-    /// Create a solve configuration with the given FOV estimate (radians).
-    pub fn new(fov_estimate_rad: f32) -> Self {
+impl Default for SolveConfig {
+    fn default() -> Self {
         Self {
-            fov_estimate_rad,
+            fov_estimate_rad: 0.0,
             fov_max_error_rad: None,
             match_radius: 0.01,
             match_threshold: 1e-5,
             solve_timeout_ms: Some(5000),
             match_max_error: None,
+        }
+    }
+}
+
+impl SolveConfig {
+    /// Create a solve configuration with the given FOV estimate (radians).
+    pub fn new(fov_estimate_rad: f32) -> Self {
+        Self {
+            fov_estimate_rad,
+            ..Default::default()
         }
     }
 }
