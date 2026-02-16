@@ -1,4 +1,85 @@
-//! Tetra4: Fast and robust star extraction and astrometry library
+//! # tetra3
+//!
+//! A fast, robust **lost-in-space star plate solver** written in Rust.
+//!
+//! Given a set of star centroids extracted from a camera image, `tetra3` identifies
+//! the stars against a catalog and returns the camera's pointing direction as a
+//! quaternion — no prior attitude estimate required.
+//!
+//! ## Features
+//!
+//! - **Lost-in-space solving** — determines attitude from star patterns with no initial guess
+//! - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
+//! - **Robust** — statistical verification via binomial false-positive probability
+//! - **Multiscale** — supports a range of field-of-view scales in a single database
+//! - **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
+//! - **Zero-copy deserialization** — databases serialize with [rkyv](https://docs.rs/rkyv)
+//!   for instant loading
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use tetra3::{GenerateDatabaseConfig, SolverDatabase, SolveConfig, Centroid, SolveStatus};
+//!
+//! // Generate a database from the Hipparcos catalog
+//! let config = GenerateDatabaseConfig {
+//!     max_fov_deg: 20.0,
+//!     epoch_proper_motion_year: Some(2025.0),
+//!     ..Default::default()
+//! };
+//! let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config).unwrap();
+//!
+//! // Save for fast loading later, or load a previously saved database
+//! db.save_to_file("data/my_database.rkyv").unwrap();
+//! let db = SolverDatabase::load_from_file("data/my_database.rkyv").unwrap();
+//!
+//! // Solve from image centroids (positions in radians from boresight)
+//! let centroids = vec![
+//!     Centroid { x: 0.01, y: 0.02, mass: Some(50.0), cov: None },
+//!     Centroid { x: 0.05, y: -0.01, mass: Some(45.0), cov: None },
+//!     // ... more centroids ...
+//! ];
+//!
+//! let solve_config = SolveConfig {
+//!     fov_estimate_rad: (15.0_f32).to_radians(),
+//!     fov_max_error_rad: Some((2.0_f32).to_radians()),
+//!     ..Default::default()
+//! };
+//!
+//! let result = db.solve_from_centroids(&centroids, &solve_config);
+//! if result.status == SolveStatus::MatchFound {
+//!     let q = result.quaternion.unwrap();
+//!     println!("Attitude: {q}");
+//!     println!("Matched {} stars in {:.1} ms",
+//!         result.num_matches.unwrap(), result.solve_time_ms);
+//! }
+//! ```
+//!
+//! ## Algorithm overview
+//!
+//! 1. **Pattern generation** — select combinations of 4 bright centroids; compute 6 pairwise
+//!    angular separations and normalize into 5 edge ratios (a geometric invariant)
+//! 2. **Hash lookup** — quantize the edge ratios into a key and probe a precomputed hash
+//!    table for matching catalog patterns
+//! 3. **Attitude estimation** — solve Wahba's problem via SVD to find the rotation from
+//!    catalog (ICRS) to camera frame
+//! 4. **Verification** — project nearby catalog stars into the camera frame, count matches,
+//!    and accept only if the false-positive probability (binomial CDF) is below threshold
+//! 5. **Refinement** — re-estimate the rotation using all matched star pairs
+//!
+//! ## Credits
+//!
+//! This crate is a Rust implementation of the **tetra3** / **cedar-solve** algorithm:
+//!
+//! - [**tetra3**](https://github.com/esa/tetra3) — the original Python implementation by
+//!   Gustav Pettersson at ESA
+//! - [**cedar-solve**](https://github.com/smroid/cedar-solve) — Steven Rosenthal's C++/Rust
+//!   star plate solver, which this implementation closely follows
+//! - **Paper**: G. Pettersson, "Tetra3: a fast and robust star identification algorithm,"
+//!   ESA GNC Conference, 2023
+//!
+//! This Rust implementation was developed by Steven Michael with assistance from
+//! [Claude Code](https://claude.ai/claude-code) (Anthropic).
 //!
 
 /// Raw star catalogs; currently Tycho-2 & Hipparcos

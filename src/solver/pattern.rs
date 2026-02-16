@@ -85,7 +85,7 @@ pub fn compute_pattern_key(
 }
 
 /// Hash a pattern key to a u64 using the polynomial hash from tetra3:
-///   hash = sum( key[i] * bins^i )  (wrapping u64 arithmetic)
+///   hash = sum( key\[i\] * bins^i )  (wrapping u64 arithmetic)
 pub fn compute_pattern_key_hash(key: &[u32; NUM_EDGE_RATIOS], bins: u32) -> u64 {
     let bins64 = bins as u64;
     let mut hash: u64 = 0;
