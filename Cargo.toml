@@ -1,0 +1,48 @@
+[package]
+keywords = [
+    "star-plate-solver",
+    "astrometry",
+    "astronomy",
+    "celestial-mapping",
+    "image-processing",
+    "pattern-recognition",
+]
+name = "tetra3rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust implementation of Tetra3: Fast and robust star plate solver"
+readme = "README.md"
+license-file = "LICENSE"
+#homepage = "https://github.com/ssmichael1/tetra3-rs"
+#repository = "https://github.com/ssmichael1/tetra3-rs"
+categories = ["aerospace", "algorithms", "mathematics", "science"]
+
+
+[lib]
+name = "tetra3"
+
+[dependencies]
+rkyv = { version = "0.8", features = ["bytecheck"] }
+num-traits = "0.2.15"
+anyhow = "1.0.71"
+tracing = { version = "0.1.40", features = ["std"] }
+tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+nalgebra = { version = "0.34.1", features = ["std"] }
+csv = { version = "1.4.0", optional = true }
+
+
+[features]
+default = []
+gaia = ["dep:csv"]
+
+[profile.test]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[dev-dependencies]
+rand = "0.9.2"
+rand_distr = "0.5.1"

@@ -1,0 +1,58 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock (uncomment if this is a library)
+Cargo.lock
+
+# Python build
+wheel/
+*.egg-info/
+
+
+# test files
+*.fits
+*.tiff
+*.png
+*.ipynb
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database files (large binary files)
+*.bin
+*.rkyv
+/data/*.bin
+/data/*.gz
+/data/*.dat
+/data/*.rkyv
+*.csv
+
+# Backup files
+*.bak
+*.old
+
+# Temporary files
+*.tmp
+flycheck*
+
+# Sample images
+*.tiff
+
+# Python files
+__pycache__/
+*.pyc
+*.egg-info/
+wheel/
+
+# Claude files
+.claude
+
+# Data files
+data
