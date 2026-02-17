@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-DATA_DIR="data"
+DATA_DIR="../data"
 URL="http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
 ARCHIVE_PATH="$DATA_DIR/hip2.dat.gz"
 OUTPUT_PATH="$DATA_DIR/hip2.dat"

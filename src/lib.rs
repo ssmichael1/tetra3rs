@@ -85,11 +85,18 @@
 /// Raw star catalogs; currently Tycho-2 & Hipparcos
 pub(crate) mod catalogs;
 mod centroid;
+#[cfg(feature = "image")]
+pub mod centroid_extraction;
 pub mod solver;
 pub mod star;
 pub mod starcatalog;
 
 pub use centroid::*;
+#[cfg(feature = "image")]
+pub use centroid_extraction::{
+    extract_centroids, extract_centroids_from_image, extract_centroids_from_raw,
+    CentroidExtractionConfig, CentroidExtractionResult,
+};
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,
     SolverDatabase,
