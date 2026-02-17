@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-rust>=1.10"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tetra3rs"
+version = "0.1.2"
+description = "Fast star plate solver written in Rust"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["tetra3rs*"]
+
+[tool.setuptools.package-data]
+tetra3rs = ["py.typed", "*.pyi"]
+
+[[tool.setuptools-rust.ext-modules]]
+target = "tetra3rs/tetra3rs"
+path = "python/Cargo.toml"
+binding = "PyO3"

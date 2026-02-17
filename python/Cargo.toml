@@ -1,0 +1,17 @@
+[package]
+name = "tetra3-python"
+version = "0.1.2"
+edition = "2021"
+publish = false
+
+[lib]
+name = "tetra3rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+tetra3 = { path = "..", features = ["image"] }
+pyo3 = { version = "0.28.1", features = ["extension-module", "anyhow"] }
+numpy = "0.28.0"
+
+[build-dependencies]
+pyo3-build-config = "0.28.1"
