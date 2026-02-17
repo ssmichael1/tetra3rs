@@ -5,8 +5,6 @@ use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal};
-#[cfg(feature = "image")]
-use tetra3::{extract_centroids, CentroidExtractionConfig};
 use tetra3::{Centroid, GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 
 /// Build a small test database (wide FOV for speed) and solve a synthetic image.
