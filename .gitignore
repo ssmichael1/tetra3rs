@@ -62,3 +62,4 @@ data
 
 # Build directory for python
 wheel
+build
