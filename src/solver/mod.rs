@@ -151,8 +151,15 @@ impl Default for GenerateDatabaseConfig {
 
 /// Parameters controlling the plate-solve attempt.
 pub struct SolveConfig {
-    /// Estimated field of view in radians.
+    /// Estimated horizontal field of view in radians (along columns / image width).
+    /// This is used together with `image_width` to compute the pixel scale.
     pub fov_estimate_rad: f32,
+    /// Image width in pixels (number of columns).
+    /// Together with `fov_estimate_rad`, defines the pixel scale:
+    /// `pixel_scale = fov_estimate_rad / image_width`.
+    pub image_width: u32,
+    /// Image height in pixels (number of rows).
+    pub image_height: u32,
     /// Maximum acceptable FOV error in radians. None = no FOV filtering.
     pub fov_max_error_rad: Option<f32>,
     /// Maximum match distance as a fraction of the FOV. Default 0.01.
@@ -169,6 +176,8 @@ impl Default for SolveConfig {
     fn default() -> Self {
         Self {
             fov_estimate_rad: 0.0,
+            image_width: 0,
+            image_height: 0,
             fov_max_error_rad: None,
             match_radius: 0.01,
             match_threshold: 1e-5,
@@ -179,11 +188,22 @@ impl Default for SolveConfig {
 }
 
 impl SolveConfig {
-    /// Create a solve configuration with the given FOV estimate (radians).
-    pub fn new(fov_estimate_rad: f32) -> Self {
+    /// Create a solve configuration with the given FOV estimate (radians) and image dimensions.
+    pub fn new(fov_estimate_rad: f32, image_width: u32, image_height: u32) -> Self {
         Self {
             fov_estimate_rad,
+            image_width,
+            image_height,
             ..Default::default()
+        }
+    }
+
+    /// Pixel scale in radians per pixel (horizontal).
+    pub fn pixel_scale(&self) -> f32 {
+        if self.image_width > 0 {
+            self.fov_estimate_rad / self.image_width as f32
+        } else {
+            0.0
         }
     }
 }

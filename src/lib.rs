@@ -33,15 +33,17 @@
 //! db.save_to_file("data/my_database.rkyv").unwrap();
 //! let db = SolverDatabase::load_from_file("data/my_database.rkyv").unwrap();
 //!
-//! // Solve from image centroids (positions in radians from boresight)
+//! // Solve from image centroids (pixel coordinates, origin at image center)
 //! let centroids = vec![
-//!     Centroid { x: 0.01, y: 0.02, mass: Some(50.0), cov: None },
-//!     Centroid { x: 0.05, y: -0.01, mass: Some(45.0), cov: None },
+//!     Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None },
+//!     Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None },
 //!     // ... more centroids ...
 //! ];
 //!
 //! let solve_config = SolveConfig {
-//!     fov_estimate_rad: (15.0_f32).to_radians(),
+//!     fov_estimate_rad: (15.0_f32).to_radians(), // horizontal FOV
+//!     image_width: 1024,
+//!     image_height: 1024,
 //!     fov_max_error_rad: Some((2.0_f32).to_radians()),
 //!     ..Default::default()
 //! };

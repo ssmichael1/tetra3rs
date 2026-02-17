@@ -6,7 +6,7 @@
 //! 3. Thresholding to identify bright pixels
 //! 4. Labeling connected components (blobs)
 //! 5. Computing intensity-weighted centroids for each blob
-//! 6. Converting pixel positions to angular offsets (radians from boresight)
+//! 6. Converting pixel positions to centered coordinates (origin at image center)
 //!
 //! Requires the `image` feature to be enabled.
 //!
@@ -15,13 +15,10 @@
 //! ```no_run
 //! use tetra3::centroid_extraction::{CentroidExtractionConfig, extract_centroids};
 //!
-//! let config = CentroidExtractionConfig {
-//!     fov_horizontal_deg: 10.0,
-//!     ..Default::default()
-//! };
+//! let config = CentroidExtractionConfig::default();
 //!
-//! let centroids = extract_centroids("my_star_image.png", &config).unwrap();
-//! println!("Found {} stars", centroids.len());
+//! let result = extract_centroids("my_star_image.png", &config).unwrap();
+//! println!("Found {} stars", result.centroids.len());
 //! ```
 
 use crate::centroid::Centroid;
@@ -31,10 +28,6 @@ use image::GenericImageView;
 /// Configuration for centroid extraction from an image.
 #[derive(Debug, Clone)]
 pub struct CentroidExtractionConfig {
-    /// Horizontal field of view of the camera in degrees.
-    /// This is used to convert pixel positions to angular offsets.
-    pub fov_horizontal_deg: f32,
-
     /// Number of sigma above background to use as the detection threshold.
     /// Stars brighter than `background + sigma_threshold * noise` are detected.
     /// Default: 5.0
@@ -102,7 +95,6 @@ pub struct CentroidExtractionConfig {
 impl Default for CentroidExtractionConfig {
     fn default() -> Self {
         Self {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 5.0,
             min_pixels: 3,
             max_pixels: 10000,
@@ -119,7 +111,8 @@ impl Default for CentroidExtractionConfig {
 /// Result of centroid extraction, containing the centroids and diagnostic info.
 #[derive(Debug, Clone)]
 pub struct CentroidExtractionResult {
-    /// Extracted centroids in angular coordinates (radians from boresight).
+    /// Extracted centroids in pixel coordinates, with (0, 0) at the image center.
+    /// +X is right (increasing column), +Y is down (increasing row).
     pub centroids: Vec<Centroid>,
 
     /// Image width in pixels.
@@ -144,8 +137,8 @@ pub struct CentroidExtractionResult {
 /// Extract star centroids from an image file.
 ///
 /// Loads the image from `path`, performs background subtraction, blob detection,
-/// and centroid computation. Returns centroids in angular coordinates (radians
-/// from boresight), suitable for use with [`SolverDatabase::solve_from_centroids`].
+/// and centroid computation. Returns centroids in pixel coordinates centered at
+/// the image center, suitable for use with [`SolverDatabase::solve_from_centroids`].
 ///
 /// # Arguments
 ///
@@ -264,17 +257,16 @@ fn extract_from_gray(
     );
     let num_blobs_raw = raw_centroids.len();
 
-    // ── Step 5: convert to angular coordinates ──
-    let fov_h_rad = (config.fov_horizontal_deg as f64).to_radians() as f32;
-    let pixel_scale = fov_h_rad / width as f32;
+    // ── Step 5: convert to centered pixel coordinates ──
+    // Origin at image center, +X right, +Y down
     let cx = width as f32 / 2.0;
     let cy = height as f32 / 2.0;
 
     let mut centroids: Vec<Centroid> = raw_centroids
         .into_iter()
         .map(|rc| Centroid {
-            x: (rc.x_px - cx) * pixel_scale,
-            y: (rc.y_px - cy) * pixel_scale,
+            x: rc.x_px - cx,
+            y: rc.y_px - cy,
             mass: Some(rc.mass),
             cov: None,
         })
@@ -763,7 +755,6 @@ mod tests {
         }
 
         let config = CentroidExtractionConfig {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 3.0,
             min_pixels: 2,
             ..Default::default()
@@ -772,10 +763,10 @@ mod tests {
         let result = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
         assert_eq!(result.centroids.len(), 1);
 
-        // The centroid should be near the center of the image (0, 0 in angular coords)
+        // The centroid should be near the center of the image (0, 0 in pixel coords)
         let c = &result.centroids[0];
-        assert!(c.x.abs() < 0.001, "Expected x near 0, got {}", c.x);
-        assert!(c.y.abs() < 0.001, "Expected y near 0, got {}", c.y);
+        assert!(c.x.abs() < 1.0, "Expected x near 0, got {}", c.x);
+        assert!(c.y.abs() < 1.0, "Expected y near 0, got {}", c.y);
         assert!(c.mass.unwrap() > 0.0);
     }
 
@@ -806,7 +797,6 @@ mod tests {
         }
 
         let config = CentroidExtractionConfig {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 3.0,
             min_pixels: 2,
             ..Default::default()
@@ -851,7 +841,6 @@ mod tests {
         }
 
         let config = CentroidExtractionConfig {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 3.0,
             min_pixels: 2,
             max_centroids: Some(2),
