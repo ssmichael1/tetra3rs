@@ -49,11 +49,6 @@ rand_distr = "0.6.0"
 # integration tests use centroid extraction which needs the "image" feature
 # The test itself reads FITS files directly (minimal parser in-test)
 [[test]]
-name = "tess_solve_test"
-path = "tests/tess_solve_test.rs"
-required-features = ["image"]
-
-[[test]]
 name = "skyview_solve_test"
 path = "tests/skyview_solve_test.rs"
 required-features = ["image"]

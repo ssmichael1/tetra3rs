@@ -68,9 +68,12 @@ fn test_generate_and_solve_hipparcos() {
     // This R satisfies: camera_vec = R * icrs_vec
     let true_quat = UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot));
 
-    // Simulate a 15° FOV camera
+    // Simulate a 15° FOV camera with 1024x1024 sensor
     let fov_rad = 15.0_f32.to_radians();
     let half_fov = fov_rad / 2.0;
+    let image_width = 1024u32;
+    let image_height = 1024u32;
+    let pixel_scale = fov_rad / image_width as f32;
 
     // Find catalog stars visible in this FOV
     let nearby = db
@@ -79,7 +82,7 @@ fn test_generate_and_solve_hipparcos() {
 
     println!("Stars near boresight: {}", nearby.len());
 
-    // Project each visible star to centroid coordinates
+    // Project each visible star to centroid pixel coordinates
     let mut centroids: Vec<Centroid> = Vec::new();
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
@@ -87,14 +90,14 @@ fn test_generate_and_solve_hipparcos() {
         let cam_v = rot * icrs_v;
 
         if cam_v.z > 0.01 {
-            let cx = cam_v.x / cam_v.z; // radians from boresight
-            let cy = cam_v.y / cam_v.z;
+            let cx_rad = cam_v.x / cam_v.z; // radians from boresight
+            let cy_rad = cam_v.y / cam_v.z;
 
             // Only keep stars within the FOV
-            if cx.abs() < half_fov && cy.abs() < half_fov {
+            if cx_rad.abs() < half_fov && cy_rad.abs() < half_fov {
                 centroids.push(Centroid {
-                    x: cx,
-                    y: cy,
+                    x: cx_rad / pixel_scale, // convert to pixels from image center
+                    y: cy_rad / pixel_scale,
                     mass: Some(10.0 - db.star_catalog.stars()[idx].mag), // brighter = higher mass
                     cov: None,
                 });
@@ -112,6 +115,8 @@ fn test_generate_and_solve_hipparcos() {
     // ── Step 3: Solve ──
     let solve_config = SolveConfig {
         fov_estimate_rad: fov_rad,
+        image_width,
+        image_height,
         fov_max_error_rad: Some(5.0_f32.to_radians()), // generous tolerance
         match_radius: 0.01,
         match_threshold: 1e-5,
@@ -204,21 +209,22 @@ fn rotation_from_ra_dec_roll(ra: f32, dec: f32, roll: f32) -> Matrix3<f32> {
     )
 }
 
-/// Generate synthetic centroids for a given rotation and FOV from the database.
-/// If `noise_sigma_rad` is non-zero, adds Gaussian noise to each centroid coordinate.
+/// Generate synthetic centroids (in pixel coordinates) for a given rotation and FOV.
+/// If `noise_sigma_px` is non-zero, adds Gaussian noise (in pixels) to each centroid coordinate.
 fn generate_centroids_with_noise(
     db: &SolverDatabase,
     rot: &Matrix3<f32>,
     boresight_icrs: &Vector3<f32>,
     half_fov: f32,
-    noise_sigma_rad: f32,
+    pixel_scale: f32,
+    noise_sigma_px: f32,
     rng: &mut StdRng,
 ) -> Vec<Centroid> {
     let nearby = db
         .star_catalog
         .query_indices_from_uvec(*boresight_icrs, half_fov * 1.2);
 
-    let noise_dist = Normal::new(0.0f32, noise_sigma_rad).unwrap();
+    let noise_dist = Normal::new(0.0f32, noise_sigma_px.max(1e-30)).unwrap();
 
     let mut centroids = Vec::new();
     for &idx in &nearby {
@@ -227,23 +233,23 @@ fn generate_centroids_with_noise(
         let cam_v = rot * icrs_v;
 
         if cam_v.z > 0.01 {
-            let cx = cam_v.x / cam_v.z;
-            let cy = cam_v.y / cam_v.z;
+            let cx_rad = cam_v.x / cam_v.z;
+            let cy_rad = cam_v.y / cam_v.z;
 
-            if cx.abs() < half_fov && cy.abs() < half_fov {
-                let nx = if noise_sigma_rad > 0.0 {
+            if cx_rad.abs() < half_fov && cy_rad.abs() < half_fov {
+                let nx = if noise_sigma_px > 0.0 {
                     noise_dist.sample(rng)
                 } else {
                     0.0
                 };
-                let ny = if noise_sigma_rad > 0.0 {
+                let ny = if noise_sigma_px > 0.0 {
                     noise_dist.sample(rng)
                 } else {
                     0.0
                 };
                 centroids.push(Centroid {
-                    x: cx + nx,
-                    y: cy + ny,
+                    x: cx_rad / pixel_scale + nx,
+                    y: cy_rad / pixel_scale + ny,
                     mass: Some(10.0 - db.star_catalog.stars()[idx].mag),
                     cov: None,
                 });
@@ -259,10 +265,10 @@ fn generate_centroids(
     rot: &Matrix3<f32>,
     boresight_icrs: &Vector3<f32>,
     half_fov: f32,
+    pixel_scale: f32,
 ) -> Vec<Centroid> {
-    // Use a dummy RNG — noise_sigma_rad=0 means it's never sampled
     let mut dummy_rng = StdRng::seed_from_u64(0);
-    generate_centroids_with_noise(db, rot, boresight_icrs, half_fov, 0.0, &mut dummy_rng)
+    generate_centroids_with_noise(db, rot, boresight_icrs, half_fov, pixel_scale, 0.0, &mut dummy_rng)
 }
 
 /// Solve 1000 random orientations with a 10° FOV camera and report statistics.
@@ -298,9 +304,14 @@ fn test_statistical_1000_random_orientations() {
     // ── Solve config ──
     let fov_rad = 10.0_f32.to_radians();
     let half_fov = fov_rad / 2.0;
+    let image_width = 1024u32;
+    let image_height = 1024u32;
+    let pixel_scale = fov_rad / image_width as f32;
 
     let solve_config = SolveConfig {
         fov_estimate_rad: fov_rad,
+        image_width,
+        image_height,
         fov_max_error_rad: Some(2.0_f32.to_radians()),
         match_radius: 0.01,
         match_threshold: 1e-5,
@@ -340,7 +351,7 @@ fn test_statistical_1000_random_orientations() {
         let rot = rotation_from_ra_dec_roll(ra, dec, roll);
         let boresight_icrs = Vector3::new(dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
 
-        let centroids = generate_centroids(&db, &rot, &boresight_icrs, half_fov);
+        let centroids = generate_centroids(&db, &rot, &boresight_icrs, half_fov, pixel_scale);
 
         if centroids.len() < 4 {
             n_too_few += 1;
@@ -568,7 +579,6 @@ fn test_statistical_1000_noisy_centroids() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
 
     let noise_sigma_arcsec = 4.0;
-    let noise_sigma_rad = (noise_sigma_arcsec / 3600.0_f32).to_radians();
 
     // ── Build database for 10° FOV ──
     let config = GenerateDatabaseConfig {
@@ -594,17 +604,23 @@ fn test_statistical_1000_noisy_centroids() {
         db.props.num_patterns,
         db.pattern_catalog.len()
     );
-    println!(
-        "Centroid noise: σ = {:.1}\" per axis ({:.2e} rad)",
-        noise_sigma_arcsec, noise_sigma_rad
-    );
-
     // ── Solve config ──
     let fov_rad = 10.0_f32.to_radians();
     let half_fov = fov_rad / 2.0;
+    let image_width = 1024u32;
+    let image_height = 1024u32;
+    let pixel_scale = fov_rad / image_width as f32;
+    let noise_sigma_px = (noise_sigma_arcsec / 3600.0_f32).to_radians() / pixel_scale;
+
+    println!(
+        "Centroid noise: σ = {:.1}\" per axis ({:.2} px)",
+        noise_sigma_arcsec, noise_sigma_px
+    );
 
     let solve_config = SolveConfig {
         fov_estimate_rad: fov_rad,
+        image_width,
+        image_height,
         fov_max_error_rad: Some(2.0_f32.to_radians()),
         match_radius: 0.01,
         match_threshold: 1e-5,
@@ -645,7 +661,8 @@ fn test_statistical_1000_noisy_centroids() {
             &rot,
             &boresight_icrs,
             half_fov,
-            noise_sigma_rad,
+            pixel_scale,
+            noise_sigma_px,
             &mut rng,
         );
 

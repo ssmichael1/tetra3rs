@@ -8,20 +8,31 @@ use crate::Vector3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Centroid {
-    pub x: f32,               // Centroid position in radians along columns (image x-axis)
-    pub y: f32,               // Centroid position in radians along rows (image y-axis)
-    pub mass: Option<f32>, // Optional "brightness" value that can be used for filtering, but the exact meaning is image-dependent.
-    pub cov: Option<Matrix2>, // Optional covariance matrix representing the uncertainty in the centroid position.
+    /// Centroid position in pixels along columns (image x-axis).
+    /// Origin is at the image center, so values can be positive or negative.
+    /// +X points right in the image.
+    pub x: f32,
+    /// Centroid position in pixels along rows (image y-axis).
+    /// Origin is at the image center, so values can be positive or negative.
+    /// +Y points down in the image.
+    pub y: f32,
+    /// Optional "brightness" value used for sorting (brighter = higher).
+    /// The exact meaning is image-dependent.
+    pub mass: Option<f32>,
+    /// Optional covariance matrix representing the uncertainty in the centroid position.
+    pub cov: Option<Matrix2>,
 }
 
 impl Centroid {
     /// Unit vector pointing to the centroid's position in camera coordinates.
-    /// Assumes the camera's optical axis is aligned with the +Z axis, +X points to the right in the image, and +Y points down in the image.
-    pub fn uvec(&self) -> Vector3 {
-        let x = self.x;
-        let y = self.y;
-        // For small angles, we can approximate the unit vector as:
-        // uvec ≈ (x, y, 1) normalized
+    ///
+    /// Converts pixel coordinates to angular coordinates using the given pixel scale
+    /// (radians per pixel), then computes a unit vector assuming the camera's optical
+    /// axis is aligned with +Z, +X right, +Y down.
+    pub fn uvec(&self, pixel_scale: f32) -> Vector3 {
+        let x = self.x * pixel_scale;
+        let y = self.y * pixel_scale;
+        // For small angles: uvec ≈ (x, y, 1) normalized
         let z = 1.0;
         let norm = (x * x + y * y + z * z).sqrt();
         Vector3::new(x / norm, y / norm, z / norm)

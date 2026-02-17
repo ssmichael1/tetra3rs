@@ -31,8 +31,12 @@ impl SolverDatabase {
     /// Solve for the camera pointing direction given image centroids.
     ///
     /// Centroids should have the `mass` field populated for brightness sorting.
-    /// Centroid (x, y) are angular offsets from boresight in radians.
-    /// Camera frame: +X right, +Y down, +Z boresight.
+    /// Centroid (x, y) are in pixel coordinates with (0, 0) at the image center.
+    /// +X points right, +Y points down in the image.
+    ///
+    /// The `SolveConfig` must specify `fov_estimate_rad` (horizontal FOV in radians)
+    /// and `image_width` / `image_height` (in pixels) so the solver can compute the
+    /// pixel scale.
     ///
     /// Returns a `SolveResult` with the ICRS→camera quaternion on success.
     pub fn solve_from_centroids(
@@ -41,6 +45,8 @@ impl SolverDatabase {
         config: &SolveConfig,
     ) -> SolveResult {
         let t0 = Instant::now();
+
+        let pixel_scale = config.pixel_scale();
 
         // Sort centroids by brightness (highest mass = brightest first).
         // Centroids without mass are placed last.
@@ -59,11 +65,11 @@ impl SolverDatabase {
         }
 
         // ── Compute unit vectors in camera frame ──
-        // Centroid (x, y) in radians → uvec = normalize(x, y, 1)
+        // Centroid (x, y) in pixels → scale to radians → uvec = normalize(x_rad, y_rad, 1)
         let centroid_vectors: Vec<[f32; 3]> = sorted_indices
             .iter()
             .map(|&i| {
-                let v = centroids[i].uvec();
+                let v = centroids[i].uvec(pixel_scale);
                 [v.x, v.y, v.z]
             })
             .collect();
