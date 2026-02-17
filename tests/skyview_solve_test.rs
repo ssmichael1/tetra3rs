@@ -178,8 +178,9 @@ fn uvec_to_radec(v: &Vector3<f32>) -> (f64, f64) {
 }
 
 fn angular_separation(a: &Vector3<f32>, b: &Vector3<f32>) -> f32 {
-    let dot = a.dot(b).clamp(-1.0, 1.0);
-    dot.acos()
+    let cross = a.cross(b).norm();
+    let dot = a.dot(b);
+    cross.atan2(dot)
 }
 
 /// Build attitude quaternion from CDELT-based WCS (TAN projection, no rotation).
