@@ -18,7 +18,9 @@ use tetra3::{
 enum FitsValue {
     Float(f64),
     Int(i64),
+    #[allow(dead_code)]
     Str(String),
+    #[allow(dead_code)]
     Bool(bool),
 }
 
@@ -251,14 +253,8 @@ fn wcs_to_quaternion(hdu: &FitsHdu) -> UnitQuaternion<f32> {
     //   +Z = Boresight
     //   Verify: East × North = Boresight ✓ (right-handed)
     let cam_x_icrs = Vector3::new(-sin_ra, cos_ra, 0.0).normalize();
-    let cam_y_icrs =
-        Vector3::new(-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec).normalize();
-    let cam_z_icrs = Vector3::new(
-        cos_dec * cos_ra,
-        cos_dec * sin_ra,
-        sin_dec,
-    )
-    .normalize();
+    let cam_y_icrs = Vector3::new(-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec).normalize();
+    let cam_z_icrs = Vector3::new(cos_dec * cos_ra, cos_dec * sin_ra, sin_dec).normalize();
 
     // Build rotation matrix: R * icrs = tangent-plane frame
     let rot = nalgebra::Matrix3::new(

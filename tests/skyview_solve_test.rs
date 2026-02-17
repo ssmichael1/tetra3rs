@@ -20,6 +20,7 @@ use tetra3::{
 enum FitsValue {
     Float(f64),
     Int(i64),
+    #[allow(dead_code)]
     Str(String),
 }
 
