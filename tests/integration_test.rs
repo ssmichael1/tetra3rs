@@ -5,6 +5,8 @@ use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal};
+#[cfg(feature = "image")]
+use tetra3::{extract_centroids, CentroidExtractionConfig};
 use tetra3::{Centroid, GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 
 /// Build a small test database (wide FOV for speed) and solve a synthetic image.
@@ -627,6 +629,7 @@ fn test_statistical_1000_noisy_centroids() {
     let mut n_timeout = 0u32;
 
     let mut all_errors_arcsec = Vec::new();
+    let mut all_roll_errors_arcsec = Vec::new();
     let mut all_rmse_arcsec = Vec::new();
     let mut all_match_counts = Vec::new();
     let mut all_solve_times_ms = Vec::new();
@@ -666,6 +669,22 @@ fn test_statistical_1000_noisy_centroids() {
                 let true_boresight = true_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
                 let err_rad = angular_separation(&solved_boresight, &true_boresight);
                 let err_arcsec = err_rad.to_degrees() * 3600.0;
+
+                // Roll error: angle between the camera x-axes (projected
+                // perpendicular to the true boresight) of the true vs solved rotations.
+                let cam_x = Vector3::new(1.0_f32, 0.0, 0.0);
+                let true_x_icrs = true_quat.inverse() * cam_x;
+                let solved_x_icrs = solved_quat.inverse() * cam_x;
+                let proj_true = true_x_icrs - true_boresight * true_x_icrs.dot(&true_boresight);
+                let proj_solved =
+                    solved_x_icrs - true_boresight * solved_x_icrs.dot(&true_boresight);
+                let roll_err_rad = proj_true
+                    .normalize()
+                    .dot(&proj_solved.normalize())
+                    .clamp(-1.0, 1.0)
+                    .acos();
+                let roll_err_arcsec = roll_err_rad.to_degrees() * 3600.0;
+                all_roll_errors_arcsec.push(roll_err_arcsec);
 
                 all_errors_arcsec.push(err_arcsec);
                 if let Some(n) = result.num_matches {
@@ -767,6 +786,24 @@ fn test_statistical_1000_noisy_centroids() {
         let max = *sorted.last().unwrap();
 
         println!("\n  Boresight error — all solves (arcsec):");
+        println!("    Mean:   {:8.2}", mean);
+        println!("    Median: {:8.2}", median);
+        println!("    P95:    {:8.2}", p95);
+        println!("    P99:    {:8.2}", p99);
+        println!("    Max:    {:8.2}", max);
+    }
+
+    if !all_roll_errors_arcsec.is_empty() {
+        let mut sorted = all_roll_errors_arcsec.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = sorted.len();
+        let mean: f32 = sorted.iter().sum::<f32>() / n as f32;
+        let median = sorted[n / 2];
+        let p95 = sorted[(n as f64 * 0.95) as usize];
+        let p99 = sorted[(n as f64 * 0.99) as usize];
+        let max = *sorted.last().unwrap();
+
+        println!("\n  Roll error — all solves (arcsec):");
         println!("    Mean:   {:8.2}", mean);
         println!("    Median: {:8.2}", median);
         println!("    P95:    {:8.2}", p95);
