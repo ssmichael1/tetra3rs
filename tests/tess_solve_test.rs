@@ -7,6 +7,8 @@
 //!
 //! The solver's auto-parity detection handles the CD matrix orientation.
 
+mod test_data;
+
 use nalgebra::Vector3;
 use std::collections::HashMap;
 use std::fs::File;
@@ -236,7 +238,8 @@ fn build_tess_database() -> SolverDatabase {
         catalog_nside: 8,
     };
 
-    SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+    let catalog_path = test_data::ensure_test_file("data/hip2.dat");
+    SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
         .expect("Failed to generate database from Hipparcos catalog")
 }
 
@@ -245,6 +248,12 @@ fn test_tess_fits_solve() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
+
+    // Ensure all test files are downloaded
+    test_data::ensure_test_file("data/hip2.dat");
+    for tc in TESS_TEST_CASES {
+        test_data::ensure_test_file(&format!("data/tess_test_images/{}", tc.filename));
+    }
 
     let db = build_tess_database();
     println!("\n══════════════════════════════════════════════════════════════");

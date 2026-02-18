@@ -49,10 +49,16 @@ codegen-units = 1
 [dev-dependencies]
 rand = "0.10.0"
 rand_distr = "0.6.0"
+ureq = "3"
 
 # integration tests use centroid extraction which needs the "image" feature
 # The test itself reads FITS files directly (minimal parser in-test)
 [[test]]
 name = "skyview_solve_test"
 path = "tests/skyview_solve_test.rs"
+required-features = ["image"]
+
+[[test]]
+name = "tess_solve_test"
+path = "tests/tess_solve_test.rs"
 required-features = ["image"]
