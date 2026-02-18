@@ -5,9 +5,12 @@
 use numpy::ndarray;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 
 use tetra3::centroid_extraction::CentroidExtractionConfig;
+use tetra3::distortion::{
+    fit_radial_distortion, Distortion, DistortionFitConfig, RadialDistortion,
+};
 use tetra3::solver::{
     GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus, SolverDatabase,
 };
@@ -97,6 +100,25 @@ struct PyCentroid {
 
 #[pymethods]
 impl PyCentroid {
+    /// Create a new Centroid.
+    ///
+    /// Args:
+    ///     x: X position in pixels (origin at image center, +X right).
+    ///     y: Y position in pixels (origin at image center, +Y down).
+    ///     brightness: Integrated intensity above background (optional).
+    #[new]
+    #[pyo3(signature = (x, y, brightness = None))]
+    fn new(x: f32, y: f32, brightness: Option<f32>) -> Self {
+        Self {
+            inner: tetra3::Centroid {
+                x,
+                y,
+                mass: brightness,
+                cov: None,
+            },
+        }
+    }
+
     /// X position in pixels (origin at image center, +X right).
     #[getter]
     fn x(&self) -> f32 {
@@ -130,6 +152,75 @@ impl PyCentroid {
         })
     }
 
+    /// Return a new Centroid with position shifted by (dx, dy).
+    ///
+    /// Preserves brightness and covariance.
+    ///
+    /// Args:
+    ///     dx: X offset in pixels.
+    ///     dy: Y offset in pixels.
+    ///
+    /// Returns:
+    ///     A new Centroid with shifted position.
+    fn with_offset(&self, dx: f32, dy: f32) -> Self {
+        Self {
+            inner: tetra3::Centroid {
+                x: self.inner.x + dx,
+                y: self.inner.y + dy,
+                mass: self.inner.mass,
+                cov: self.inner.cov,
+            },
+        }
+    }
+
+    /// Remove lens distortion from this centroid's position (distorted → ideal).
+    ///
+    /// Takes a distortion model (RadialDistortion)
+    /// and returns a new Centroid at the corrected position.
+    /// Brightness and covariance are preserved.
+    ///
+    /// Args:
+    ///     distortion: A RadialDistortion model.
+    ///
+    /// Returns:
+    ///     A new Centroid with undistorted (ideal) position.
+    fn undistort(&self, distortion: &Bound<'_, pyo3::PyAny>) -> PyResult<Self> {
+        let dist = extract_distortion(distortion)?;
+        let (xu, yu) = dist.undistort(self.inner.x as f64, self.inner.y as f64);
+        Ok(Self {
+            inner: tetra3::Centroid {
+                x: xu as f32,
+                y: yu as f32,
+                mass: self.inner.mass,
+                cov: self.inner.cov,
+            },
+        })
+    }
+
+    /// Apply lens distortion to this centroid's position (ideal → distorted).
+    ///
+    /// Takes a distortion model (RadialDistortion)
+    /// and returns a new Centroid at the distorted position.
+    /// Brightness and covariance are preserved.
+    ///
+    /// Args:
+    ///     distortion: A RadialDistortion model.
+    ///
+    /// Returns:
+    ///     A new Centroid with distorted position.
+    fn distort(&self, distortion: &Bound<'_, pyo3::PyAny>) -> PyResult<Self> {
+        let dist = extract_distortion(distortion)?;
+        let (xd, yd) = dist.distort(self.inner.x as f64, self.inner.y as f64);
+        Ok(Self {
+            inner: tetra3::Centroid {
+                x: xd as f32,
+                y: yd as f32,
+                mass: self.inner.mass,
+                cov: self.inner.cov,
+            },
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Centroid(x={:.2}, y={:.2}, brightness={:.1})",
@@ -160,6 +251,17 @@ impl PyCentroid {
     }
 }
 
+/// Helper: extract a Distortion enum from a Python RadialDistortion.
+fn extract_distortion(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Distortion> {
+    if let Ok(r) = obj.extract::<PyRadialDistortion>() {
+        Ok(Distortion::Radial(r.inner))
+    } else {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "distortion must be a RadialDistortion",
+        ))
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PySolveResult — wraps SolveResult
 // ═══════════════════════════════════════════════════════════════════════════
@@ -168,7 +270,8 @@ impl PyCentroid {
 ///
 /// Returned by ``SolverDatabase.solve_from_centroids`` on a successful match.
 /// Contains the camera attitude, matched stars, and error statistics.
-#[pyclass(name = "SolveResult", frozen)]
+#[pyclass(name = "SolveResult", frozen, from_py_object)]
+#[derive(Clone)]
 struct PySolveResult {
     inner: SolveResult,
     /// Cached derived quantities (computed once at construction).
@@ -485,6 +588,8 @@ impl PySolverDatabase {
     ///     match_threshold: False-positive probability threshold. Default 1e-5.
     ///     solve_timeout_ms: Timeout in milliseconds. None = no timeout.
     ///     match_max_error: Maximum edge-ratio error. None = use database value.
+    ///     distortion: A RadialDistortion model to apply
+    ///         to centroids before solving. None = no distortion correction.
     ///
     /// Returns:
     ///     SolveResult on success, None if no match was found.
@@ -501,6 +606,7 @@ impl PySolverDatabase {
         match_threshold = 1e-5,
         solve_timeout_ms = Some(5000),
         match_max_error = None,
+        distortion = None,
     ))]
     fn solve_from_centroids<'py>(
         &self,
@@ -517,6 +623,7 @@ impl PySolverDatabase {
         match_threshold: f64,
         solve_timeout_ms: Option<u64>,
         match_max_error: Option<f32>,
+        distortion: Option<&Bound<'py, pyo3::PyAny>>,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
         let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
@@ -597,6 +704,12 @@ impl PySolverDatabase {
             (None, None) => None,
         };
 
+        // Parse distortion model if provided
+        let dist_model = match distortion {
+            Some(obj) => Some(extract_distortion(obj)?),
+            None => None,
+        };
+
         let config = SolveConfig {
             fov_estimate_rad: fov_rad,
             image_width: img_width,
@@ -606,6 +719,7 @@ impl PySolverDatabase {
             match_threshold,
             solve_timeout_ms,
             match_max_error,
+            distortion: dist_model,
         };
 
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
@@ -724,6 +838,55 @@ impl PySolverDatabase {
                 inner: self.inner.star_catalog.stars[idx].clone(),
             })
             .collect()
+    }
+
+    // ── Distortion fitting ──────────────────────────────────────────────
+
+    /// Fit a radial distortion model (k1, k2, k3) from solve results.
+    ///
+    /// Args:
+    ///     solve_results: A SolveResult or list of SolveResult objects.
+    ///     centroids: Matching centroids.
+    ///     image_width: Image width in pixels.
+    ///     sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
+    ///     max_iterations: Maximum sigma-clip iterations. Default 20.
+    ///     stage2_threshold_px: Loose pixel threshold for second-stage recovery.
+    ///         None to disable. Default 5.0.
+    ///
+    /// Returns:
+    ///     DistortionFitResult with the fitted radial model and statistics.
+    #[pyo3(signature = (
+        solve_results,
+        centroids,
+        image_width,
+        sigma_clip = 3.0,
+        max_iterations = 20,
+        stage2_threshold_px = Some(5.0),
+    ))]
+    fn fit_radial_distortion<'py>(
+        &self,
+        _py: Python<'py>,
+        solve_results: &Bound<'py, pyo3::PyAny>,
+        centroids: &Bound<'py, pyo3::PyAny>,
+        image_width: u32,
+        sigma_clip: f64,
+        max_iterations: u32,
+        stage2_threshold_px: Option<f64>,
+    ) -> PyResult<PyDistortionFitResult> {
+        let (sr_vec, cent_vec) = parse_solve_results_and_centroids(solve_results, centroids)?;
+
+        let sr_refs: Vec<&SolveResult> = sr_vec.iter().collect();
+        let cent_refs: Vec<&[Centroid]> = cent_vec.iter().map(|v| v.as_slice()).collect();
+
+        let config = DistortionFitConfig {
+            sigma_clip,
+            max_iterations,
+            stage2_threshold_px,
+        };
+
+        let result = fit_radial_distortion(&sr_refs, &cent_refs, &self.inner, image_width, &config);
+
+        Ok(PyDistortionFitResult { inner: result })
     }
 }
 
@@ -865,6 +1028,232 @@ fn extract_centroids<'py>(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Distortion models
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+///
+/// Coordinates are in pixels relative to the optical center (image center).
+///
+/// Example:
+///     d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+///     x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
+#[pyclass(name = "RadialDistortion", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyRadialDistortion {
+    inner: RadialDistortion,
+}
+
+#[pymethods]
+impl PyRadialDistortion {
+    /// Create a radial distortion model.
+    ///
+    /// Args:
+    ///     k1: First radial coefficient (barrel < 0, pincushion > 0). Default 0.
+    ///     k2: Second radial coefficient. Default 0.
+    ///     k3: Third radial coefficient. Default 0.
+    #[new]
+    #[pyo3(signature = (k1 = 0.0, k2 = 0.0, k3 = 0.0))]
+    fn new(k1: f64, k2: f64, k3: f64) -> Self {
+        Self {
+            inner: RadialDistortion::new(k1, k2, k3),
+        }
+    }
+
+    #[getter]
+    fn k1(&self) -> f64 {
+        self.inner.k1
+    }
+
+    #[getter]
+    fn k2(&self) -> f64 {
+        self.inner.k2
+    }
+
+    #[getter]
+    fn k3(&self) -> f64 {
+        self.inner.k3
+    }
+
+    /// Forward distortion: ideal → distorted.
+    fn distort(&self, x: f64, y: f64) -> (f64, f64) {
+        self.inner.distort(x, y)
+    }
+
+    /// Inverse distortion: distorted → ideal.
+    fn undistort(&self, x: f64, y: f64) -> (f64, f64) {
+        self.inner.undistort(x, y)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e})",
+            self.inner.k1, self.inner.k2, self.inner.k3
+        )
+    }
+}
+
+/// Result of a distortion fitting procedure.
+///
+/// Attributes:
+///     model: The fitted distortion model (RadialDistortion).
+///     rmse_before_px: RMS pixel residual before distortion correction.
+///     rmse_after_px: RMS pixel residual after distortion correction.
+///     n_inliers: Number of inlier matches in the final fit.
+///     n_outliers: Number of rejected outliers.
+///     iterations: Number of sigma-clip iterations performed.
+///     inlier_mask: Boolean array indicating inlier/outlier status per match.
+#[pyclass(name = "DistortionFitResult", frozen)]
+struct PyDistortionFitResult {
+    inner: tetra3::distortion::DistortionFitResult,
+}
+
+#[pymethods]
+impl PyDistortionFitResult {
+    /// The fitted distortion model.
+    ///
+    /// Returns a RadialDistortion, or None if fitting failed.
+    #[getter]
+    fn model<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        match &self.inner.model {
+            Distortion::Radial(r) => {
+                let obj = PyRadialDistortion { inner: r.clone() };
+                Ok(obj.into_pyobject(py)?.into_any().unbind())
+            }
+            Distortion::None => Ok(py.None()),
+        }
+    }
+
+    #[getter]
+    fn rmse_before_px(&self) -> f64 {
+        self.inner.rmse_before_px
+    }
+
+    #[getter]
+    fn rmse_after_px(&self) -> f64 {
+        self.inner.rmse_after_px
+    }
+
+    #[getter]
+    fn n_inliers(&self) -> usize {
+        self.inner.n_inliers
+    }
+
+    #[getter]
+    fn n_outliers(&self) -> usize {
+        self.inner.n_outliers
+    }
+
+    #[getter]
+    fn iterations(&self) -> u32 {
+        self.inner.iterations
+    }
+
+    /// Boolean inlier mask as a numpy array.
+    #[getter]
+    fn inlier_mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_vec(py, self.inner.inlier_mask.clone())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DistortionFitResult(rmse={:.3} → {:.3} px, inliers={}, outliers={}, iters={})",
+            self.inner.rmse_before_px,
+            self.inner.rmse_after_px,
+            self.inner.n_inliers,
+            self.inner.n_outliers,
+            self.inner.iterations,
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Helper: parse solve results + centroids from Python
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse solve_results and centroids from Python objects.
+///
+/// Accepts either a single SolveResult + centroids, or lists of each.
+fn parse_solve_results_and_centroids(
+    solve_results: &Bound<'_, pyo3::PyAny>,
+    centroids: &Bound<'_, pyo3::PyAny>,
+) -> PyResult<(Vec<SolveResult>, Vec<Vec<Centroid>>)> {
+    // Try to extract as a single SolveResult first
+    let sr_vec: Vec<SolveResult> = if let Ok(single) = solve_results.extract::<PySolveResult>() {
+        vec![single.inner]
+    } else if let Ok(list) = solve_results.cast::<pyo3::types::PyList>() {
+        list.iter()
+            .map(|item| {
+                let sr: PySolveResult = item.extract()?;
+                Ok(sr.inner)
+            })
+            .collect::<PyResult<Vec<SolveResult>>>()?
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "solve_results must be a SolveResult or list of SolveResult objects",
+        ));
+    };
+
+    // Parse centroids: if a single solve result, wrap in a list
+    let cent_vec: Vec<Vec<Centroid>> = if sr_vec.len() == 1 {
+        vec![parse_centroids_single(centroids)?]
+    } else if let Ok(list) = centroids.cast::<pyo3::types::PyList>() {
+        if list.len() != sr_vec.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "centroids list has {} elements but solve_results has {}",
+                list.len(),
+                sr_vec.len()
+            )));
+        }
+        list.iter()
+            .map(|item| parse_centroids_single(&item))
+            .collect::<PyResult<Vec<Vec<Centroid>>>>()?
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "When solve_results is a list, centroids must also be a list of the same length",
+        ));
+    };
+
+    Ok((sr_vec, cent_vec))
+}
+
+/// Parse a single set of centroids from Python (list of Centroid or Nx2/Nx3 array).
+fn parse_centroids_single(centroids: &Bound<'_, pyo3::PyAny>) -> PyResult<Vec<Centroid>> {
+    if let Ok(list) = centroids.cast::<pyo3::types::PyList>() {
+        list.iter()
+            .map(|item| {
+                let c: PyCentroid = item.extract()?;
+                Ok(c.inner)
+            })
+            .collect()
+    } else if let Ok(arr) = centroids.extract::<PyReadonlyArray2<f64>>() {
+        let a = arr.as_array();
+        let ncols = a.shape()[1];
+        if ncols < 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "centroids array must have at least 2 columns (x, y)",
+            ));
+        }
+        Ok((0..a.shape()[0])
+            .map(|i| Centroid {
+                x: a[[i, 0]] as f32,
+                y: a[[i, 1]] as f32,
+                mass: if ncols >= 3 {
+                    Some(a[[i, 2]] as f32)
+                } else {
+                    None
+                },
+                cov: None,
+            })
+            .collect())
+    } else {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "centroids must be a list of Centroid objects or an Nx2/Nx3 numpy array",
+        ))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Module definition
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -878,6 +1267,74 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCatalogStar>()?;
     m.add_class::<PySolveResult>()?;
     m.add_class::<PySolverDatabase>()?;
+    m.add_class::<PyRadialDistortion>()?;
+    m.add_class::<PyDistortionFitResult>()?;
     m.add_function(wrap_pyfunction!(extract_centroids, m)?)?;
+    m.add_function(wrap_pyfunction!(undistort_centroids, m)?)?;
+    m.add_function(wrap_pyfunction!(distort_centroids, m)?)?;
     Ok(())
+}
+
+/// Apply distortion correction to a list of centroids (distorted → ideal).
+///
+/// Returns a new list with corrected positions; brightness and covariance are preserved.
+///
+/// Args:
+///     centroids: List of Centroid objects.
+///     distortion: A RadialDistortion model.
+///
+/// Returns:
+///     A new list of Centroid objects with undistorted positions.
+#[pyfunction]
+fn undistort_centroids(
+    centroids: Vec<PyCentroid>,
+    distortion: &Bound<'_, pyo3::PyAny>,
+) -> PyResult<Vec<PyCentroid>> {
+    let dist = extract_distortion(distortion)?;
+    Ok(centroids
+        .iter()
+        .map(|c| {
+            let (xu, yu) = dist.undistort(c.inner.x as f64, c.inner.y as f64);
+            PyCentroid {
+                inner: tetra3::Centroid {
+                    x: xu as f32,
+                    y: yu as f32,
+                    mass: c.inner.mass,
+                    cov: c.inner.cov,
+                },
+            }
+        })
+        .collect())
+}
+
+/// Apply forward distortion to a list of centroids (ideal → distorted).
+///
+/// Returns a new list with distorted positions; brightness and covariance are preserved.
+///
+/// Args:
+///     centroids: List of Centroid objects.
+///     distortion: A RadialDistortion model.
+///
+/// Returns:
+///     A new list of Centroid objects with distorted positions.
+#[pyfunction]
+fn distort_centroids(
+    centroids: Vec<PyCentroid>,
+    distortion: &Bound<'_, pyo3::PyAny>,
+) -> PyResult<Vec<PyCentroid>> {
+    let dist = extract_distortion(distortion)?;
+    Ok(centroids
+        .iter()
+        .map(|c| {
+            let (xd, yd) = dist.distort(c.inner.x as f64, c.inner.y as f64);
+            PyCentroid {
+                inner: tetra3::Centroid {
+                    x: xd as f32,
+                    y: yd as f32,
+                    mass: c.inner.mass,
+                    cov: c.inner.cov,
+                },
+            }
+        })
+        .collect())
 }

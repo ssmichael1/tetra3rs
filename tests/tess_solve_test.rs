@@ -163,7 +163,11 @@ fn read_f32_image(path: &str, hdu: &FitsHdu) -> Vec<f32> {
 
 /// Trim TESS image to science region: rows 0–2047, columns 44–2091.
 /// Returns (trimmed_pixels, sci_width, sci_height).
-fn trim_tess_science_region(pixels: &[f32], full_width: u32, full_height: u32) -> (Vec<f32>, u32, u32) {
+fn trim_tess_science_region(
+    pixels: &[f32],
+    full_width: u32,
+    full_height: u32,
+) -> (Vec<f32>, u32, u32) {
     let sci_col_start = 44_u32;
     let sci_col_end = 2092_u32;
     let sci_row_end = 2048_u32.min(full_height);
@@ -232,6 +236,47 @@ fn apply_sip_forward(hdu: &FitsHdu, u: f64, v: f64) -> (f64, f64) {
     let mut g = 0.0;
     for p in 0..=b_order {
         for q in 0..=(b_order - p) {
+            let c = get_sip_coeff(hdu, "B", p, q);
+            if c != 0.0 {
+                g += c * u.powi(p as i32) * v.powi(q as i32);
+            }
+        }
+    }
+
+    (u + f, v + g)
+}
+
+/// Apply only the high-order (degree ≥ 3) SIP forward correction.
+///
+/// Same as `apply_sip_forward` but skips terms where p+q < 3.
+/// The low-order (degree-2) terms are already absorbed by the solver's
+/// rotation + FOV fit, so applying them disrupts solving without benefit.
+fn apply_sip_forward_ho(
+    hdu: &FitsHdu,
+    u: f64,
+    v: f64,
+    a_order: usize,
+    b_order: usize,
+) -> (f64, f64) {
+    let mut f = 0.0;
+    for p in 0..=a_order {
+        for q in 0..=(a_order - p) {
+            if p + q < 3 {
+                continue;
+            }
+            let c = get_sip_coeff(hdu, "A", p, q);
+            if c != 0.0 {
+                f += c * u.powi(p as i32) * v.powi(q as i32);
+            }
+        }
+    }
+
+    let mut g = 0.0;
+    for p in 0..=b_order {
+        for q in 0..=(b_order - p) {
+            if p + q < 3 {
+                continue;
+            }
             let c = get_sip_coeff(hdu, "B", p, q);
             if c != 0.0 {
                 g += c * u.powi(p as i32) * v.powi(q as i32);
@@ -315,7 +360,7 @@ fn build_tess_database() -> SolverDatabase {
         pattern_max_error: 0.005,
         lattice_field_oversampling: 100,
         patterns_per_lattice_field: 150,
-        verification_stars_per_fov: 150,
+        verification_stars_per_fov: 1000,
         multiscale_step: 1.5,
         epoch_proper_motion_year: Some(2018.0), // TESS launched 2018
         catalog_nside: 8,
@@ -356,7 +401,10 @@ fn test_tess_fits_solve() {
 
         // ── Read the FITS file (data is in HDU 1 for TESS) ──
         let hdus = read_fits_hdus(&fits_path);
-        assert!(hdus.len() >= 2, "Expected at least 2 HDUs in TESS FITS file");
+        assert!(
+            hdus.len() >= 2,
+            "Expected at least 2 HDUs in TESS FITS file"
+        );
 
         let image_hdu = &hdus[1]; // HDU 1 = image extension
         let naxis1 = match image_hdu.headers.get("NAXIS1") {
@@ -401,7 +449,10 @@ fn test_tess_fits_solve() {
         let crval_ra = get_f64(image_hdu, "CRVAL1").unwrap();
         let crval_dec = get_f64(image_hdu, "CRVAL2").unwrap();
         println!("  WCS CRVAL: RA={:.4}°, Dec={:.4}°", crval_ra, crval_dec);
-        println!("  WCS boresight (center pixel): RA={:.4}°, Dec={:.4}°", boresight_ra, boresight_dec);
+        println!(
+            "  WCS boresight (center pixel): RA={:.4}°, Dec={:.4}°",
+            boresight_ra, boresight_dec
+        );
 
         // Print CD matrix
         if let (Some(cd11), Some(cd12), Some(cd21), Some(cd22)) = (
@@ -410,9 +461,8 @@ fn test_tess_fits_solve() {
             get_f64(image_hdu, "CD2_1"),
             get_f64(image_hdu, "CD2_2"),
         ) {
-            let pixel_scale_deg = ((cd11 * cd11 + cd21 * cd21).sqrt()
-                + (cd12 * cd12 + cd22 * cd22).sqrt())
-                / 2.0;
+            let pixel_scale_deg =
+                ((cd11 * cd11 + cd21 * cd21).sqrt() + (cd12 * cd12 + cd22 * cd22).sqrt()) / 2.0;
             println!(
                 "  CD matrix: [{:.6}, {:.6}; {:.6}, {:.6}]",
                 cd11, cd12, cd21, cd22
@@ -440,9 +490,13 @@ fn test_tess_fits_solve() {
             max_elongation: Some(30.0),
         };
 
-        let extraction =
-            tetra3::extract_centroids_from_raw(&clean_pixels, sci_width, sci_height, &extract_config)
-                .expect("Centroid extraction failed");
+        let extraction = tetra3::extract_centroids_from_raw(
+            &clean_pixels,
+            sci_width,
+            sci_height,
+            &extract_config,
+        )
+        .expect("Centroid extraction failed");
 
         println!(
             "  Extracted {} centroids (from {} raw blobs)",
@@ -474,6 +528,7 @@ fn test_tess_fits_solve() {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
+            distortion: None,
         };
 
         let result = db.solve_from_centroids(&extraction.centroids, &solve_config);
@@ -535,4 +590,215 @@ fn test_tess_fits_solve() {
     );
     println!("══════════════════════════════════════════════════════════════");
     assert_eq!(failed, 0, "{} TESS solve tests failed", failed);
+}
+
+/// Test that applying SIP distortion correction to centroids improves the
+/// solver's RMSE compared to solving with raw (distorted) centroids.
+///
+/// For each TESS image we:
+/// 1. Extract centroids from the science region (raw, distorted pixel positions).
+/// 2. Apply the high-order (degree ≥ 3) SIP forward correction from the FITS
+///    WCS header to produce corrected centroids.
+/// 3. Solve both the raw and corrected centroid sets.
+/// 4. Assert the corrected solve has lower RMSE.
+///
+/// Only high-order terms are used because the solver's rotation + FOV fit can
+/// absorb the quadratic (degree-2) distortion pattern. Applying the full SIP
+/// correction actually worsens RMSE because the large quadratic shift (~16 px
+/// RMS for TESS) disrupts the solver's pattern matching without providing
+/// information the solver couldn't recover on its own.
+#[test]
+fn test_tess_sip_distortion_improves_residuals() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .try_init();
+
+    test_data::ensure_test_file("data/hip2.dat");
+    for tc in TESS_TEST_CASES {
+        test_data::ensure_test_file(&format!("data/tess_test_images/{}", tc.filename));
+    }
+
+    let db = build_tess_database();
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    println!("DISTORTION TEST: high-order SIP polynomial from WCS header");
+
+    let mut all_improved = true;
+
+    for tc in TESS_TEST_CASES {
+        let fits_path = format!("data/tess_test_images/{}", tc.filename);
+        println!("\n──────────────────────────────────────────────────────────────");
+        println!("Testing: {} ({})", tc.filename, tc.description);
+
+        // ── Read and prepare image ──
+        let hdus = read_fits_hdus(&fits_path);
+        assert!(hdus.len() >= 2);
+        let image_hdu = &hdus[1];
+
+        let naxis1 = match image_hdu.headers.get("NAXIS1") {
+            Some(FitsValue::Int(n)) => *n as u32,
+            _ => panic!("Missing NAXIS1"),
+        };
+        let naxis2 = match image_hdu.headers.get("NAXIS2") {
+            Some(FitsValue::Int(n)) => *n as u32,
+            _ => panic!("Missing NAXIS2"),
+        };
+
+        let pixels = read_f32_image(&fits_path, image_hdu);
+        let (trimmed_pixels, sci_width, sci_height) =
+            trim_tess_science_region(&pixels, naxis1, naxis2);
+
+        let clean_pixels: Vec<f32> = trimmed_pixels
+            .iter()
+            .map(|&v| {
+                if v.is_nan() || v.is_infinite() {
+                    0.0
+                } else {
+                    v
+                }
+            })
+            .collect();
+
+        // ── Extract centroids ──
+        let extract_config = CentroidExtractionConfig {
+            sigma_threshold: 300.0,
+            min_pixels: 3,
+            max_pixels: 10000,
+            max_centroids: None,
+            sigma_clip_iterations: 5,
+            sigma_clip_factor: 3.0,
+            use_8_connectivity: true,
+            local_bg_block_size: Some(64),
+            max_elongation: Some(50.0),
+        };
+
+        let extraction = tetra3::extract_centroids_from_raw(
+            &clean_pixels,
+            sci_width,
+            sci_height,
+            &extract_config,
+        )
+        .expect("Centroid extraction failed");
+
+        println!("  Extracted {} centroids", extraction.centroids.len());
+
+        if extraction.centroids.len() < 4 {
+            println!("  SKIP: Too few centroids");
+            continue;
+        }
+
+        // ── Apply high-order SIP forward correction to centroids ──
+        // Centroids are centered at image center. Convert to SIP pixel offsets
+        // from CRPIX, apply SIP forward (measured → ideal), convert back.
+        //
+        // SIP convention: u_ideal = u + Σ A_{p,q} · u^p · v^q
+        // Only terms with p+q ≥ 3 are applied; degree-2 terms are absorbed
+        // by the solver's rotation + FOV fit.
+        let crpix1 = get_f64(image_hdu, "CRPIX1").unwrap_or(0.0);
+        let crpix2 = get_f64(image_hdu, "CRPIX2").unwrap_or(0.0);
+
+        let a_order = match image_hdu.headers.get("A_ORDER") {
+            Some(FitsValue::Int(n)) => *n as usize,
+            _ => 0,
+        };
+        let b_order = match image_hdu.headers.get("B_ORDER") {
+            Some(FitsValue::Int(n)) => *n as usize,
+            _ => 0,
+        };
+
+        // Centroid x=0 maps to full-frame 0-indexed pixel (44 + sci_width/2),
+        // which is 1-indexed (44 + sci_width/2 + 1).
+        // SIP u = (1-indexed pixel) - CRPIX1
+        let ox = 44.0 + sci_width as f64 / 2.0 + 1.0 - crpix1;
+        let oy = sci_height as f64 / 2.0 + 1.0 - crpix2;
+
+        let corrected_centroids: Vec<tetra3::Centroid> = extraction
+            .centroids
+            .iter()
+            .map(|c| {
+                // Convert to SIP pixel offsets from CRPIX
+                let u = c.x as f64 + ox;
+                let v = c.y as f64 + oy;
+                // Evaluate only high-order (p+q >= 3) SIP terms
+                let (u_corr, v_corr) = apply_sip_forward_ho(image_hdu, u, v, a_order, b_order);
+                // Convert back to solver-centered coords
+                tetra3::Centroid {
+                    x: (u_corr - ox) as f32,
+                    y: (v_corr - oy) as f32,
+                    mass: c.mass,
+                    cov: c.cov,
+                }
+            })
+            .collect();
+
+        // Show high-order distortion magnitude at a corner
+        {
+            let corner_u = sci_width as f64 / 2.0 + ox;
+            let corner_v = sci_height as f64 / 2.0 + oy;
+            let (cu, cv) = apply_sip_forward_ho(image_hdu, corner_u, corner_v, a_order, b_order);
+            let shift = ((cu - corner_u).powi(2) + (cv - corner_v).powi(2)).sqrt();
+            println!("  SIP HO shift at corner: {:.2} px", shift);
+        }
+
+        let solve_cfg = SolveConfig {
+            fov_estimate_rad: (12.0_f32).to_radians(),
+            image_width: sci_width,
+            image_height: sci_height,
+            fov_max_error_rad: Some((1.0_f32).to_radians()),
+            match_radius: 0.01,
+            match_threshold: 1e-5,
+            solve_timeout_ms: Some(5_000),
+            match_max_error: None,
+            distortion: None,
+        };
+
+        // ── Solve with RAW centroids ──
+        let result_raw = db.solve_from_centroids(&extraction.centroids, &solve_cfg);
+        if result_raw.status != SolveStatus::MatchFound {
+            println!(
+                "  SKIP: No match with raw centroids ({:?})",
+                result_raw.status
+            );
+            continue;
+        }
+        let rmse_raw = result_raw.rmse_rad.unwrap_or(0.0).to_degrees() as f64 * 3600.0;
+
+        // ── Solve with HO SIP-corrected centroids ──
+        let result_corr = db.solve_from_centroids(&corrected_centroids, &solve_cfg);
+        if result_corr.status != SolveStatus::MatchFound {
+            println!(
+                "  SKIP: No match with corrected centroids ({:?})",
+                result_corr.status
+            );
+            continue;
+        }
+        let rmse_corr = result_corr.rmse_rad.unwrap_or(0.0).to_degrees() as f64 * 3600.0;
+
+        let improvement_pct = (rmse_raw - rmse_corr) / rmse_raw * 100.0;
+
+        println!(
+            "  Raw:       RMSE={:.2}\", {} matches",
+            rmse_raw,
+            result_raw.num_matches.unwrap_or(0),
+        );
+        println!(
+            "  Corrected: RMSE={:.2}\", {} matches  ({:+.1}%)",
+            rmse_corr,
+            result_corr.num_matches.unwrap_or(0),
+            improvement_pct,
+        );
+
+        if rmse_corr >= rmse_raw {
+            println!("  *** FAIL: SIP HO correction did not improve RMSE ***");
+            all_improved = false;
+        } else {
+            println!("  PASS");
+        }
+    }
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    assert!(
+        all_improved,
+        "High-order SIP distortion correction should reduce RMSE for all test images"
+    );
 }

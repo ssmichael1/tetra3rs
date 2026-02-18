@@ -18,6 +18,7 @@ pub mod solve;
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::distortion::Distortion;
 use crate::{Quaternion, StarCatalog};
 
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
@@ -170,6 +171,14 @@ pub struct SolveConfig {
     pub solve_timeout_ms: Option<u64>,
     /// Maximum edge-ratio error for matching. None = use database value.
     pub match_max_error: Option<f32>,
+    /// Lens distortion model to apply to centroids before solving.
+    ///
+    /// When provided, observed centroid pixel coordinates are undistorted
+    /// (mapped from distorted observed positions to ideal pinhole positions)
+    /// before being converted to unit vectors for pattern matching.
+    /// This improves both the pattern matching success rate and the
+    /// accuracy of the final rotation estimate.
+    pub distortion: Option<Distortion>,
 }
 
 impl Default for SolveConfig {
@@ -183,6 +192,7 @@ impl Default for SolveConfig {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(5000),
             match_max_error: None,
+            distortion: None,
         }
     }
 }
@@ -196,6 +206,12 @@ impl SolveConfig {
             image_height,
             ..Default::default()
         }
+    }
+
+    /// Set the distortion model to apply during solving.
+    pub fn with_distortion(mut self, distortion: Distortion) -> Self {
+        self.distortion = Some(distortion);
+        self
     }
 
     /// Pixel scale in radians per pixel (horizontal).

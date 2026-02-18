@@ -95,6 +95,7 @@ pub(crate) mod catalogs;
 mod centroid;
 #[cfg(feature = "image")]
 pub mod centroid_extraction;
+pub mod distortion;
 pub mod solver;
 pub mod star;
 pub mod starcatalog;
@@ -104,6 +105,9 @@ pub use centroid::*;
 pub use centroid_extraction::{
     extract_centroids, extract_centroids_from_image, extract_centroids_from_raw,
     CentroidExtractionConfig, CentroidExtractionResult,
+};
+pub use distortion::{
+    Distortion, DistortionFitConfig, DistortionFitResult, RadialDistortion,
 };
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,

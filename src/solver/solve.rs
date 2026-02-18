@@ -51,6 +51,27 @@ impl SolverDatabase {
     ) -> SolveResult {
         let t0 = Instant::now();
 
+        // ── Undistort centroids once (pixel-space, FOV-independent) ──
+        let undistorted: Vec<Centroid>;
+        let working_centroids: &[Centroid] = match &config.distortion {
+            Some(d) => {
+                undistorted = centroids
+                    .iter()
+                    .map(|c| {
+                        let (ux, uy) = d.undistort(c.x as f64, c.y as f64);
+                        Centroid {
+                            x: ux as f32,
+                            y: uy as f32,
+                            mass: c.mass,
+                            cov: c.cov,
+                        }
+                    })
+                    .collect();
+                &undistorted
+            }
+            None => centroids,
+        };
+
         // Build FOV sweep: exact estimate first, then spiral outward
         let fov_values = build_fov_sweep(
             config.fov_estimate_rad,
@@ -61,8 +82,18 @@ impl SolverDatabase {
         debug!(
             "FOV sweep: {} values from {:.2}° to {:.2}°",
             fov_values.len(),
-            fov_values.iter().cloned().reduce(f32::min).unwrap_or(0.0).to_degrees(),
-            fov_values.iter().cloned().reduce(f32::max).unwrap_or(0.0).to_degrees(),
+            fov_values
+                .iter()
+                .cloned()
+                .reduce(f32::min)
+                .unwrap_or(0.0)
+                .to_degrees(),
+            fov_values
+                .iter()
+                .cloned()
+                .reduce(f32::max)
+                .unwrap_or(0.0)
+                .to_degrees(),
         );
 
         let mut last_status = SolveStatus::NoMatch;
@@ -76,7 +107,7 @@ impl SolverDatabase {
             }
 
             debug!("Trying FOV = {:.3}°", fov_try.to_degrees());
-            let result = self.solve_at_fov(centroids, config, fov_try, t0);
+            let result = self.solve_at_fov(working_centroids, config, fov_try, t0);
             match result.status {
                 SolveStatus::MatchFound => return result,
                 SolveStatus::TooFew => return result,
@@ -118,13 +149,21 @@ impl SolverDatabase {
 
         // ── Compute unit vectors in camera frame ──
         // Centroid (x, y) in pixels → scale to radians → uvec = normalize(x_rad, y_rad, 1)
-        let mut centroid_vectors: Vec<[f32; 3]> = sorted_indices
+        // Note: distortion correction (if any) was already applied in solve_from_centroids.
+        let centroid_vectors: Vec<[f32; 3]> = sorted_indices
             .iter()
             .map(|&i| {
-                let v = centroids[i].uvec(pixel_scale);
-                [v.x, v.y, v.z]
+                let x = centroids[i].x * pixel_scale;
+                let y = centroids[i].y * pixel_scale;
+                let z = 1.0f32;
+                let norm = (x * x + y * y + z * z).sqrt();
+                [x / norm, y / norm, z / norm]
             })
             .collect();
+
+        // Lazily-created x-flipped copy for parity-flipped images.
+        // Built on first use, cached for subsequent pattern attempts.
+        let mut flipped_vectors: Option<Vec<[f32; 3]>> = None;
 
         // ── Cluster-buster thinning ──
         // Apply the same separation constraint as database generation to avoid
@@ -299,25 +338,34 @@ impl SolverDatabase {
                     // SVD rotation: finds R such that camera_vec ≈ R * icrs_vec
                     let mut rotation_matrix = find_rotation_matrix(&matched_img, &matched_cat);
 
-                    let mut parity_flip = false;
+                    // Determine parity from the rotation determinant.
+                    // centroid_vectors is never mutated; when parity is needed we use
+                    // a lazily-created x-flipped copy for verification matching.
+                    let parity_flip;
+                    let working_vectors: &[[f32; 3]];
                     if rotation_matrix.determinant() < 0.0 {
                         // Wrong parity (e.g. FITS image with CDELT1 < 0).
-                        // Fix by negating x on ALL centroid vectors and recomputing.
-                        debug!("Detected negative determinant — flipping x parity");
                         parity_flip = true;
-                        for v in centroid_vectors.iter_mut() {
-                            v[0] = -v[0];
-                        }
-                        // Recompute this pattern's matched image vectors with flipped x
+                        // Recompute rotation with flipped image pattern vectors
                         let matched_img_flip: [[f32; 3]; 4] = std::array::from_fn(|i| {
                             let orig = image_vecs[img_order[i]];
                             [-orig[0], orig[1], orig[2]]
                         });
-                        rotation_matrix =
-                            find_rotation_matrix(&matched_img_flip, &matched_cat);
+                        rotation_matrix = find_rotation_matrix(&matched_img_flip, &matched_cat);
                         if rotation_matrix.determinant() < 0.0 {
                             continue; // still a reflection — skip
                         }
+                        // Lazily create flipped centroid vectors for matching
+                        let fv = flipped_vectors.get_or_insert_with(|| {
+                            centroid_vectors
+                                .iter()
+                                .map(|v| [-v[0], v[1], v[2]])
+                                .collect()
+                        });
+                        working_vectors = fv;
+                    } else {
+                        parity_flip = false;
+                        working_vectors = &centroid_vectors;
                     }
 
                     // ── Verify by matching nearby catalog stars ──
@@ -350,7 +398,7 @@ impl SolverDatabase {
                     // Match image centroids to projected catalog stars
                     let match_radius_rad = config.match_radius * fov;
                     let matches = find_centroid_matches(
-                        &centroid_vectors[..match_centroid_count],
+                        &working_vectors[..match_centroid_count],
                         &nearby_cam_positions,
                         match_radius_rad,
                     );
@@ -382,7 +430,7 @@ impl SolverDatabase {
                     let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(num_matches);
 
                     for &(cent_local_idx, cat_idx) in &matches {
-                        all_img_vecs.push(centroid_vectors[cent_local_idx]);
+                        all_img_vecs.push(working_vectors[cent_local_idx]);
                         all_cat_vecs.push(self.star_vectors[cat_idx]);
                         matched_cat_ids.push(self.star_catalog_ids[cat_idx]);
                         matched_cent_inds.push(sorted_indices[cent_local_idx]);

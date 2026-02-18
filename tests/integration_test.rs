@@ -122,6 +122,7 @@ fn test_generate_and_solve_hipparcos() {
         match_threshold: 1e-5,
         solve_timeout_ms: Some(30_000), // 30s for test
         match_max_error: None,
+        distortion: None,
     };
 
     let result = db.solve_from_centroids(&centroids, &solve_config);
@@ -268,7 +269,15 @@ fn generate_centroids(
     pixel_scale: f32,
 ) -> Vec<Centroid> {
     let mut dummy_rng = StdRng::seed_from_u64(0);
-    generate_centroids_with_noise(db, rot, boresight_icrs, half_fov, pixel_scale, 0.0, &mut dummy_rng)
+    generate_centroids_with_noise(
+        db,
+        rot,
+        boresight_icrs,
+        half_fov,
+        pixel_scale,
+        0.0,
+        &mut dummy_rng,
+    )
 }
 
 /// Solve 1000 random orientations with a 10° FOV camera and report statistics.
@@ -317,6 +326,7 @@ fn test_statistical_1000_random_orientations() {
         match_threshold: 1e-5,
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
+        distortion: None,
     };
 
     // Threshold for classifying a solve as "correct" vs "misidentified"
@@ -626,6 +636,7 @@ fn test_statistical_1000_noisy_centroids() {
         match_threshold: 1e-5,
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
+        distortion: None,
     };
 
     let correct_threshold_arcsec = 180.0;
