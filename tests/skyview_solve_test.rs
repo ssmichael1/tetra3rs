@@ -545,6 +545,7 @@ fn test_skyview_fits_solve() {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
+            distortion: None,
         };
 
         let ref_result = db.solve_from_centroids(&ref_centroids, &solve_config);

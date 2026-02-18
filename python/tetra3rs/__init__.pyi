@@ -148,6 +148,16 @@ class Centroid:
     with the origin at the image center, +X right, +Y down.
     """
 
+    def __init__(self, x: float, y: float, brightness: Optional[float] = None) -> None:
+        """Create a new Centroid.
+
+        Args:
+            x: X position in pixels (origin at image center, +X right).
+            y: Y position in pixels (origin at image center, +Y down).
+            brightness: Integrated intensity above background (optional).
+        """
+        ...
+
     @property
     def x(self) -> float:
         """X position in pixels (origin at image center, +X right)."""
@@ -169,6 +179,29 @@ class Centroid:
 
         The eigenvalues give the squared semi-axes of the intensity profile,
         and the eigenvectors give the orientation.
+        """
+        ...
+
+    def with_offset(self, dx: float, dy: float) -> Centroid:
+        """Return a new Centroid with position shifted by (dx, dy).
+
+        Preserves brightness and covariance.
+        """
+        ...
+
+    def undistort(self, distortion: RadialDistortion) -> Centroid:
+        """Remove lens distortion from this centroid's position (distorted → ideal).
+
+        Returns a new Centroid at the corrected position.
+        Brightness and covariance are preserved.
+        """
+        ...
+
+    def distort(self, distortion: RadialDistortion) -> Centroid:
+        """Apply lens distortion to this centroid's position (ideal → distorted).
+
+        Returns a new Centroid at the distorted position.
+        Brightness and covariance are preserved.
         """
         ...
 
@@ -253,6 +286,7 @@ class SolverDatabase:
         match_threshold: float = 1e-5,
         solve_timeout_ms: Optional[int] = 5000,
         match_max_error: Optional[float] = None,
+        distortion: Optional[RadialDistortion] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -275,6 +309,9 @@ class SolverDatabase:
             match_threshold: False-positive probability threshold.
             solve_timeout_ms: Timeout in milliseconds. None = no timeout.
             match_max_error: Maximum edge-ratio error. None = use database value.
+            distortion: Lens distortion model to apply to centroids before solving.
+                When provided, observed centroid pixel coordinates are undistorted
+                before being converted to unit vectors.
 
         Returns:
             A SolveResult on success, or None if no match was found.
@@ -344,6 +381,116 @@ class SolverDatabase:
         """
         ...
 
+    def fit_radial_distortion(
+        self,
+        solve_results: Union[SolveResult, list[SolveResult]],
+        centroids: Union[
+            list[Centroid],
+            npt.NDArray[np.float64],
+            list[Union[list[Centroid], npt.NDArray[np.float64]]],
+        ],
+        image_width: int,
+        sigma_clip: float = 3.0,
+        max_iterations: int = 20,
+        stage2_threshold_px: Optional[float] = 5.0,
+    ) -> DistortionFitResult:
+        """Fit a radial distortion model (k1, k2, k3) from solve results.
+
+        Args:
+            solve_results: A SolveResult or list of SolveResult objects.
+            centroids: Matching centroids.
+            image_width: Image width in pixels.
+            sigma_clip: Sigma threshold for outlier rejection.
+            max_iterations: Maximum sigma-clip iterations.
+            stage2_threshold_px: Loose pixel threshold for second-stage
+                recovery. None to disable.
+
+        Returns:
+            DistortionFitResult with the fitted radial model and statistics.
+        """
+        ...
+
+class RadialDistortion:
+    """Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+
+    Coordinates are in pixels relative to the optical center (image center).
+
+    Example::
+
+        d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+        x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
+    """
+
+    def __init__(
+        self,
+        k1: float = 0.0,
+        k2: float = 0.0,
+        k3: float = 0.0,
+    ) -> None: ...
+    @property
+    def k1(self) -> float:
+        """First radial coefficient."""
+        ...
+
+    @property
+    def k2(self) -> float:
+        """Second radial coefficient."""
+        ...
+
+    @property
+    def k3(self) -> float:
+        """Third radial coefficient."""
+        ...
+
+    def distort(self, x: float, y: float) -> tuple[float, float]:
+        """Forward distortion: ideal → distorted."""
+        ...
+
+    def undistort(self, x: float, y: float) -> tuple[float, float]:
+        """Inverse distortion: distorted → ideal."""
+        ...
+
+class DistortionFitResult:
+    """Result of a distortion fitting procedure.
+
+    Returned by ``SolverDatabase.fit_radial_distortion``.
+    """
+
+    @property
+    def model(self) -> Optional[RadialDistortion]:
+        """The fitted distortion model."""
+        ...
+
+    @property
+    def rmse_before_px(self) -> float:
+        """RMS pixel residual before distortion correction."""
+        ...
+
+    @property
+    def rmse_after_px(self) -> float:
+        """RMS pixel residual after distortion correction."""
+        ...
+
+    @property
+    def n_inliers(self) -> int:
+        """Number of inlier matches in the final fit."""
+        ...
+
+    @property
+    def n_outliers(self) -> int:
+        """Number of rejected outliers."""
+        ...
+
+    @property
+    def iterations(self) -> int:
+        """Number of sigma-clip iterations performed."""
+        ...
+
+    @property
+    def inlier_mask(self) -> npt.NDArray[np.bool_]:
+        """Boolean inlier mask (True = inlier, False = outlier)."""
+        ...
+
 def extract_centroids(
     image: npt.NDArray,
     sigma_threshold: float = 5.0,
@@ -370,5 +517,39 @@ def extract_centroids(
         A dict with 'centroids' (list of Centroid objects sorted by brightness),
         'image_width', 'image_height', 'background_mean',
         'background_sigma', 'threshold', and 'num_blobs_raw'.
+    """
+    ...
+
+def undistort_centroids(
+    centroids: list[Centroid],
+    distortion: RadialDistortion,
+) -> list[Centroid]:
+    """Apply distortion correction to a list of centroids (distorted → ideal).
+
+    Returns a new list with corrected positions; brightness and covariance are preserved.
+
+    Args:
+        centroids: List of Centroid objects.
+        distortion: A RadialDistortion model.
+
+    Returns:
+        A new list of Centroid objects with undistorted positions.
+    """
+    ...
+
+def distort_centroids(
+    centroids: list[Centroid],
+    distortion: RadialDistortion,
+) -> list[Centroid]:
+    """Apply forward distortion to a list of centroids (ideal → distorted).
+
+    Returns a new list with distorted positions; brightness and covariance are preserved.
+
+    Args:
+        centroids: List of Centroid objects.
+        distortion: A RadialDistortion model.
+
+    Returns:
+        A new list of Centroid objects with distorted positions.
     """
     ...
