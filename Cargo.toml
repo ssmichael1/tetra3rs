@@ -10,7 +10,7 @@ keywords = [
     "pattern-recognition",
 ]
 name = "tetra3"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Rust implementation of Tetra3: Fast and robust star plate solver"
 readme = "README.md"
@@ -31,7 +31,11 @@ tracing = { version = "0.1.40", features = ["std"] }
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 nalgebra = { version = "0.34.1", features = ["std"] }
 csv = { version = "1.4.0", optional = true }
-image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "tiff"] }
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "jpeg",
+    "png",
+    "tiff",
+] }
 
 [features]
 default = []

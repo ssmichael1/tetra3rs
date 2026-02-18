@@ -6,7 +6,9 @@
 
 A fast, robust lost-in-space star plate solver written in Rust.
 
-Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required.
+> **Status: Alpha** — The core solver is based on well-vetted algorithms but has only been tested against a limited set of images. The API is not yet stable and may change between releases.  Having said that, I've made it work on both low-SNR images taken with a camera in my backyard and with high-star-density images from more-complex telescope.
+
+Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required. The goal is to make this fast and robust enough for use in embedded systems such as star trackers on satellites.
 
 ## Features
 
@@ -85,7 +87,7 @@ if result.status == SolveStatus::MatchFound {
 | Catalog | File | Notes |
 |---------|------|-------|
 | Hipparcos | `data/hip2.dat` | Default; includes proper motion |
-| Gaia | `data/gaia_bright_stars.csv` | Requires `--features gaia` |
+| Gaia | `data/gaia_bright_stars.csv` | Requires `--features gaia` (incomplete) |
 
 ## Tests
 
@@ -113,9 +115,19 @@ cargo test --test skyview_solve_test --features image -- --nocapture
 
 Solves 3 Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
 
+The solved boresight is compared against the true boresight computed from the full WCS (CRPIX, SIP, CD matrix, TAN deprojection) at the center of the science region. Because the solver assumes a perfect pinhole projection while TESS has up to ~65 px of SIP distortion at the corners, the boresight error is typically 1-3 arcminutes and the RMSE is ~3-4 arcminutes. This is a known limitation of the pinhole model on wide-field distorted optics; see the Roadmap for planned distortion correction support.
+
 ```sh
 cargo test --test tess_solve_test --features image -- --nocapture
 ```
+
+## Roadmap (not in order)
+
+- **Tracking mode** — accept an initial attitude guess to restrict the search to nearby catalog stars, improving speed and robustness for sequential frames (e.g. star trackers solution on previous frame)
+- **Image distortion estimation and correction** — the solver currently assumes a perfect pinhole (gnomonic) projection; cameras with significant optical distortion (e.g. TESS, wide-angle lenses) produce ~1-5' boresight error and elevated RMSE
+- **Stellar aberration** — correct for the apparent shift in star positions caused by the observer's velocity (up to ~20" for Earth-orbiting spacecraft)
+- **Gaia catalog support** — complete the Gaia bright star catalog import (`--features gaia`)
+- **Tycho-2 catalog support** — import the Tycho-2 catalog (~2.5 million stars, fills the gap between Hipparcos and Gaia)
 
 ## Credits
 

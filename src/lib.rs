@@ -2,6 +2,12 @@
 //!
 //! A fast, robust **lost-in-space star plate solver** written in Rust.
 //!
+//! > **Status: Alpha** — The core solver is based on well-vetted algorithms but has
+//! > only been tested against a limited set of images. The API is not yet stable and
+//! > may change between releases. Having said that, it has been made to work on both
+//! > low-SNR images taken with a backyard camera and high-star-density images from
+//! > more complex telescopes.
+//!
 //! Given a set of star centroids extracted from a camera image, `tetra3` identifies
 //! the stars against a catalog and returns the camera's pointing direction as a
 //! quaternion — no prior attitude estimate required.
