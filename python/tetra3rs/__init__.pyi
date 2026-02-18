@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from typing import Optional, TypedDict
+from typing import Optional, TypedDict, Union
 
 class SolveResult(TypedDict):
     """Result dictionary returned by SolverDatabase.solve_from_centroids."""
 
-    rotation_matrix: npt.NDArray[np.float64]
+    rotation_matrix_icrs_to_camera: npt.NDArray[np.float64]
     """3x3 rotation matrix from ICRS to camera frame."""
+    ra_deg: float
+    """Right ascension of the boresight in degrees [0, 360)."""
+    dec_deg: float
+    """Declination of the boresight in degrees [-90, 90]."""
+    roll_deg: float
+    """Roll angle: position angle of camera +Y measured East of North, in degrees."""
     fov_deg: Optional[float]
     """Solved horizontal field of view in degrees."""
     num_matches: Optional[int]
@@ -40,8 +46,8 @@ class SolveResult(TypedDict):
 class ExtractionResult(TypedDict):
     """Result dictionary returned by extract_centroids."""
 
-    centroids: npt.NDArray[np.float64]
-    """Nx3 array of (x, y, brightness) in centered pixel coordinates."""
+    centroids: list[Centroid]
+    """List of detected centroids, sorted by brightness (brightest first)."""
     image_width: int
     """Width of the input image in pixels."""
     image_height: int
@@ -54,6 +60,37 @@ class ExtractionResult(TypedDict):
     """Detection threshold used."""
     num_blobs_raw: int
     """Number of raw blobs before filtering."""
+
+class Centroid:
+    """A detected star centroid with position, brightness, and shape.
+
+    Returned by ``extract_centroids``. Centroids use pixel coordinates
+    with the origin at the image center, +X right, +Y down.
+    """
+
+    @property
+    def x(self) -> float:
+        """X position in pixels (origin at image center, +X right)."""
+        ...
+
+    @property
+    def y(self) -> float:
+        """Y position in pixels (origin at image center, +Y down)."""
+        ...
+
+    @property
+    def brightness(self) -> Optional[float]:
+        """Integrated intensity above background."""
+        ...
+
+    @property
+    def cov(self) -> Optional[npt.NDArray[np.float64]]:
+        """2x2 intensity-weighted covariance matrix [[sigma_xx, sigma_xy], [sigma_xy, sigma_yy]] in pixels squared.
+
+        The eigenvalues give the squared semi-axes of the intensity profile,
+        and the eigenvectors give the orientation.
+        """
+        ...
 
 class SolverDatabase:
     """A star pattern database for plate solving.
@@ -124,11 +161,14 @@ class SolverDatabase:
 
     def solve_from_centroids(
         self,
-        centroids: npt.NDArray[np.float64],
-        fov_estimate: float,
-        image_width: int,
-        image_height: int,
-        fov_max_error: Optional[float] = None,
+        centroids: Union[list[Centroid], npt.NDArray[np.float64]],
+        fov_estimate_deg: Optional[float] = None,
+        fov_estimate_rad: Optional[float] = None,
+        image_width: Optional[int] = None,
+        image_height: Optional[int] = None,
+        image_shape: Optional[tuple[int, int]] = None,
+        fov_max_error_deg: Optional[float] = None,
+        fov_max_error_rad: Optional[float] = None,
         match_radius: float = 0.01,
         match_threshold: float = 1e-5,
         solve_timeout_ms: Optional[int] = 5000,
@@ -137,13 +177,20 @@ class SolverDatabase:
         """Solve for camera attitude given star centroids.
 
         Args:
-            centroids: Nx2 or Nx3 numpy array of centroid positions in pixels.
+            centroids: Either a list of Centroid objects (from extract_centroids),
+                or an Nx2/Nx3 numpy array of centroid positions in pixels.
                 Columns are (x, y) or (x, y, brightness).
                 Origin is at the image center, +X right, +Y down.
-            fov_estimate: Estimated horizontal field of view in degrees.
+            fov_estimate_deg: Estimated horizontal field of view in degrees.
+            fov_estimate_rad: Estimated horizontal field of view in radians.
+                Exactly one of fov_estimate_deg or fov_estimate_rad must be provided.
             image_width: Image width in pixels.
             image_height: Image height in pixels.
-            fov_max_error: Maximum FOV error in degrees. None = no limit.
+            image_shape: Image shape as (height, width) tuple (numpy convention).
+                Can be used instead of image_width/image_height.
+            fov_max_error_deg: Maximum FOV error in degrees. None = no limit.
+            fov_max_error_rad: Maximum FOV error in radians. None = no limit.
+                At most one of fov_max_error_deg or fov_max_error_rad can be provided.
             match_radius: Match distance as fraction of FOV.
             match_threshold: False-positive probability threshold.
             solve_timeout_ms: Timeout in milliseconds. None = no timeout.
@@ -175,7 +222,7 @@ class SolverDatabase:
         ...
 
 def extract_centroids(
-    image: npt.NDArray[np.float64],
+    image: npt.NDArray,
     sigma_threshold: float = 5.0,
     min_pixels: int = 3,
     max_pixels: int = 10000,
@@ -187,6 +234,7 @@ def extract_centroids(
 
     Args:
         image: 2D numpy array (height x width) of pixel values.
+            Supported dtypes: float64, float32, uint16, int16, uint8.
         sigma_threshold: Detection threshold in sigma above background.
         min_pixels: Minimum blob size in pixels.
         max_pixels: Maximum blob size in pixels.
@@ -196,8 +244,8 @@ def extract_centroids(
         max_elongation: Maximum blob elongation ratio. None = disabled.
 
     Returns:
-        A dict with 'centroids' (Nx3 array of x, y, brightness in centered
-        pixel coords), 'image_width', 'image_height', 'background_mean',
+        A dict with 'centroids' (list of Centroid objects sorted by brightness),
+        'image_width', 'image_height', 'background_mean',
         'background_sigma', 'threshold', and 'num_blobs_raw'.
     """
     ...
