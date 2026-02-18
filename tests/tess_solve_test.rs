@@ -390,11 +390,18 @@ fn test_tess_fits_solve() {
             })
             .collect();
 
-        // Get WCS boresight from header
+        // Compute true boresight from the WCS at the center of the science region.
+        // The science region starts at column 44 in the full frame, so the center
+        // pixel in full-frame coordinates is (44 + sci_width/2, sci_height/2).
+        let center_x = 44.0 + sci_width as f64 / 2.0;
+        let center_y = sci_height as f64 / 2.0;
+        let (boresight_ra, boresight_dec) = pixel_to_radec(image_hdu, center_x, center_y);
+        let true_boresight = radec_to_uvec(boresight_ra, boresight_dec);
+
         let crval_ra = get_f64(image_hdu, "CRVAL1").unwrap();
         let crval_dec = get_f64(image_hdu, "CRVAL2").unwrap();
-        let true_boresight = radec_to_uvec(crval_ra, crval_dec);
-        println!("  WCS: RA={:.4}°, Dec={:.4}°", crval_ra, crval_dec);
+        println!("  WCS CRVAL: RA={:.4}°, Dec={:.4}°", crval_ra, crval_dec);
+        println!("  WCS boresight (center pixel): RA={:.4}°, Dec={:.4}°", boresight_ra, boresight_dec);
 
         // Print CD matrix
         if let (Some(cd11), Some(cd12), Some(cd21), Some(cd22)) = (
