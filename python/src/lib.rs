@@ -12,6 +12,71 @@ use tetra3::solver::{
     GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus, SolverDatabase,
 };
 use tetra3::Centroid;
+use tetra3::Star;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CatalogStar — lightweight wrapper for Star
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A star from the solver catalog.
+///
+/// Attributes:
+///     id: Catalog identifier (e.g. Hipparcos number).
+///     ra_deg: Right ascension in degrees [0, 360).
+///     dec_deg: Declination in degrees [-90, 90].
+///     magnitude: Visual magnitude.
+#[pyclass(name = "CatalogStar", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyCatalogStar {
+    inner: Star,
+}
+
+#[pymethods]
+impl PyCatalogStar {
+    /// Catalog identifier (e.g. Hipparcos number).
+    #[getter]
+    fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    /// Right ascension in degrees [0, 360).
+    #[getter]
+    fn ra_deg(&self) -> f64 {
+        self.inner.ra_rad.to_degrees() as f64
+    }
+
+    /// Declination in degrees [-90, 90].
+    #[getter]
+    fn dec_deg(&self) -> f64 {
+        self.inner.dec_rad.to_degrees() as f64
+    }
+
+    /// Visual magnitude.
+    #[getter]
+    fn magnitude(&self) -> f32 {
+        self.inner.mag
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CatalogStar(id={}, ra={:.4}°, dec={:.4}°, mag={:.2})",
+            self.inner.id,
+            self.inner.ra_rad.to_degrees(),
+            self.inner.dec_rad.to_degrees(),
+            self.inner.mag,
+        )
+    }
+
+    fn __str__(&self) -> String {
+        format!(
+            "HIP {} at RA {:.4}°, Dec {:.4}°, mag {:.2}",
+            self.inner.id,
+            self.inner.ra_rad.to_degrees(),
+            self.inner.dec_rad.to_degrees(),
+            self.inner.mag,
+        )
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PyCentroid — wraps Centroid with covariance
@@ -594,6 +659,72 @@ impl PySolverDatabase {
             self.inner.props.max_fov_rad.to_degrees(),
         )
     }
+
+    // ── Catalog access ──────────────────────────────────────────────────
+
+    /// Get a catalog star by its internal index (0-based, brightness order).
+    ///
+    /// Args:
+    ///     index: Star index in [0, num_stars).
+    ///
+    /// Returns:
+    ///     CatalogStar at that index.
+    fn get_star(&self, index: usize) -> PyResult<PyCatalogStar> {
+        let stars = &self.inner.star_catalog.stars;
+        if index >= stars.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "star index {} out of range (catalog has {} stars)",
+                index,
+                stars.len()
+            )));
+        }
+        Ok(PyCatalogStar {
+            inner: stars[index].clone(),
+        })
+    }
+
+    /// Get a catalog star by its catalog ID (e.g. Hipparcos number).
+    ///
+    /// Args:
+    ///     catalog_id: The catalog identifier to search for.
+    ///
+    /// Returns:
+    ///     CatalogStar with that ID, or None if not found.
+    fn get_star_by_id(&self, catalog_id: u64) -> Option<PyCatalogStar> {
+        self.inner
+            .star_catalog_ids
+            .iter()
+            .position(|&id| id == catalog_id)
+            .map(|idx| PyCatalogStar {
+                inner: self.inner.star_catalog.stars[idx].clone(),
+            })
+    }
+
+    /// Query catalog stars within an angular radius of a sky position.
+    ///
+    /// Args:
+    ///     ra_deg: Right ascension of cone center in degrees.
+    ///     dec_deg: Declination of cone center in degrees.
+    ///     radius_deg: Search radius in degrees.
+    ///
+    /// Returns:
+    ///     List of CatalogStar objects within the cone, sorted by brightness.
+    fn cone_search(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Vec<PyCatalogStar> {
+        let ra_rad = (ra_deg as f32).to_radians();
+        let dec_rad = (dec_deg as f32).to_radians();
+        let radius_rad = (radius_deg as f32).to_radians();
+        let indices = self
+            .inner
+            .star_catalog
+            .query_indices(ra_rad, dec_rad, radius_rad);
+        // Indices are already in brightness order (catalog is brightness-sorted)
+        indices
+            .into_iter()
+            .map(|idx| PyCatalogStar {
+                inner: self.inner.star_catalog.stars[idx].clone(),
+            })
+            .collect()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -744,6 +875,7 @@ fn extract_centroids<'py>(
 #[pymodule]
 fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCentroid>()?;
+    m.add_class::<PyCatalogStar>()?;
     m.add_class::<PySolveResult>()?;
     m.add_class::<PySolverDatabase>()?;
     m.add_function(wrap_pyfunction!(extract_centroids, m)?)?;
