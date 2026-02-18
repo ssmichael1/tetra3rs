@@ -97,6 +97,32 @@ class SolveResult:
         """
         ...
 
+class CatalogStar:
+    """A star from the solver catalog.
+
+    Returned by ``SolverDatabase.get_star``, ``get_star_by_id``, and ``cone_search``.
+    """
+
+    @property
+    def id(self) -> int:
+        """Catalog identifier (e.g. Hipparcos number)."""
+        ...
+
+    @property
+    def ra_deg(self) -> float:
+        """Right ascension in degrees [0, 360)."""
+        ...
+
+    @property
+    def dec_deg(self) -> float:
+        """Declination in degrees [-90, 90]."""
+        ...
+
+    @property
+    def magnitude(self) -> float:
+        """Visual magnitude."""
+        ...
+
 class ExtractionResult(TypedDict):
     """Result dictionary returned by extract_centroids."""
 
@@ -273,6 +299,49 @@ class SolverDatabase:
     @property
     def min_fov_deg(self) -> float:
         """Minimum FOV the database was built for (degrees)."""
+        ...
+
+    def get_star(self, index: int) -> CatalogStar:
+        """Get a catalog star by its internal index (0-based, brightness order).
+
+        Args:
+            index: Star index in [0, num_stars).
+
+        Returns:
+            CatalogStar at that index.
+
+        Raises:
+            IndexError: If index is out of range.
+        """
+        ...
+
+    def get_star_by_id(self, catalog_id: int) -> Optional[CatalogStar]:
+        """Get a catalog star by its catalog ID (e.g. Hipparcos number).
+
+        Args:
+            catalog_id: The catalog identifier to search for.
+
+        Returns:
+            CatalogStar with that ID, or None if not found.
+        """
+        ...
+
+    def cone_search(
+        self,
+        ra_deg: float,
+        dec_deg: float,
+        radius_deg: float,
+    ) -> list[CatalogStar]:
+        """Query catalog stars within an angular radius of a sky position.
+
+        Args:
+            ra_deg: Right ascension of cone center in degrees.
+            dec_deg: Declination of cone center in degrees.
+            radius_deg: Search radius in degrees.
+
+        Returns:
+            List of CatalogStar objects within the cone, sorted by brightness.
+        """
         ...
 
 def extract_centroids(
