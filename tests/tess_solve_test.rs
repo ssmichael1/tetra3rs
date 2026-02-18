@@ -460,8 +460,11 @@ fn test_tess_fits_solve() {
         }
 
         // ── Solve ──
-        // No manual parity correction needed — the solver's auto-parity
-        // detection handles CD matrix orientation automatically.
+        // The solver assumes a perfect pinhole (gnomonic) projection. TESS has
+        // significant SIP distortion (up to ~65 px at corners), so the solved
+        // attitude will have ~1-5' boresight error and elevated RMSE. This is a
+        // known limitation — pre-undistorting centroids doesn't help because the
+        // solver's internal projection model also assumes uniform pixel scale.
         let solve_config = SolveConfig {
             fov_estimate_rad: (12.0_f32).to_radians(),
             image_width: sci_width,
