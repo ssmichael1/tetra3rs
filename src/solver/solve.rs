@@ -31,8 +31,17 @@ impl SolverDatabase {
     /// Solve for the camera pointing direction given image centroids.
     ///
     /// Centroids should have the `mass` field populated for brightness sorting.
-    /// Centroid (x, y) are angular offsets from boresight in radians.
-    /// Camera frame: +X right, +Y down, +Z boresight.
+    /// Centroid (x, y) are in pixel coordinates with (0, 0) at the image center.
+    /// +X points right, +Y points down in the image.
+    ///
+    /// The `SolveConfig` must specify `fov_estimate_rad` (horizontal FOV in radians)
+    /// and `image_width` / `image_height` (in pixels) so the solver can compute the
+    /// pixel scale.
+    ///
+    /// If `fov_max_error_rad` is set, the solver sweeps FOV values across the range
+    /// `[fov_estimate - fov_max_error, fov_estimate + fov_max_error]`, trying the
+    /// exact estimate first, then spiraling outward. This makes the solver robust
+    /// to uncertain FOV estimates.
     ///
     /// Returns a `SolveResult` with the ICRS→camera quaternion on success.
     pub fn solve_from_centroids(
@@ -41,6 +50,56 @@ impl SolverDatabase {
         config: &SolveConfig,
     ) -> SolveResult {
         let t0 = Instant::now();
+
+        // Build FOV sweep: exact estimate first, then spiral outward
+        let fov_values = build_fov_sweep(
+            config.fov_estimate_rad,
+            config.fov_max_error_rad,
+            config.match_radius,
+        );
+
+        debug!(
+            "FOV sweep: {} values from {:.2}° to {:.2}°",
+            fov_values.len(),
+            fov_values.iter().cloned().reduce(f32::min).unwrap_or(0.0).to_degrees(),
+            fov_values.iter().cloned().reduce(f32::max).unwrap_or(0.0).to_degrees(),
+        );
+
+        let mut last_status = SolveStatus::NoMatch;
+
+        for &fov_try in &fov_values {
+            // Check timeout
+            if let Some(t) = config.solve_timeout_ms {
+                if elapsed_ms(t0) > t as f32 {
+                    return SolveResult::failure(SolveStatus::Timeout, elapsed_ms(t0));
+                }
+            }
+
+            debug!("Trying FOV = {:.3}°", fov_try.to_degrees());
+            let result = self.solve_at_fov(centroids, config, fov_try, t0);
+            match result.status {
+                SolveStatus::MatchFound => return result,
+                SolveStatus::TooFew => return result,
+                s => last_status = s,
+            }
+        }
+
+        SolveResult::failure(last_status, elapsed_ms(t0))
+    }
+
+    /// Attempt a solve at a specific FOV value.
+    fn solve_at_fov(
+        &self,
+        centroids: &[Centroid],
+        config: &SolveConfig,
+        fov_estimate: f32,
+        t0: Instant,
+    ) -> SolveResult {
+        let pixel_scale = if config.image_width > 0 {
+            fov_estimate / config.image_width as f32
+        } else {
+            0.0
+        };
 
         // Sort centroids by brightness (highest mass = brightest first).
         // Centroids without mass are placed last.
@@ -52,18 +111,17 @@ impl SolverDatabase {
         });
 
         let num_centroids = sorted_indices.len();
-        let fov_estimate = config.fov_estimate_rad;
 
         if num_centroids < PATTERN_SIZE {
             return SolveResult::failure(SolveStatus::TooFew, elapsed_ms(t0));
         }
 
         // ── Compute unit vectors in camera frame ──
-        // Centroid (x, y) in radians → uvec = normalize(x, y, 1)
-        let centroid_vectors: Vec<[f32; 3]> = sorted_indices
+        // Centroid (x, y) in pixels → scale to radians → uvec = normalize(x_rad, y_rad, 1)
+        let mut centroid_vectors: Vec<[f32; 3]> = sorted_indices
             .iter()
             .map(|&i| {
-                let v = centroids[i].uvec();
+                let v = centroids[i].uvec(pixel_scale);
                 [v.x, v.y, v.z]
             })
             .collect();
@@ -239,10 +297,25 @@ impl SolverDatabase {
                     let matched_cat: [[f32; 3]; 4] = std::array::from_fn(|i| cat_vecs[i]);
 
                     // SVD rotation: finds R such that camera_vec ≈ R * icrs_vec
-                    let rotation_matrix = find_rotation_matrix(&matched_img, &matched_cat);
+                    let mut rotation_matrix = find_rotation_matrix(&matched_img, &matched_cat);
 
                     if rotation_matrix.determinant() < 0.0 {
-                        continue; // reflection, not a proper rotation
+                        // Wrong parity (e.g. FITS image with CDELT1 < 0).
+                        // Fix by negating x on ALL centroid vectors and recomputing.
+                        debug!("Detected negative determinant — flipping x parity");
+                        for v in centroid_vectors.iter_mut() {
+                            v[0] = -v[0];
+                        }
+                        // Recompute this pattern's matched image vectors with flipped x
+                        let matched_img_flip: [[f32; 3]; 4] = std::array::from_fn(|i| {
+                            let orig = image_vecs[img_order[i]];
+                            [-orig[0], orig[1], orig[2]]
+                        });
+                        rotation_matrix =
+                            find_rotation_matrix(&matched_img_flip, &matched_cat);
+                        if rotation_matrix.determinant() < 0.0 {
+                            continue; // still a reflection — skip
+                        }
                     }
 
                     // ── Verify by matching nearby catalog stars ──
@@ -374,6 +447,34 @@ impl SolverDatabase {
 }
 
 // ── Helper functions ────────────────────────────────────────────────────────
+
+/// Build FOV values to try: exact estimate first, then spiraling outward.
+///
+/// Step size is chosen so that the verification match_radius can tolerate the
+/// worst-case scale error at the midpoint between steps.
+fn build_fov_sweep(fov_estimate: f32, fov_max_error: Option<f32>, match_radius: f32) -> Vec<f32> {
+    let mut values = vec![fov_estimate];
+
+    if let Some(max_error) = fov_max_error {
+        if max_error > 0.0 {
+            // Step = 2 * match_radius * fov_estimate.
+            // At the midpoint between steps, a star at the FOV edge has position
+            // error ≈ (step/2)/(fov) * (fov/2) = step/4. With step = 2*mr*fov,
+            // that's mr*fov/2, well within the match_radius_rad = mr*fov.
+            let step = (2.0 * match_radius * fov_estimate).max(0.001_f32.to_radians());
+            let mut offset = step;
+            while offset <= max_error {
+                values.push(fov_estimate + offset);
+                if fov_estimate - offset > 0.0 {
+                    values.push(fov_estimate - offset);
+                }
+                offset += step;
+            }
+        }
+    }
+
+    values
+}
 
 fn elapsed_ms(t0: Instant) -> f32 {
     t0.elapsed().as_secs_f32() * 1000.0
