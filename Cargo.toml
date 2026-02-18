@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "python"]
+
 [package]
 keywords = [
     "star-plate-solver",
@@ -17,6 +20,8 @@ repository = "https://github.com/ssmichael1/tetra3rs"
 categories = ["aerospace", "algorithms", "mathematics", "science"]
 exclude = ["data/", "download_hip2.sh"]
 
+[lib]
+name = "tetra3"
 
 [dependencies]
 rkyv = { version = "0.8", features = ["bytecheck"] }
@@ -26,8 +31,7 @@ tracing = { version = "0.1.40", features = ["std"] }
 tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
 nalgebra = { version = "0.34.1", features = ["std"] }
 csv = { version = "1.4.0", optional = true }
-image = { version = "0.25", optional = true }
-
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "tiff"] }
 
 [features]
 default = []
@@ -45,15 +49,16 @@ codegen-units = 1
 [dev-dependencies]
 rand = "0.10.0"
 rand_distr = "0.6.0"
+ureq = "3"
 
 # integration tests use centroid extraction which needs the "image" feature
 # The test itself reads FITS files directly (minimal parser in-test)
 [[test]]
-name = "tess_solve_test"
-path = "tests/tess_solve_test.rs"
+name = "skyview_solve_test"
+path = "tests/skyview_solve_test.rs"
 required-features = ["image"]
 
 [[test]]
-name = "skyview_solve_test"
-path = "tests/skyview_solve_test.rs"
+name = "tess_solve_test"
+path = "tests/tess_solve_test.rs"
 required-features = ["image"]

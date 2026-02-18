@@ -4,6 +4,8 @@
 //! These images use simple TAN (gnomonic) projection with CDELT (no SIP distortion),
 //! data in HDU 0, and are 2048×2048 pixels at ~17.6"/px.
 
+mod test_data;
+
 use nalgebra::{Rotation3, UnitQuaternion, Vector3};
 use std::collections::HashMap;
 use std::fs::File;
@@ -304,7 +306,8 @@ fn build_skyview_database() -> SolverDatabase {
         catalog_nside: 8,
     };
 
-    SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+    let catalog_path = test_data::ensure_test_file("data/hip2.dat");
+    SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
         .expect("Failed to generate database from Hipparcos catalog")
 }
 
@@ -313,6 +316,12 @@ fn test_skyview_fits_solve() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
+
+    // Ensure all test files are downloaded
+    test_data::ensure_test_file("data/hip2.dat");
+    for tc in SKYVIEW_TEST_CASES {
+        test_data::ensure_test_file(&format!("data/skyview_10deg_test_images/{}", tc.filename));
+    }
 
     let db = build_skyview_database();
     println!("\n══════════════════════════════════════════════════════════════");
@@ -386,7 +395,6 @@ fn test_skyview_fits_solve() {
         // sigma threshold. After local BG subtraction the residual is
         // mostly noise + point sources.
         let extract_config = CentroidExtractionConfig {
-            fov_horizontal_deg: fov_h_deg as f32,
             sigma_threshold: 10.0,
             min_pixels: 3,
             max_pixels: 10000,
@@ -434,14 +442,17 @@ fn test_skyview_fits_solve() {
             "  First 10 centroids (parity corrected, x*={}, y*={}):",
             parity_x, parity_y
         );
+        let pixel_scale = (fov_h_deg as f32).to_radians() / naxis1 as f32;
         for (i, c) in corrected_centroids.iter().take(10).enumerate() {
+            let x_rad = c.x * pixel_scale;
+            let y_rad = c.y * pixel_scale;
             println!(
-                "    [{:2}] x={:+.5} rad ({:+.3}°), y={:+.5} rad ({:+.3}°), mass={:.0}",
+                "    [{:2}] x={:+.1} px ({:+.3}°), y={:+.1} px ({:+.3}°), mass={:.0}",
                 i,
                 c.x,
-                c.x.to_degrees(),
+                x_rad.to_degrees(),
                 c.y,
-                c.y.to_degrees(),
+                y_rad.to_degrees(),
                 c.mass.unwrap_or(0.0)
             );
         }
@@ -461,18 +472,19 @@ fn test_skyview_fits_solve() {
             .star_catalog
             .query_indices_from_uvec(wcs_boresight_uvec, half_fov * 1.2);
 
-        let mut catalog_centroids: Vec<(f32, f32, f32)> = Vec::new();
+        let mut catalog_centroids: Vec<(f32, f32, f32)> = Vec::new(); // (x_px, y_px, mag)
         for &idx in &nearby_indices {
             let sv = &db.star_vectors[idx];
             let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
             let cam_v = wcs_q * icrs_v;
             if cam_v.z > 0.01 {
-                let cx = cam_v.x / cam_v.z;
-                let cy = cam_v.y / cam_v.z;
+                let cx_rad = cam_v.x / cam_v.z;
+                let cy_rad = cam_v.y / cam_v.z;
                 let half_fov_h = (fov_h_deg as f32 / 2.0).to_radians();
                 let half_fov_v = (fov_v_deg as f32 / 2.0).to_radians();
-                if cx.abs() < half_fov_h && cy.abs() < half_fov_v {
-                    catalog_centroids.push((cx, cy, db.star_catalog.stars()[idx].mag));
+                if cx_rad.abs() < half_fov_h && cy_rad.abs() < half_fov_v {
+                    // Convert to pixel coordinates from image center
+                    catalog_centroids.push((cx_rad / pixel_scale, cy_rad / pixel_scale, db.star_catalog.stars()[idx].mag));
                 }
             }
         }
@@ -495,15 +507,16 @@ fn test_skyview_fits_solve() {
                     best_j = j;
                 }
             }
+            let dist_rad = best_dist * pixel_scale;
             println!(
-                "    [{:2}] mag={:.1} pos=({:+.4}°, {:+.4}°) → closest centroid [{:2}] dist={:.1}' ({:.1}\")",
+                "    [{:2}] mag={:.1} pos=({:+.1} px, {:+.1} px) → closest centroid [{:2}] dist={:.1} px ({:.1}\")",
                 i,
                 mag,
-                cx.to_degrees(),
-                cy.to_degrees(),
+                cx,
+                cy,
                 best_j,
-                best_dist.to_degrees() * 60.0,
-                best_dist.to_degrees() * 3600.0,
+                best_dist,
+                dist_rad.to_degrees() * 3600.0,
             );
         }
 
@@ -525,6 +538,8 @@ fn test_skyview_fits_solve() {
 
         let solve_config = SolveConfig {
             fov_estimate_rad: (fov_h_deg as f32).to_radians(),
+            image_width: naxis1,
+            image_height: naxis2,
             fov_max_error_rad: Some((3.0_f32).to_radians()),
             match_radius: 0.01,
             match_threshold: 1e-5,

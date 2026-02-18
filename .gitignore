@@ -56,3 +56,10 @@ wheel/
 
 # Data files
 data
+
+# Generated python libraries
+*.so
+
+# Build directory for python
+wheel
+build

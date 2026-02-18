@@ -48,16 +48,18 @@ db.save_to_file("data/my_database.rkyv")?;
 // ... or load a previously saved database
 let db = SolverDatabase::load_from_file("data/my_database.rkyv")?;
 
-// Solve from image centroids (positions in radians from boresight)
+// Solve from image centroids (pixel coordinates, origin at image center)
 let centroids = vec![
-    Centroid { x: 0.01, y: 0.02, mass: Some(50.0), cov: None },
-    Centroid { x: 0.05, y: -0.01, mass: Some(45.0), cov: None },
+    Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None },
+    Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None },
     // ...
 ];
 
 let solve_config = SolveConfig {
-    fov_estimate: (15.0_f32).to_radians(),
-    fov_max_error: Some((2.0_f32).to_radians()),
+    fov_estimate_rad: (15.0_f32).to_radians(), // horizontal FOV
+    image_width: 1024,
+    image_height: 1024,
+    fov_max_error_rad: Some((2.0_f32).to_radians()),
     ..Default::default()
 };
 
@@ -84,6 +86,36 @@ if result.status == SolveStatus::MatchFound {
 |---------|------|-------|
 | Hipparcos | `data/hip2.dat` | Default; includes proper motion |
 | Gaia | `data/gaia_bright_stars.csv` | Requires `--features gaia` |
+
+## Tests
+
+Unit tests run with the default feature set:
+
+```sh
+cargo test
+```
+
+Integration tests require the `image` feature and test data files. Test data is automatically downloaded from Google Cloud Storage on first run and cached in `data/`:
+
+```sh
+cargo test --features image
+```
+
+### SkyView integration test
+
+Solves 10 synthetic star field images (10° FOV) generated from NASA's [SkyView](https://skyview.gsfc.nasa.gov/) virtual observatory, which composites archival survey data into FITS images at any sky position. These use simple CDELT WCS (orthogonal, uniform pixel scale). Each image is solved and the resulting RA/Dec/Roll is compared against the FITS header WCS.
+
+```sh
+cargo test --test skyview_solve_test --features image -- --nocapture
+```
+
+### TESS integration test
+
+Solves 3 Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
+
+```sh
+cargo test --test tess_solve_test --features image -- --nocapture
+```
 
 ## Credits
 

@@ -6,7 +6,7 @@
 //! 3. Thresholding to identify bright pixels
 //! 4. Labeling connected components (blobs)
 //! 5. Computing intensity-weighted centroids for each blob
-//! 6. Converting pixel positions to angular offsets (radians from boresight)
+//! 6. Converting pixel positions to centered coordinates (origin at image center)
 //!
 //! Requires the `image` feature to be enabled.
 //!
@@ -15,13 +15,10 @@
 //! ```no_run
 //! use tetra3::centroid_extraction::{CentroidExtractionConfig, extract_centroids};
 //!
-//! let config = CentroidExtractionConfig {
-//!     fov_horizontal_deg: 10.0,
-//!     ..Default::default()
-//! };
+//! let config = CentroidExtractionConfig::default();
 //!
-//! let centroids = extract_centroids("my_star_image.png", &config).unwrap();
-//! println!("Found {} stars", centroids.len());
+//! let result = extract_centroids("my_star_image.png", &config).unwrap();
+//! println!("Found {} stars", result.centroids.len());
 //! ```
 
 use crate::centroid::Centroid;
@@ -31,10 +28,6 @@ use image::GenericImageView;
 /// Configuration for centroid extraction from an image.
 #[derive(Debug, Clone)]
 pub struct CentroidExtractionConfig {
-    /// Horizontal field of view of the camera in degrees.
-    /// This is used to convert pixel positions to angular offsets.
-    pub fov_horizontal_deg: f32,
-
     /// Number of sigma above background to use as the detection threshold.
     /// Stars brighter than `background + sigma_threshold * noise` are detected.
     /// Default: 5.0
@@ -102,7 +95,6 @@ pub struct CentroidExtractionConfig {
 impl Default for CentroidExtractionConfig {
     fn default() -> Self {
         Self {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 5.0,
             min_pixels: 3,
             max_pixels: 10000,
@@ -119,7 +111,8 @@ impl Default for CentroidExtractionConfig {
 /// Result of centroid extraction, containing the centroids and diagnostic info.
 #[derive(Debug, Clone)]
 pub struct CentroidExtractionResult {
-    /// Extracted centroids in angular coordinates (radians from boresight).
+    /// Extracted centroids in pixel coordinates, with (0, 0) at the image center.
+    /// +X is right (increasing column), +Y is down (increasing row).
     pub centroids: Vec<Centroid>,
 
     /// Image width in pixels.
@@ -144,8 +137,8 @@ pub struct CentroidExtractionResult {
 /// Extract star centroids from an image file.
 ///
 /// Loads the image from `path`, performs background subtraction, blob detection,
-/// and centroid computation. Returns centroids in angular coordinates (radians
-/// from boresight), suitable for use with [`SolverDatabase::solve_from_centroids`].
+/// and centroid computation. Returns centroids in pixel coordinates centered at
+/// the image center, suitable for use with [`SolverDatabase::solve_from_centroids`].
 ///
 /// # Arguments
 ///
@@ -236,7 +229,18 @@ fn extract_from_gray(
     }
 
     // ── Step 2: estimate residual background noise ──
-    let (bg_mean, bg_sigma) = estimate_background(&gray, width, height, config);
+    // Use unclamped residuals for noise estimation so the lower half of the
+    // distribution is preserved (clamping to 0 destroys it).
+    let noise_input = if let Some(ref bg) = local_bg {
+        gray_input
+            .iter()
+            .zip(bg.iter())
+            .map(|(&v, &b)| v - b)
+            .collect::<Vec<f32>>()
+    } else {
+        gray_input.to_vec()
+    };
+    let (bg_mean, bg_sigma) = estimate_background(&noise_input, width, height, config);
     let threshold = bg_mean + config.sigma_threshold * bg_sigma;
 
     // ── Step 3: threshold and label blobs ──
@@ -264,19 +268,18 @@ fn extract_from_gray(
     );
     let num_blobs_raw = raw_centroids.len();
 
-    // ── Step 5: convert to angular coordinates ──
-    let fov_h_rad = (config.fov_horizontal_deg as f64).to_radians() as f32;
-    let pixel_scale = fov_h_rad / width as f32;
+    // ── Step 5: convert to centered pixel coordinates ──
+    // Origin at image center, +X right, +Y down
     let cx = width as f32 / 2.0;
     let cy = height as f32 / 2.0;
 
     let mut centroids: Vec<Centroid> = raw_centroids
         .into_iter()
         .map(|rc| Centroid {
-            x: (rc.x_px - cx) * pixel_scale,
-            y: (rc.y_px - cy) * pixel_scale,
+            x: rc.x_px - cx,
+            y: rc.y_px - cy,
             mass: Some(rc.mass),
-            cov: None,
+            cov: Some(rc.cov),
         })
         .collect();
 
@@ -428,53 +431,70 @@ fn to_grayscale_f32(img: &image::DynamicImage) -> Vec<f32> {
     }
 }
 
-/// Estimate background level and noise using sigma-clipped statistics.
+/// Estimate background level and noise.
+///
+/// Uses the median as the background level and estimates noise from the
+/// lower half of the pixel distribution (below the median). This is robust
+/// to contamination from stars and nebulosity, which only bias upward.
+///
+/// The noise estimate uses sigma-clipping on the below-median pixels to
+/// further reject any remaining outliers, then mirrors the lower-half RMS
+/// to get the full Gaussian sigma.
 fn estimate_background(
     gray: &[f32],
     _width: u32,
     _height: u32,
     config: &CentroidExtractionConfig,
 ) -> (f32, f32) {
-    let mut values: Vec<f32> = gray.to_vec();
+    let mut values: Vec<f32> = gray.iter().copied().filter(|v| v.is_finite()).collect();
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
 
-    let mut mean = 0.0_f32;
+    values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+
+    // Median as robust background level
+    let median = if n % 2 == 0 {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    } else {
+        values[n / 2]
+    };
+
+    // Estimate noise from pixels at or below the median (uncontaminated by stars).
+    // These represent the "dark side" of the noise distribution.
+    let mut low_half: Vec<f32> = values
+        .iter()
+        .copied()
+        .filter(|&v| v <= median)
+        .collect();
+
+    // Sigma-clip the lower half to reject any remaining outliers
     let mut sigma = 0.0_f32;
-
     for _ in 0..config.sigma_clip_iterations {
-        if values.is_empty() {
+        if low_half.is_empty() {
             break;
         }
-
-        // Compute mean
-        let sum: f64 = values.iter().map(|&v| v as f64).sum();
-        mean = (sum / values.len() as f64) as f32;
-
-        // Compute sigma
-        let var_sum: f64 = values.iter().map(|&v| ((v - mean) as f64).powi(2)).sum();
-        sigma = (var_sum / values.len() as f64).sqrt() as f32;
-
+        let sum: f64 = low_half.iter().map(|&v| v as f64).sum();
+        let mean_low = (sum / low_half.len() as f64) as f32;
+        let var_sum: f64 = low_half
+            .iter()
+            .map(|&v| ((v - mean_low) as f64).powi(2))
+            .sum();
+        sigma = (var_sum / low_half.len() as f64).sqrt() as f32;
         if sigma < 1e-10 {
             break;
         }
-
-        // Clip outliers
-        let lo = mean - config.sigma_clip_factor * sigma;
-        let hi = mean + config.sigma_clip_factor * sigma;
-        values.retain(|&v| v >= lo && v <= hi);
+        let lo = mean_low - config.sigma_clip_factor * sigma;
+        let hi = mean_low + config.sigma_clip_factor * sigma;
+        let before = low_half.len();
+        low_half.retain(|&v| v >= lo && v <= hi);
+        if low_half.len() == before {
+            break; // converged
+        }
     }
 
-    // Use median as a more robust background estimator
-    if !values.is_empty() {
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if values.len() % 2 == 0 {
-            (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
-        } else {
-            values[values.len() / 2]
-        };
-        (median, sigma)
-    } else {
-        (mean, sigma)
-    }
+    (median, sigma)
 }
 
 /// Label connected components in a binary mask using two-pass union-find.
@@ -586,11 +606,13 @@ fn label_connected_components(
     labels
 }
 
-/// Raw pixel-coordinate centroid with mass.
+/// Raw pixel-coordinate centroid with mass and covariance.
 struct RawCentroid {
     x_px: f32,
     y_px: f32,
     mass: f32,
+    /// Intensity-weighted 2×2 covariance matrix [[cxx, cxy], [cxy, cyy]] in pixels².
+    cov: crate::Matrix2,
 }
 
 /// Compute intensity-weighted centroids for each labeled blob.
@@ -668,23 +690,23 @@ fn compute_blob_centroids(
     accums
         .into_iter()
         .skip(1) // skip label 0 (background)
-        .filter(|acc| {
+        .filter_map(|acc| {
             if acc.pixel_count < config.min_pixels
                 || acc.pixel_count > config.max_pixels
                 || acc.sum_intensity <= 0.0
             {
-                return false;
+                return None;
             }
+
+            let xbar = acc.sum_x / acc.sum_intensity;
+            let ybar = acc.sum_y / acc.sum_intensity;
+            let cxx = acc.sum_xx / acc.sum_intensity - xbar * xbar;
+            let cyy = acc.sum_yy / acc.sum_intensity - ybar * ybar;
+            let cxy = acc.sum_xy / acc.sum_intensity - xbar * ybar;
 
             // Elongation filter: compute the ratio of major to minor axis
             // from the intensity-weighted covariance matrix.
             if let Some(max_elong) = config.max_elongation {
-                let xbar = acc.sum_x / acc.sum_intensity;
-                let ybar = acc.sum_y / acc.sum_intensity;
-                let cxx = acc.sum_xx / acc.sum_intensity - xbar * xbar;
-                let cyy = acc.sum_yy / acc.sum_intensity - ybar * ybar;
-                let cxy = acc.sum_xy / acc.sum_intensity - xbar * ybar;
-
                 // Eigenvalues of [[cxx, cxy], [cxy, cyy]]
                 let trace = cxx + cyy;
                 let det = cxx * cyy - cxy * cxy;
@@ -693,16 +715,16 @@ fn compute_blob_centroids(
                 let lambda_min = (trace - disc).max(1e-12) / 2.0;
                 let elongation = (lambda_max / lambda_min).sqrt() as f32;
                 if elongation > max_elong {
-                    return false;
+                    return None;
                 }
             }
 
-            true
-        })
-        .map(|acc| RawCentroid {
-            x_px: (acc.sum_x / acc.sum_intensity) as f32,
-            y_px: (acc.sum_y / acc.sum_intensity) as f32,
-            mass: acc.sum_intensity as f32,
+            Some(RawCentroid {
+                x_px: xbar as f32,
+                y_px: ybar as f32,
+                mass: acc.sum_intensity as f32,
+                cov: crate::Matrix2::new(cxx as f32, cxy as f32, cxy as f32, cyy as f32),
+            })
         })
         .collect()
 }
@@ -763,7 +785,6 @@ mod tests {
         }
 
         let config = CentroidExtractionConfig {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 3.0,
             min_pixels: 2,
             ..Default::default()
@@ -772,10 +793,10 @@ mod tests {
         let result = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
         assert_eq!(result.centroids.len(), 1);
 
-        // The centroid should be near the center of the image (0, 0 in angular coords)
+        // The centroid should be near the center of the image (0, 0 in pixel coords)
         let c = &result.centroids[0];
-        assert!(c.x.abs() < 0.001, "Expected x near 0, got {}", c.x);
-        assert!(c.y.abs() < 0.001, "Expected y near 0, got {}", c.y);
+        assert!(c.x.abs() < 1.0, "Expected x near 0, got {}", c.x);
+        assert!(c.y.abs() < 1.0, "Expected y near 0, got {}", c.y);
         assert!(c.mass.unwrap() > 0.0);
     }
 
@@ -806,7 +827,6 @@ mod tests {
         }
 
         let config = CentroidExtractionConfig {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 3.0,
             min_pixels: 2,
             ..Default::default()
@@ -851,7 +871,6 @@ mod tests {
         }
 
         let config = CentroidExtractionConfig {
-            fov_horizontal_deg: 10.0,
             sigma_threshold: 3.0,
             min_pixels: 2,
             max_centroids: Some(2),

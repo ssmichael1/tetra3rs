@@ -29,23 +29,37 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Cache Hipparcos catalog
-        id: cache-hip2
+      - name: Cache test data
+        id: cache-test-data
         uses: actions/cache@v4
         with:
-          path: data/hip2.dat
-          key: hip2-dat-v1
+          path: data
+          key: test-data-v1
 
-      - name: Download Hipparcos catalog
-        if: steps.cache-hip2.outputs.cache-hit != 'true'
+      - name: Download test data
+        if: steps.cache-test-data.outputs.cache-hit != 'true'
         run: |
-          mkdir -p data
-          curl --fail --location --output data/hip2.dat.gz \
-            "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
-          gunzip data/hip2.dat.gz
+          mkdir -p data/skyview_10deg_test_images data/tess_test_images
+          BASE=https://storage.googleapis.com/tetra3rs-testvecs
+          curl --fail -o data/hip2.dat "$BASE/hip2.dat"
+          for f in orion_region_10deg pleiades_region_10deg cygnus_region_10deg \
+                   andromeda_m31_10deg north_pole_10deg sagittarius_10deg \
+                   cassiopeia_10deg scorpius_antares_10deg south_pole_10deg \
+                   virgo_cluster_10deg; do
+            curl --fail -o "data/skyview_10deg_test_images/${f}.fits" "$BASE/skyview_10deg_test_images/${f}.fits"
+          done
+          for f in moderate_density_field sparse_field_north_ecliptic dense_galactic_plane; do
+            curl --fail -o "data/tess_test_images/${f}.fits" "$BASE/tess_test_images/${f}.fits"
+          done
 
       - name: Build
         run: cargo build --verbose
 
-      - name: Run tests
+      - name: Run unit tests
         run: cargo test --verbose
+
+      - name: Run SkyView integration test
+        run: cargo test --test skyview_solve_test --features image -- --nocapture
+
+      - name: Run TESS integration test
+        run: cargo test --test tess_solve_test --features image -- --nocapture
