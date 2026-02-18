@@ -3,6 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tetra3)](https://crates.io/crates/tetra3)
 [![docs.rs](https://img.shields.io/docsrs/tetra3)](https://docs.rs/tetra3)
 [![License](https://img.shields.io/crates/l/tetra3)](LICENSE)
+[![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 A fast, robust lost-in-space star plate solver written in Rust.
 
@@ -18,6 +19,28 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
 - **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading
+
+## Installation
+
+### Rust
+
+The crate is published on [crates.io](https://crates.io/crates/tetra3) as `tetra3`:
+
+```sh
+cargo add tetra3
+```
+
+### Python
+
+Python bindings are available via [PyO3](https://pyo3.rs/) in the `python/` directory. The package is not yet on PyPI; install from source using [maturin](https://www.maturin.rs/):
+
+```sh
+cd python
+pip install maturin
+maturin develop --release
+```
+
+This builds and installs the `tetra3rs` Python module into your current environment.
 
 ## Quick start
 
