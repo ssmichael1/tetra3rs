@@ -7,9 +7,11 @@ use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use tetra3::Centroid;
 use tetra3::centroid_extraction::CentroidExtractionConfig;
-use tetra3::solver::{GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
+use tetra3::solver::{
+    GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus, SolverDatabase,
+};
+use tetra3::Centroid;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PyCentroid — wraps Centroid with covariance
@@ -90,6 +92,225 @@ impl PyCentroid {
                 self.inner.mass.unwrap_or(0.0),
             )
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PySolveResult — wraps SolveResult
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result of a successful plate-solve.
+///
+/// Returned by ``SolverDatabase.solve_from_centroids`` on a successful match.
+/// Contains the camera attitude, matched stars, and error statistics.
+#[pyclass(name = "SolveResult", frozen)]
+struct PySolveResult {
+    inner: SolveResult,
+    /// Cached derived quantities (computed once at construction).
+    ra_deg: f64,
+    dec_deg: f64,
+    roll_deg: f64,
+    /// 3x3 rotation matrix elements (row-major), stored to avoid recomputation.
+    rot_elements: [f64; 9],
+}
+
+impl PySolveResult {
+    /// Construct from a successful `SolveResult`.
+    fn from_result(result: SolveResult) -> Self {
+        let q = result
+            .qicrs2cam
+            .as_ref()
+            .expect("MatchFound must have quaternion");
+        let rot = q.to_rotation_matrix();
+        let m = rot.matrix();
+        let rot_elements = [
+            m[(0, 0)] as f64,
+            m[(0, 1)] as f64,
+            m[(0, 2)] as f64,
+            m[(1, 0)] as f64,
+            m[(1, 1)] as f64,
+            m[(1, 2)] as f64,
+            m[(2, 0)] as f64,
+            m[(2, 1)] as f64,
+            m[(2, 2)] as f64,
+        ];
+
+        // Boresight direction in ICRS: R^T * [0, 0, 1] = third row of R
+        let bx = rot_elements[6];
+        let by = rot_elements[7];
+        let bz = rot_elements[8];
+        let dec_rad = bz.asin();
+        let ra_rad = by.atan2(bx);
+        let ra_deg = ra_rad.to_degrees().rem_euclid(360.0);
+        let dec_deg = dec_rad.to_degrees();
+
+        // Roll angle: position angle of camera +Y, measured East of North.
+        let cam_y_icrs = [rot_elements[3], rot_elements[4], rot_elements[5]];
+        let sin_ra = ra_rad.sin();
+        let cos_ra = ra_rad.cos();
+        let sin_dec = dec_rad.sin();
+        let cos_dec = dec_rad.cos();
+        let north = [-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec];
+        let east = [-sin_ra, cos_ra, 0.0];
+        let dot_north: f64 = cam_y_icrs
+            .iter()
+            .zip(north.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let dot_east: f64 = cam_y_icrs.iter().zip(east.iter()).map(|(a, b)| a * b).sum();
+        let roll_deg = dot_east.atan2(dot_north).to_degrees();
+
+        // Avoid using `_` prefix; suppress unused warning via allow attribute is not needed
+        // since all fields are used by getters.
+        PySolveResult {
+            inner: result,
+            ra_deg,
+            dec_deg,
+            roll_deg,
+            rot_elements,
+        }
+    }
+}
+
+#[pymethods]
+impl PySolveResult {
+    /// 3x3 rotation matrix from ICRS to camera frame as a numpy array.
+    #[getter]
+    fn rotation_matrix_icrs_to_camera<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        let e = &self.rot_elements;
+        PyArray2::from_owned_array(
+            py,
+            ndarray::array![[e[0], e[1], e[2]], [e[3], e[4], e[5]], [e[6], e[7], e[8]],],
+        )
+    }
+
+    /// Right ascension of the boresight in degrees [0, 360).
+    #[getter]
+    fn ra_deg(&self) -> f64 {
+        self.ra_deg
+    }
+
+    /// Declination of the boresight in degrees [-90, 90].
+    #[getter]
+    fn dec_deg(&self) -> f64 {
+        self.dec_deg
+    }
+
+    /// Roll angle: position angle of camera +Y measured East of North, in degrees.
+    #[getter]
+    fn roll_deg(&self) -> f64 {
+        self.roll_deg
+    }
+
+    /// Solved horizontal field of view in degrees.
+    #[getter]
+    fn fov_deg(&self) -> Option<f64> {
+        self.inner.fov_rad.map(|f| f.to_degrees() as f64)
+    }
+
+    /// Number of matched star pairs.
+    #[getter]
+    fn num_matches(&self) -> Option<u32> {
+        self.inner.num_matches
+    }
+
+    /// Root mean square error of matched stars in arcseconds.
+    #[getter]
+    fn rmse_arcsec(&self) -> Option<f64> {
+        self.inner.rmse_rad.map(|r| r.to_degrees() as f64 * 3600.0)
+    }
+
+    /// 90th percentile error in arcseconds.
+    #[getter]
+    fn p90e_arcsec(&self) -> Option<f64> {
+        self.inner.p90e_rad.map(|r| r.to_degrees() as f64 * 3600.0)
+    }
+
+    /// Maximum match error in arcseconds.
+    #[getter]
+    fn max_err_arcsec(&self) -> Option<f64> {
+        self.inner
+            .max_err_rad
+            .map(|r| r.to_degrees() as f64 * 3600.0)
+    }
+
+    /// False-positive probability (lower is better).
+    #[getter]
+    fn probability(&self) -> Option<f64> {
+        self.inner.prob
+    }
+
+    /// Time taken to solve in milliseconds.
+    #[getter]
+    fn solve_time_ms(&self) -> f64 {
+        self.inner.solve_time_ms as f64
+    }
+
+    /// Indices of matched centroids in the input array.
+    #[getter]
+    fn matched_centroids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
+        PyArray1::from_vec(
+            py,
+            self.inner
+                .matched_centroid_indices
+                .iter()
+                .map(|&i| i as u64)
+                .collect(),
+        )
+    }
+
+    /// Catalog IDs of matched stars.
+    #[getter]
+    fn matched_catalog_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
+        PyArray1::from_vec(py, self.inner.matched_catalog_ids.clone())
+    }
+
+    /// Status string (always 'match_found').
+    #[getter]
+    fn status(&self) -> &'static str {
+        "match_found"
+    }
+
+    /// Whether the image x-axis was flipped to achieve a proper rotation.
+    ///
+    /// When ``True``, the rotation matrix assumes negated x-coordinates.
+    /// Pixel-to-sky and sky-to-pixel conversions must account for this.
+    #[getter]
+    fn parity_flip(&self) -> bool {
+        self.inner.parity_flip
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SolveResult(ra={:.4}°, dec={:.4}°, roll={:.2}°, matches={}, rmse={:.2}\", parity_flip={})",
+            self.ra_deg,
+            self.dec_deg,
+            self.roll_deg,
+            self.inner.num_matches.unwrap_or(0),
+            self.inner
+                .rmse_rad
+                .map(|r| r.to_degrees() as f64 * 3600.0)
+                .unwrap_or(0.0),
+            self.inner.parity_flip,
+        )
+    }
+
+    fn __str__(&self) -> String {
+        let flip_str = if self.inner.parity_flip {
+            ", parity flipped"
+        } else {
+            ""
+        };
+        format!(
+            "SolveResult: RA {:.4}°, Dec {:.4}°, Roll {:.2}°, {} matches, RMSE {:.2}\", prob {:.2e}{}",
+            self.ra_deg,
+            self.dec_deg,
+            self.roll_deg,
+            self.inner.num_matches.unwrap_or(0),
+            self.inner.rmse_rad.map(|r| r.to_degrees() as f64 * 3600.0).unwrap_or(0.0),
+            self.inner.prob.unwrap_or(0.0),
+            flip_str,
+        )
     }
 }
 
@@ -201,10 +422,7 @@ impl PySolverDatabase {
     ///     match_max_error: Maximum edge-ratio error. None = use database value.
     ///
     /// Returns:
-    ///     dict with keys: 'rotation_matrix', 'fov_deg', 'num_matches',
-    ///     'rmse_arcsec', 'p90e_arcsec', 'max_err_arcsec', 'probability',
-    ///     'solve_time_ms', 'matched_centroids', 'matched_catalog_ids'.
-    ///     Returns None if no match was found.
+    ///     SolveResult on success, None if no match was found.
     #[pyo3(signature = (
         centroids,
         fov_estimate_deg = None,
@@ -221,7 +439,7 @@ impl PySolverDatabase {
     ))]
     fn solve_from_centroids<'py>(
         &self,
-        py: Python<'py>,
+        _py: Python<'py>,
         centroids: &Bound<'py, pyo3::PyAny>,
         fov_estimate_deg: Option<f64>,
         fov_estimate_rad: Option<f64>,
@@ -234,7 +452,7 @@ impl PySolverDatabase {
         match_threshold: f64,
         solve_timeout_ms: Option<u64>,
         match_max_error: Option<f32>,
-    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+    ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
         let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
             (Some(deg), None) => (deg as f32).to_radians(),
@@ -268,7 +486,8 @@ impl PySolverDatabase {
         };
 
         // Accept either a list of Centroid objects or an Nx2/Nx3 numpy array
-        let centroid_vec: Vec<Centroid> = if let Ok(list) = centroids.cast::<pyo3::types::PyList>() {
+        let centroid_vec: Vec<Centroid> = if let Ok(list) = centroids.cast::<pyo3::types::PyList>()
+        {
             list.iter()
                 .map(|item| {
                     let c: PyCentroid = item.extract()?;
@@ -327,95 +546,8 @@ impl PySolverDatabase {
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
 
         match result.status {
-            SolveStatus::MatchFound => {
-                let dict = PyDict::new(py);
-
-                // Convert quaternion to 3x3 rotation matrix (ICRS → camera)
-                if let Some(q) = &result.qicrs2cam {
-                    let rot = q.to_rotation_matrix();
-                    let m = rot.matrix();
-                    let rot_array = PyArray2::from_owned_array(
-                        py,
-                        ndarray::array![
-                            [m[(0, 0)] as f64, m[(0, 1)] as f64, m[(0, 2)] as f64],
-                            [m[(1, 0)] as f64, m[(1, 1)] as f64, m[(1, 2)] as f64],
-                            [m[(2, 0)] as f64, m[(2, 1)] as f64, m[(2, 2)] as f64],
-                        ],
-                    );
-                    dict.set_item("rotation_matrix_icrs_to_camera", rot_array)?;
-
-                    // Boresight direction in ICRS: R^T * [0, 0, 1] = third row of R
-                    let bx = m[(2, 0)] as f64;
-                    let by = m[(2, 1)] as f64;
-                    let bz = m[(2, 2)] as f64;
-                    let dec_rad = bz.asin();
-                    let ra_rad = by.atan2(bx);
-                    let ra_deg = ra_rad.to_degrees().rem_euclid(360.0);
-                    let dec_deg = dec_rad.to_degrees();
-                    dict.set_item("ra_deg", ra_deg)?;
-                    dict.set_item("dec_deg", dec_deg)?;
-
-                    // Roll angle: angle from celestial North to camera +Y,
-                    // measured East of North (position angle convention).
-                    // Camera +Y in ICRS = R^T * [0, 1, 0] = second row of R
-                    let cam_y_icrs = [m[(1, 0)] as f64, m[(1, 1)] as f64, m[(1, 2)] as f64];
-                    // North and East unit vectors at boresight
-                    let sin_ra = ra_rad.sin();
-                    let cos_ra = ra_rad.cos();
-                    let sin_dec = dec_rad.sin();
-                    let cos_dec = dec_rad.cos();
-                    // e_north = d/d(dec) = (-sin_dec*cos_ra, -sin_dec*sin_ra, cos_dec)
-                    let north = [-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec];
-                    // e_east = d/d(ra) normalized = (-sin_ra, cos_ra, 0)
-                    let east = [-sin_ra, cos_ra, 0.0];
-                    let dot_north: f64 = cam_y_icrs.iter().zip(north.iter()).map(|(a, b)| a * b).sum();
-                    let dot_east: f64 = cam_y_icrs.iter().zip(east.iter()).map(|(a, b)| a * b).sum();
-                    let roll_deg = dot_east.atan2(dot_north).to_degrees();
-                    dict.set_item("roll_deg", roll_deg)?;
-                }
-
-                dict.set_item(
-                    "fov_deg",
-                    result.fov_rad.map(|f| f.to_degrees() as f64),
-                )?;
-                dict.set_item("num_matches", result.num_matches)?;
-                dict.set_item(
-                    "rmse_arcsec",
-                    result.rmse_rad.map(|r| r.to_degrees() as f64 * 3600.0),
-                )?;
-                dict.set_item(
-                    "p90e_arcsec",
-                    result.p90e_rad.map(|r| r.to_degrees() as f64 * 3600.0),
-                )?;
-                dict.set_item(
-                    "max_err_arcsec",
-                    result.max_err_rad.map(|r| r.to_degrees() as f64 * 3600.0),
-                )?;
-                dict.set_item("probability", result.prob)?;
-                dict.set_item("solve_time_ms", result.solve_time_ms as f64)?;
-                dict.set_item(
-                    "matched_centroids",
-                    PyArray1::from_vec(
-                        py,
-                        result
-                            .matched_centroid_indices
-                            .iter()
-                            .map(|&i| i as u64)
-                            .collect(),
-                    ),
-                )?;
-                dict.set_item(
-                    "matched_catalog_ids",
-                    PyArray1::from_vec(py, result.matched_catalog_ids.clone()),
-                )?;
-                dict.set_item("status", "match_found")?;
-
-                Ok(Some(dict))
-            }
-            _ => {
-                // Return None for no match / timeout / too few
-                Ok(None)
-            }
+            SolveStatus::MatchFound => Ok(Some(PySolveResult::from_result(result))),
+            _ => Ok(None),
         }
     }
 
@@ -578,8 +710,9 @@ fn extract_centroids<'py>(
         max_elongation,
     };
 
-    let result = tetra3::centroid_extraction::extract_centroids_from_raw(&pixels, width, height, &config)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let result =
+        tetra3::centroid_extraction::extract_centroids_from_raw(&pixels, width, height, &config)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Convert to list of PyCentroid objects
     let py_centroids: Vec<PyCentroid> = result
@@ -611,6 +744,7 @@ fn extract_centroids<'py>(
 #[pymodule]
 fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCentroid>()?;
+    m.add_class::<PySolveResult>()?;
     m.add_class::<PySolverDatabase>()?;
     m.add_function(wrap_pyfunction!(extract_centroids, m)?)?;
     Ok(())

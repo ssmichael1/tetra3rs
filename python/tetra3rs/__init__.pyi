@@ -9,39 +9,93 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from typing import Optional, TypedDict, Union
+from typing import Optional, Union
 
-class SolveResult(TypedDict):
-    """Result dictionary returned by SolverDatabase.solve_from_centroids."""
+class SolveResult:
+    """Result of a successful plate-solve.
 
-    rotation_matrix_icrs_to_camera: npt.NDArray[np.float64]
-    """3x3 rotation matrix from ICRS to camera frame."""
-    ra_deg: float
-    """Right ascension of the boresight in degrees [0, 360)."""
-    dec_deg: float
-    """Declination of the boresight in degrees [-90, 90]."""
-    roll_deg: float
-    """Roll angle: position angle of camera +Y measured East of North, in degrees."""
-    fov_deg: Optional[float]
-    """Solved horizontal field of view in degrees."""
-    num_matches: Optional[int]
-    """Number of matched star pairs."""
-    rmse_arcsec: Optional[float]
-    """Root mean square error of matched stars in arcseconds."""
-    p90e_arcsec: Optional[float]
-    """90th percentile error in arcseconds."""
-    max_err_arcsec: Optional[float]
-    """Maximum match error in arcseconds."""
-    probability: Optional[float]
-    """False-positive probability (lower is better)."""
-    solve_time_ms: float
-    """Time taken to solve in milliseconds."""
-    matched_centroids: npt.NDArray[np.uint64]
-    """Indices of matched centroids in the input array."""
-    matched_catalog_ids: npt.NDArray[np.uint32]
-    """Hipparcos catalog IDs of matched stars."""
-    status: str
-    """Always 'match_found' when a result is returned."""
+    Returned by ``SolverDatabase.solve_from_centroids`` on a successful match.
+    Contains the camera attitude, matched stars, and error statistics.
+    """
+
+    @property
+    def rotation_matrix_icrs_to_camera(self) -> npt.NDArray[np.float64]:
+        """3x3 rotation matrix from ICRS to camera frame."""
+        ...
+
+    @property
+    def ra_deg(self) -> float:
+        """Right ascension of the boresight in degrees [0, 360)."""
+        ...
+
+    @property
+    def dec_deg(self) -> float:
+        """Declination of the boresight in degrees [-90, 90]."""
+        ...
+
+    @property
+    def roll_deg(self) -> float:
+        """Roll angle: position angle of camera +Y measured East of North, in degrees."""
+        ...
+
+    @property
+    def fov_deg(self) -> Optional[float]:
+        """Solved horizontal field of view in degrees."""
+        ...
+
+    @property
+    def num_matches(self) -> Optional[int]:
+        """Number of matched star pairs."""
+        ...
+
+    @property
+    def rmse_arcsec(self) -> Optional[float]:
+        """Root mean square error of matched stars in arcseconds."""
+        ...
+
+    @property
+    def p90e_arcsec(self) -> Optional[float]:
+        """90th percentile error in arcseconds."""
+        ...
+
+    @property
+    def max_err_arcsec(self) -> Optional[float]:
+        """Maximum match error in arcseconds."""
+        ...
+
+    @property
+    def probability(self) -> Optional[float]:
+        """False-positive probability (lower is better)."""
+        ...
+
+    @property
+    def solve_time_ms(self) -> float:
+        """Time taken to solve in milliseconds."""
+        ...
+
+    @property
+    def matched_centroids(self) -> npt.NDArray[np.uint64]:
+        """Indices of matched centroids in the input array."""
+        ...
+
+    @property
+    def matched_catalog_ids(self) -> npt.NDArray[np.uint64]:
+        """Catalog IDs of matched stars."""
+        ...
+
+    @property
+    def status(self) -> str:
+        """Always 'match_found' when a result is returned."""
+        ...
+
+    @property
+    def parity_flip(self) -> bool:
+        """Whether the image x-axis was flipped to achieve a proper rotation.
+
+        When ``True``, the rotation matrix assumes negated x-coordinates.
+        Pixel-to-sky and sky-to-pixel conversions must account for this.
+        """
+        ...
 
 class ExtractionResult(TypedDict):
     """Result dictionary returned by extract_centroids."""
@@ -197,7 +251,7 @@ class SolverDatabase:
             match_max_error: Maximum edge-ratio error. None = use database value.
 
         Returns:
-            A dict with solve results, or None if no match was found.
+            A SolveResult on success, or None if no match was found.
         """
         ...
 

@@ -233,6 +233,11 @@ pub struct SolveResult {
     pub solve_time_ms: f32,
     /// Outcome status.
     pub status: SolveStatus,
+    /// Whether the image x-axis was flipped to achieve a proper rotation.
+    ///
+    /// When `true`, the rotation matrix assumes negated x-coordinates.
+    /// Pixel↔sky conversions must account for this flip.
+    pub parity_flip: bool,
     /// Catalog IDs of matched stars (only populated on success).
     pub matched_catalog_ids: Vec<u64>,
     /// Indices into the input centroid slice for each match.
@@ -252,6 +257,7 @@ impl SolveResult {
             prob: None,
             solve_time_ms,
             status,
+            parity_flip: false,
             matched_catalog_ids: Vec::new(),
             matched_centroid_indices: Vec::new(),
         }
