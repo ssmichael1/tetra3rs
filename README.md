@@ -156,7 +156,7 @@ cargo test --test tess_solve_test --features image -- --nocapture
 
 This project is a Rust implementation of the **tetra3** / **cedar-solve** algorithm.
 
-- **[cedar-solve](https://github.com/smroid/cedar-solve)** — Steven Rosenthal's C++/Rust star plate solver, which this implementation closely follows (excellent work!)
+- **[cedar-solve](https://github.com/smroid/cedar-solve)** — Steven Rosenthal's Python plate solver, which this implementation closely follows (excellent work!)
 - **[tetra3](https://github.com/esa/tetra3)** — the original Python implementation by Gustav Pettersson at ESA
 - **Paper**: G. Pettersson, "Tetra3: a fast and robust star identification algorithm," ESA GNC Conference, 2023
 
