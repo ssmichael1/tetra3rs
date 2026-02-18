@@ -199,6 +199,89 @@ fn angular_separation(a: &Vector3<f32>, b: &Vector3<f32>) -> f32 {
     cross.atan2(dot)
 }
 
+/// Get a SIP polynomial coefficient from the header (e.g. "A_2_1").
+/// Returns 0.0 if the key is not present.
+fn get_sip_coeff(hdu: &FitsHdu, prefix: &str, p: usize, q: usize) -> f64 {
+    let key = format!("{}_{}_{}", prefix, p, q);
+    get_f64(hdu, &key).unwrap_or(0.0)
+}
+
+/// Apply SIP distortion correction (forward: pixel → corrected pixel).
+/// u, v are pixel offsets from CRPIX (0-indexed: x - (CRPIX1 - 1)).
+/// Returns (u + f(u,v), v + g(u,v)) where f and g are the SIP polynomials.
+fn apply_sip_forward(hdu: &FitsHdu, u: f64, v: f64) -> (f64, f64) {
+    let a_order = match hdu.headers.get("A_ORDER") {
+        Some(FitsValue::Int(n)) => *n as usize,
+        _ => return (u, v), // no SIP
+    };
+    let b_order = match hdu.headers.get("B_ORDER") {
+        Some(FitsValue::Int(n)) => *n as usize,
+        _ => return (u, v),
+    };
+
+    let mut f = 0.0;
+    for p in 0..=a_order {
+        for q in 0..=(a_order - p) {
+            let c = get_sip_coeff(hdu, "A", p, q);
+            if c != 0.0 {
+                f += c * u.powi(p as i32) * v.powi(q as i32);
+            }
+        }
+    }
+
+    let mut g = 0.0;
+    for p in 0..=b_order {
+        for q in 0..=(b_order - p) {
+            let c = get_sip_coeff(hdu, "B", p, q);
+            if c != 0.0 {
+                g += c * u.powi(p as i32) * v.powi(q as i32);
+            }
+        }
+    }
+
+    (u + f, v + g)
+}
+
+/// Compute the RA/Dec (degrees) at a given pixel coordinate in the full-frame
+/// image using the full WCS chain: pixel → SIP → CD matrix → TAN deprojection.
+/// pixel_x, pixel_y are 0-indexed full-frame coordinates.
+fn pixel_to_radec(hdu: &FitsHdu, pixel_x: f64, pixel_y: f64) -> (f64, f64) {
+    // CRPIX is 1-indexed in FITS
+    let crpix1 = get_f64(hdu, "CRPIX1").expect("Missing CRPIX1");
+    let crpix2 = get_f64(hdu, "CRPIX2").expect("Missing CRPIX2");
+    let crval1 = get_f64(hdu, "CRVAL1").expect("Missing CRVAL1");
+    let crval2 = get_f64(hdu, "CRVAL2").expect("Missing CRVAL2");
+
+    // Convert to 1-indexed FITS convention, then offset from CRPIX
+    let u = (pixel_x + 1.0) - crpix1;
+    let v = (pixel_y + 1.0) - crpix2;
+
+    // Apply SIP distortion (forward: pixel → corrected pixel)
+    let (u_sip, v_sip) = apply_sip_forward(hdu, u, v);
+
+    // Apply CD matrix to get intermediate world coordinates (degrees)
+    let cd11 = get_f64(hdu, "CD1_1").unwrap_or(0.0);
+    let cd12 = get_f64(hdu, "CD1_2").unwrap_or(0.0);
+    let cd21 = get_f64(hdu, "CD2_1").unwrap_or(0.0);
+    let cd22 = get_f64(hdu, "CD2_2").unwrap_or(0.0);
+
+    let xi = cd11 * u_sip + cd12 * v_sip; // degrees
+    let eta = cd21 * u_sip + cd22 * v_sip; // degrees
+
+    // TAN (gnomonic) deprojection
+    let xi_rad = xi.to_radians();
+    let eta_rad = eta.to_radians();
+    let crval1_rad = crval1.to_radians();
+    let crval2_rad = crval2.to_radians();
+
+    let denom = crval2_rad.cos() - eta_rad * crval2_rad.sin();
+    let ra_rad = crval1_rad + (xi_rad).atan2(denom);
+    let dec_rad = (crval2_rad.sin() + eta_rad * crval2_rad.cos())
+        .atan2((xi_rad.powi(2) + denom.powi(2)).sqrt());
+
+    (ra_rad.to_degrees().rem_euclid(360.0), dec_rad.to_degrees())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The test
 // ═══════════════════════════════════════════════════════════════════════════
