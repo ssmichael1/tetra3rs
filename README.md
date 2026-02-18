@@ -105,6 +105,12 @@ if result.status == SolveStatus::MatchFound {
 4. **Verification** — project nearby catalog stars into the camera frame, count matches, and accept only if the false-positive probability (binomial CDF) is below threshold
 5. **Refinement** — re-estimate the rotation using all matched star pairs
 
+### Parity flip detection
+
+Some imaging systems produce mirror-reflected images (e.g. FITS files with `CDELT1 < 0`, or optics with an odd number of reflections). In these cases the initial rotation estimate yields a reflection (determinant < 0) rather than a proper rotation. The solver detects this by checking the determinant of the rotation matrix; when negative, it negates the x-coordinates of all centroid vectors and recomputes the rotation.
+
+The `SolveResult` includes a `parity_flip` flag (`bool` / `True`/`False` in Python) indicating whether this correction was applied. This is critical for pixel↔sky coordinate conversions: when `parity_flip` is `True`, the mapping between pixel x-coordinates and camera-frame x must include a sign flip.
+
 ## Catalog support
 
 | Catalog | File | Notes |

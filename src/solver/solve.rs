@@ -299,10 +299,12 @@ impl SolverDatabase {
                     // SVD rotation: finds R such that camera_vec ≈ R * icrs_vec
                     let mut rotation_matrix = find_rotation_matrix(&matched_img, &matched_cat);
 
+                    let mut parity_flip = false;
                     if rotation_matrix.determinant() < 0.0 {
                         // Wrong parity (e.g. FITS image with CDELT1 < 0).
                         // Fix by negating x on ALL centroid vectors and recomputing.
                         debug!("Detected negative determinant — flipping x parity");
+                        parity_flip = true;
                         for v in centroid_vectors.iter_mut() {
                             v[0] = -v[0];
                         }
@@ -435,6 +437,7 @@ impl SolverDatabase {
                         prob: Some(prob_mismatch * self.props.num_patterns as f64),
                         solve_time_ms: elapsed_ms(t0),
                         status: SolveStatus::MatchFound,
+                        parity_flip,
                         matched_catalog_ids: matched_cat_ids,
                         matched_centroid_indices: matched_cent_inds,
                     };
