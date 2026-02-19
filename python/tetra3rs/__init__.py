@@ -13,4 +13,5 @@ __all__ = [
     "SolveResult",
     "SolverDatabase",
     "extract_centroids",
+    "fit_radial_distortion",
 ]

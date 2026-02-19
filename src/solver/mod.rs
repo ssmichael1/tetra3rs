@@ -171,6 +171,18 @@ pub struct SolveConfig {
     pub solve_timeout_ms: Option<u64>,
     /// Maximum edge-ratio error for matching. None = use database value.
     pub match_max_error: Option<f32>,
+    /// Number of iterative SVD refinement passes after the initial match.
+    ///
+    /// Each pass re-projects catalog stars using the refined rotation and
+    /// re-matches centroids, potentially discovering additional inliers at
+    /// the edges of the match radius.  Terminates early if no new inliers
+    /// are found.
+    ///
+    /// - `1` = single refinement pass (original behavior)
+    /// - `2` = one additional re-match after the first refinement (default)
+    ///
+    /// Default: 2.
+    pub refine_iterations: u32,
     /// Lens distortion model to apply to centroids before solving.
     ///
     /// When provided, observed centroid pixel coordinates are undistorted
@@ -192,6 +204,7 @@ impl Default for SolveConfig {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(5000),
             match_max_error: None,
+            refine_iterations: 2,
             distortion: None,
         }
     }

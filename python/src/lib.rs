@@ -588,6 +588,7 @@ impl PySolverDatabase {
     ///     match_threshold: False-positive probability threshold. Default 1e-5.
     ///     solve_timeout_ms: Timeout in milliseconds. None = no timeout.
     ///     match_max_error: Maximum edge-ratio error. None = use database value.
+    ///     refine_iterations: Number of iterative SVD refinement passes. Default 2.
     ///     distortion: A RadialDistortion model to apply
     ///         to centroids before solving. None = no distortion correction.
     ///
@@ -606,6 +607,7 @@ impl PySolverDatabase {
         match_threshold = 1e-5,
         solve_timeout_ms = Some(5000),
         match_max_error = None,
+        refine_iterations = 2,
         distortion = None,
     ))]
     fn solve_from_centroids<'py>(
@@ -623,6 +625,7 @@ impl PySolverDatabase {
         match_threshold: f64,
         solve_timeout_ms: Option<u64>,
         match_max_error: Option<f32>,
+        refine_iterations: u32,
         distortion: Option<&Bound<'py, pyo3::PyAny>>,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
@@ -719,6 +722,7 @@ impl PySolverDatabase {
             match_threshold,
             solve_timeout_ms,
             match_max_error,
+            refine_iterations,
             distortion: dist_model,
         };
 

@@ -122,6 +122,7 @@ fn test_generate_and_solve_hipparcos() {
         match_threshold: 1e-5,
         solve_timeout_ms: Some(30_000), // 30s for test
         match_max_error: None,
+        refine_iterations: 2,
         distortion: None,
     };
 
@@ -326,6 +327,7 @@ fn test_statistical_1000_random_orientations() {
         match_threshold: 1e-5,
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
+        refine_iterations: 2,
         distortion: None,
     };
 
@@ -636,6 +638,7 @@ fn test_statistical_1000_noisy_centroids() {
         match_threshold: 1e-5,
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
+        refine_iterations: 2,
         distortion: None,
     };
 

@@ -370,10 +370,12 @@ impl SolverDatabase {
 
                     // ── Verify by matching nearby catalog stars ──
 
+                    let fov_diagonal = fov * 1.42; // sqrt(2) ≈ 1.42 for square FOV
+                    let match_radius_rad = config.match_radius * fov;
+
                     // Find catalog stars within the diagonal FOV
                     let image_center_icrs =
                         rotation_matrix.transpose() * Vector3::new(0.0, 0.0, 1.0);
-                    let fov_diagonal = fov * 1.42; // sqrt(2) ≈ 1.42 for square FOV
                     let nearby_inds = self
                         .star_catalog
                         .query_indices_from_uvec(image_center_icrs, fov_diagonal / 2.0);
@@ -396,18 +398,18 @@ impl SolverDatabase {
                     let num_nearby = nearby_cam_positions.len();
 
                     // Match image centroids to projected catalog stars
-                    let match_radius_rad = config.match_radius * fov;
-                    let matches = find_centroid_matches(
+                    let mut current_matches = find_centroid_matches(
                         &working_vectors[..match_centroid_count],
                         &nearby_cam_positions,
                         match_radius_rad,
                     );
-                    let num_matches = matches.len();
+                    let mut current_num_matches = current_matches.len();
 
                     // ── Compute false-positive probability ──
                     let prob_single = num_nearby as f64 * (config.match_radius as f64).powi(2);
                     let prob_mismatch = binomial_cdf(
-                        (match_centroid_count as i64 - (num_matches as i64 - 2)).max(0) as u32,
+                        (match_centroid_count as i64 - (current_num_matches as i64 - 2)).max(0)
+                            as u32,
                         match_centroid_count as u32,
                         1.0 - prob_single.min(1.0),
                     );
@@ -418,29 +420,97 @@ impl SolverDatabase {
 
                     debug!(
                         "MATCH: {} matches, prob={:.2e}, fov={:.3}°",
-                        num_matches,
+                        current_num_matches,
                         prob_mismatch * self.props.num_patterns as f64,
                         fov.to_degrees()
                     );
 
-                    // ── Refine rotation using all matched stars ──
-                    let mut all_img_vecs: Vec<[f32; 3]> = Vec::with_capacity(num_matches);
-                    let mut all_cat_vecs: Vec<[f32; 3]> = Vec::with_capacity(num_matches);
-                    let mut matched_cat_ids: Vec<u64> = Vec::with_capacity(num_matches);
-                    let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(num_matches);
+                    // ── Iterative refinement ──
+                    // Each pass: SVD on current inliers → re-project → re-match.
+                    // Terminates early if inlier count does not increase.
+                    let refine_iters = config.refine_iterations.max(1);
+                    let mut current_rotation = rotation_matrix;
 
-                    for &(cent_local_idx, cat_idx) in &matches {
+                    for iteration in 0..refine_iters {
+                        // Build matched vector pairs from current matches
+                        let mut iter_img: Vec<[f32; 3]> = Vec::with_capacity(current_num_matches);
+                        let mut iter_cat: Vec<[f32; 3]> = Vec::with_capacity(current_num_matches);
+                        for &(cent_local_idx, cat_idx) in &current_matches {
+                            iter_img.push(working_vectors[cent_local_idx]);
+                            iter_cat.push(self.star_vectors[cat_idx]);
+                        }
+
+                        // Refine rotation via SVD
+                        current_rotation = find_rotation_matrix_dyn(&iter_img, &iter_cat);
+
+                        // On the last iteration, skip re-matching
+                        if iteration + 1 >= refine_iters {
+                            break;
+                        }
+
+                        // Re-project catalog stars using refined rotation
+                        let center_icrs =
+                            current_rotation.transpose() * Vector3::new(0.0, 0.0, 1.0);
+                        let nearby = self
+                            .star_catalog
+                            .query_indices_from_uvec(center_icrs, fov_diagonal / 2.0);
+
+                        let mut cam_positions: Vec<(usize, f32, f32)> = Vec::new();
+                        for &cat_idx in &nearby {
+                            let sv = &self.star_vectors[cat_idx];
+                            let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
+                            let cam_v = current_rotation * icrs_v;
+                            if cam_v.z > 0.0 {
+                                let cx = cam_v.x / cam_v.z;
+                                let cy = cam_v.y / cam_v.z;
+                                cam_positions.push((cat_idx, cx, cy));
+                            }
+                        }
+                        cam_positions.truncate(2 * match_centroid_count);
+
+                        let new_matches = find_centroid_matches(
+                            &working_vectors[..match_centroid_count],
+                            &cam_positions,
+                            match_radius_rad,
+                        );
+                        let new_num_matches = new_matches.len();
+
+                        if new_num_matches <= current_num_matches {
+                            debug!(
+                                "Refinement iter {}: no new inliers ({} -> {}), stopping",
+                                iteration + 1,
+                                current_num_matches,
+                                new_num_matches
+                            );
+                            break;
+                        }
+
+                        debug!(
+                            "Refinement iter {}: {} -> {} inliers",
+                            iteration + 1,
+                            current_num_matches,
+                            new_num_matches
+                        );
+                        current_matches = new_matches;
+                        current_num_matches = new_num_matches;
+                    }
+
+                    // ── Build final output vectors from current_matches ──
+                    let mut all_img_vecs: Vec<[f32; 3]> = Vec::with_capacity(current_num_matches);
+                    let mut all_cat_vecs: Vec<[f32; 3]> = Vec::with_capacity(current_num_matches);
+                    let mut matched_cat_ids: Vec<u64> = Vec::with_capacity(current_num_matches);
+                    let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(current_num_matches);
+
+                    for &(cent_local_idx, cat_idx) in &current_matches {
                         all_img_vecs.push(working_vectors[cent_local_idx]);
                         all_cat_vecs.push(self.star_vectors[cat_idx]);
                         matched_cat_ids.push(self.star_catalog_ids[cat_idx]);
                         matched_cent_inds.push(sorted_indices[cent_local_idx]);
                     }
 
-                    let refined_rot = find_rotation_matrix_dyn(&all_img_vecs, &all_cat_vecs);
-
                     // ── Compute residuals ──
-                    let mut residuals: Vec<f32> = Vec::with_capacity(num_matches);
-                    for i in 0..num_matches {
+                    let mut residuals: Vec<f32> = Vec::with_capacity(current_num_matches);
+                    for i in 0..current_num_matches {
                         let img_v = Vector3::new(
                             all_img_vecs[i][0],
                             all_img_vecs[i][1],
@@ -452,7 +522,7 @@ impl SolverDatabase {
                             all_cat_vecs[i][2],
                         );
                         // Rotate image vector to ICRS and compare
-                        let img_in_icrs = refined_rot.transpose() * img_v;
+                        let img_in_icrs = current_rotation.transpose() * img_v;
                         let dist = ((img_in_icrs - cat_v).norm()).min(2.0);
                         residuals.push(angle_from_distance(dist));
                     }
@@ -472,13 +542,13 @@ impl SolverDatabase {
                     let max_err = residuals.last().copied().unwrap_or(0.0);
 
                     // Convert to quaternion
-                    let rot3 = Rotation3::from_matrix_unchecked(refined_rot);
+                    let rot3 = Rotation3::from_matrix_unchecked(current_rotation);
                     let quat = UnitQuaternion::from_rotation_matrix(&rot3);
 
                     return SolveResult {
                         qicrs2cam: Some(quat),
                         fov_rad: Some(fov),
-                        num_matches: Some(num_matches as u32),
+                        num_matches: Some(current_num_matches as u32),
                         rmse_rad: Some(rmse),
                         p90e_rad: Some(p90e),
                         max_err_rad: Some(max_err),

@@ -484,7 +484,11 @@ fn test_skyview_fits_solve() {
                 let half_fov_v = (fov_v_deg as f32 / 2.0).to_radians();
                 if cx_rad.abs() < half_fov_h && cy_rad.abs() < half_fov_v {
                     // Convert to pixel coordinates from image center
-                    catalog_centroids.push((cx_rad / pixel_scale, cy_rad / pixel_scale, db.star_catalog.stars()[idx].mag));
+                    catalog_centroids.push((
+                        cx_rad / pixel_scale,
+                        cy_rad / pixel_scale,
+                        db.star_catalog.stars()[idx].mag,
+                    ));
                 }
             }
         }
@@ -545,6 +549,7 @@ fn test_skyview_fits_solve() {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
+            refine_iterations: 2,
             distortion: None,
         };
 
