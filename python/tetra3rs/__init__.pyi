@@ -286,6 +286,7 @@ class SolverDatabase:
         match_threshold: float = 1e-5,
         solve_timeout_ms: Optional[int] = 5000,
         match_max_error: Optional[float] = None,
+        refine_iterations: int = 2,
         distortion: Optional[RadialDistortion] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
@@ -309,6 +310,9 @@ class SolverDatabase:
             match_threshold: False-positive probability threshold.
             solve_timeout_ms: Timeout in milliseconds. None = no timeout.
             match_max_error: Maximum edge-ratio error. None = use database value.
+            refine_iterations: Number of iterative SVD refinement passes.
+                Each pass re-projects catalog stars and re-matches centroids
+                using the refined rotation. Default 2.
             distortion: Lens distortion model to apply to centroids before solving.
                 When provided, observed centroid pixel coordinates are undistorted
                 before being converted to unit vectors.
