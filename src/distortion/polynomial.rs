@@ -3,7 +3,7 @@
 //! Models arbitrary 2D distortion using polynomial correction terms:
 //!
 //! ```text
-//! x_distorted = x + Σ A_pq · x^p · y^q     (2 ≤ p+q ≤ order)
+//! x_distorted = x + Σ A_pq · x^p · y^q     (0 ≤ p+q ≤ order)
 //! y_distorted = y + Σ B_pq · x^p · y^q
 //! ```
 //!
@@ -13,6 +13,11 @@
 //! x_ideal = x_obs + Σ AP_pq · x_obs^p · y_obs^q
 //! y_ideal = y_obs + Σ BP_pq · x_obs^p · y_obs^q
 //! ```
+//!
+//! Including all terms from order 0:
+//! - **(p+q = 0)**: constant offset — optical center shift
+//! - **(p+q = 1)**: linear terms  — residual scale & rotation
+//! - **(p+q ≥ 2)**: higher-order distortion
 //!
 //! Unlike the radial model, this captures tangential distortion, decentering,
 //! and other effects that aren't radially symmetric — critical for cameras
@@ -116,33 +121,29 @@ impl PolynomialDistortion {
 
 /// Number of polynomial coefficients for the given order.
 ///
-/// Terms are (p, q) with 2 ≤ p+q ≤ order:
-///   order 2: 3 terms  (2,0),(1,1),(0,2)
-///   order 3: 7 terms  + (3,0),(2,1),(1,2),(0,3)
-///   order 4: 12 terms + (4,0),(3,1),(2,2),(1,3),(0,4)
+/// Terms are (p, q) with 0 ≤ p+q ≤ order:
+///   order 0: 1 term   (0,0)  — constant offset (optical center shift)
+///   order 1: +2 terms (1,0),(0,1)  — linear scale/rotation
+///   order 2: +3 terms (2,0),(1,1),(0,2)  — quadratic
+///   order 3: +4 terms (3,0),(2,1),(1,2),(0,3)  — cubic
 ///   etc.
+///
+/// Total = (order+1)(order+2)/2.
 pub fn num_coeffs(order: u32) -> usize {
-    let mut count = 0;
-    for s in 2..=order {
-        count += (s + 1) as usize; // s+1 terms for each sum p+q=s
-    }
-    count
+    ((order + 1) * (order + 2) / 2) as usize
 }
 
-/// Map (p, q) with 2 ≤ p+q ≤ order to a flat index.
+/// Map (p, q) with 0 ≤ p+q ≤ order to a flat index.
 ///
 /// Terms are enumerated in order of increasing sum, then decreasing p:
-///   sum=2: (2,0)=0, (1,1)=1, (0,2)=2
-///   sum=3: (3,0)=3, (2,1)=4, (1,2)=5, (0,3)=6
-///   sum=4: (4,0)=7, (3,1)=8, (2,2)=9, (1,3)=10, (0,4)=11
+///   sum=0: (0,0)=0
+///   sum=1: (1,0)=1, (0,1)=2
+///   sum=2: (2,0)=3, (1,1)=4, (0,2)=5
+///   sum=3: (3,0)=6, (2,1)=7, (1,2)=8, (0,3)=9
 pub fn coeff_index(p: u32, q: u32) -> usize {
     let s = p + q;
-    assert!(s >= 2, "p+q must be >= 2");
-    // Base offset: number of terms for sums 2..(s-1)
-    let mut base = 0usize;
-    for ss in 2..s {
-        base += (ss + 1) as usize;
-    }
+    // Base offset: number of terms for sums 0..(s-1) = s*(s+1)/2
+    let base = (s * (s + 1) / 2) as usize;
     // Within sum=s, terms are ordered by decreasing p: (s,0), (s-1,1), ..., (0,s)
     base + (s - p) as usize
 }
@@ -150,7 +151,7 @@ pub fn coeff_index(p: u32, q: u32) -> usize {
 /// Enumerate all (p, q) pairs for the given order.
 pub fn term_pairs(order: u32) -> Vec<(u32, u32)> {
     let mut pairs = Vec::with_capacity(num_coeffs(order));
-    for s in 2..=order {
+    for s in 0..=order {
         for p in (0..=s).rev() {
             let q = s - p;
             pairs.push((p, q));
@@ -164,7 +165,7 @@ pub fn term_pairs(order: u32) -> Vec<(u32, u32)> {
 fn eval_poly(coeffs: &[f64], order: u32, x: f64, y: f64) -> f64 {
     let mut result = 0.0;
     let mut idx = 0;
-    for s in 2..=order {
+    for s in 0..=order {
         for p in (0..=s).rev() {
             let q = s - p;
             result += coeffs[idx] * x.powi(p as i32) * y.powi(q as i32);
@@ -180,29 +181,36 @@ mod tests {
 
     #[test]
     fn test_num_coeffs() {
-        assert_eq!(num_coeffs(2), 3);
-        assert_eq!(num_coeffs(3), 7);
-        assert_eq!(num_coeffs(4), 12);
-        assert_eq!(num_coeffs(5), 18);
+        assert_eq!(num_coeffs(0), 1); // (0,0)
+        assert_eq!(num_coeffs(1), 3); // + (1,0),(0,1)
+        assert_eq!(num_coeffs(2), 6); // + (2,0),(1,1),(0,2)
+        assert_eq!(num_coeffs(3), 10); // + (3,0),(2,1),(1,2),(0,3)
+        assert_eq!(num_coeffs(4), 15);
+        assert_eq!(num_coeffs(5), 21);
     }
 
     #[test]
     fn test_coeff_index() {
+        // sum=0
+        assert_eq!(coeff_index(0, 0), 0);
+        // sum=1
+        assert_eq!(coeff_index(1, 0), 1);
+        assert_eq!(coeff_index(0, 1), 2);
         // sum=2
-        assert_eq!(coeff_index(2, 0), 0);
-        assert_eq!(coeff_index(1, 1), 1);
-        assert_eq!(coeff_index(0, 2), 2);
+        assert_eq!(coeff_index(2, 0), 3);
+        assert_eq!(coeff_index(1, 1), 4);
+        assert_eq!(coeff_index(0, 2), 5);
         // sum=3
-        assert_eq!(coeff_index(3, 0), 3);
-        assert_eq!(coeff_index(2, 1), 4);
-        assert_eq!(coeff_index(1, 2), 5);
-        assert_eq!(coeff_index(0, 3), 6);
+        assert_eq!(coeff_index(3, 0), 6);
+        assert_eq!(coeff_index(2, 1), 7);
+        assert_eq!(coeff_index(1, 2), 8);
+        assert_eq!(coeff_index(0, 3), 9);
         // sum=4
-        assert_eq!(coeff_index(4, 0), 7);
-        assert_eq!(coeff_index(3, 1), 8);
-        assert_eq!(coeff_index(2, 2), 9);
-        assert_eq!(coeff_index(1, 3), 10);
-        assert_eq!(coeff_index(0, 4), 11);
+        assert_eq!(coeff_index(4, 0), 10);
+        assert_eq!(coeff_index(3, 1), 11);
+        assert_eq!(coeff_index(2, 2), 12);
+        assert_eq!(coeff_index(1, 3), 13);
+        assert_eq!(coeff_index(0, 4), 14);
     }
 
     #[test]
@@ -210,7 +218,18 @@ mod tests {
         let pairs = term_pairs(3);
         assert_eq!(
             pairs,
-            vec![(2, 0), (1, 1), (0, 2), (3, 0), (2, 1), (1, 2), (0, 3)]
+            vec![
+                (0, 0),
+                (1, 0),
+                (0, 1),
+                (2, 0),
+                (1, 1),
+                (0, 2),
+                (3, 0),
+                (2, 1),
+                (1, 2),
+                (0, 3)
+            ]
         );
     }
 
@@ -227,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_distort_undistort_basic() {
-        // Create a simple distortion: only x²·y term (index for (2,1) = 4 at order 3)
+        // Create a simple distortion: only x² and y² terms
         let n = num_coeffs(4);
         let mut a = vec![0.0; n];
         let mut b = vec![0.0; n];
