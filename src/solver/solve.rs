@@ -427,7 +427,9 @@ impl SolverDatabase {
 
                     // ── Iterative refinement ──
                     // Each pass: SVD on current inliers → re-project → re-match.
-                    // Terminates early if inlier count does not increase.
+                    // Terminates early only when the match *set* is unchanged across
+                    // an iteration (not just the count), so wrong associations that
+                    // are being swapped out for correct ones keep driving convergence.
                     let refine_iters = config.refine_iterations.max(1);
                     let mut current_rotation = rotation_matrix;
 
@@ -475,24 +477,209 @@ impl SolverDatabase {
                         );
                         let new_num_matches = new_matches.len();
 
-                        if new_num_matches <= current_num_matches {
-                            debug!(
-                                "Refinement iter {}: no new inliers ({} -> {}), stopping",
-                                iteration + 1,
-                                current_num_matches,
-                                new_num_matches
-                            );
-                            break;
-                        }
+                        // Stop only when the match set is identical (not just same size).
+                        // Sort both for set-equality comparison.
+                        let mut sorted_new = new_matches.clone();
+                        sorted_new.sort_unstable();
+                        let mut sorted_cur = current_matches.clone();
+                        sorted_cur.sort_unstable();
+                        let set_unchanged = sorted_new == sorted_cur;
 
                         debug!(
-                            "Refinement iter {}: {} -> {} inliers",
+                            "Refinement iter {}: {} -> {} inliers{}",
                             iteration + 1,
                             current_num_matches,
-                            new_num_matches
+                            new_num_matches,
+                            if set_unchanged { " (converged)" } else { "" },
                         );
+
                         current_matches = new_matches;
                         current_num_matches = new_num_matches;
+
+                        if set_unchanged {
+                            break;
+                        }
+                    }
+
+                    // ── Iterative MAD clip + re-associate with adaptive radius ──
+                    // Each iteration:
+                    //   1. Compute per-match residuals
+                    //   2. MAD-based outlier rejection (robust to contamination)
+                    //   3. Re-fit SVD on inliers
+                    //   4. Compute adaptive match radius from inlier RMSE
+                    //   5. Re-project catalog + re-match ALL centroids with tight radius
+                    //   6. SVD on the re-matched set
+                    // Stops when the match set converges (no clip AND no set change).
+                    {
+                        const MAD_SCALE: f32 = 1.4826; // MAD-to-σ for Gaussian
+                        const CLIP_NSIGMA: f32 = 3.0;
+                        const MAX_CLIP_ITERS: usize = 10;
+                        // Adaptive radius is clamped to [floor, original_radius].
+                        // Floor ≈ 5 arcsec in radians — prevents over-tightening.
+                        const RADIUS_FLOOR: f32 = 2.5e-5;
+
+                        let mut adaptive_radius = match_radius_rad;
+
+                        for clip_iter in 0..MAX_CLIP_ITERS {
+                            if current_matches.len() < 4 {
+                                break;
+                            }
+
+                            // ── 1. Compute residuals ──
+                            let mut residuals: Vec<(usize, f32)> =
+                                Vec::with_capacity(current_matches.len());
+                            for (i, &(ci, cat_idx)) in current_matches.iter().enumerate() {
+                                let img_v = Vector3::new(
+                                    working_vectors[ci][0],
+                                    working_vectors[ci][1],
+                                    working_vectors[ci][2],
+                                );
+                                let cat_v = Vector3::new(
+                                    self.star_vectors[cat_idx][0],
+                                    self.star_vectors[cat_idx][1],
+                                    self.star_vectors[cat_idx][2],
+                                );
+                                let img_icrs = current_rotation.transpose() * img_v;
+                                let dist = ((img_icrs - cat_v).norm()).min(2.0);
+                                residuals.push((i, angle_from_distance(dist)));
+                            }
+
+                            // ── 2. MAD clip ──
+                            let mut sorted_res: Vec<f32> =
+                                residuals.iter().map(|&(_, r)| r).collect();
+                            sorted_res.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let median = sorted_res[sorted_res.len() / 2];
+
+                            let mut abs_devs: Vec<f32> =
+                                sorted_res.iter().map(|r| (r - median).abs()).collect();
+                            abs_devs.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let mad = abs_devs[abs_devs.len() / 2];
+
+                            let sigma_est = MAD_SCALE * mad;
+                            // Floor: don't clip below ~0.5 arcsec
+                            let clip_threshold = median + CLIP_NSIGMA * sigma_est.max(2.5e-6);
+
+                            let inliers: Vec<(usize, usize)> = residuals
+                                .iter()
+                                .filter(|&&(_, r)| r <= clip_threshold)
+                                .map(|&(i, _)| current_matches[i])
+                                .collect();
+
+                            let n_rejected = current_matches.len() - inliers.len();
+
+                            // ── 3. Re-fit SVD on cleaned inliers (if any were clipped) ──
+                            if n_rejected > 0 && inliers.len() >= 4 {
+                                debug!(
+                                    "MAD clip iter {}: {} -> {} inliers (median {:.2e}, σ_est {:.2e}, thresh {:.2e} rad)",
+                                    clip_iter + 1,
+                                    current_matches.len(),
+                                    inliers.len(),
+                                    median,
+                                    sigma_est,
+                                    clip_threshold,
+                                );
+
+                                let clean_img: Vec<[f32; 3]> =
+                                    inliers.iter().map(|&(ci, _)| working_vectors[ci]).collect();
+                                let clean_cat: Vec<[f32; 3]> = inliers
+                                    .iter()
+                                    .map(|&(_, ci)| self.star_vectors[ci])
+                                    .collect();
+                                current_rotation = find_rotation_matrix_dyn(&clean_img, &clean_cat);
+                                current_matches = inliers;
+                                current_num_matches = current_matches.len();
+                            }
+
+                            // ── 4. Adaptive match radius from inlier statistics ──
+                            // Use 5× the MAD-estimated σ as the re-match radius,
+                            // clamped between RADIUS_FLOOR and the original radius.
+                            // This dramatically reduces wrong associations in dense
+                            // fields once the rotation is well-determined.
+                            adaptive_radius = (5.0 * MAD_SCALE * mad)
+                                .max(RADIUS_FLOOR)
+                                .min(match_radius_rad);
+
+                            debug!(
+                                "Clip iter {}: adaptive match radius {:.2e} rad ({:.1} arcsec)",
+                                clip_iter + 1,
+                                adaptive_radius,
+                                adaptive_radius.to_degrees() * 3600.0,
+                            );
+
+                            // ── 5. Re-project + re-match ALL centroids ──
+                            let center_icrs =
+                                current_rotation.transpose() * Vector3::new(0.0, 0.0, 1.0);
+                            let nearby = self
+                                .star_catalog
+                                .query_indices_from_uvec(center_icrs, fov_diagonal / 2.0);
+                            let mut cam_positions: Vec<(usize, f32, f32)> = Vec::new();
+                            for &cat_idx in &nearby {
+                                let sv = &self.star_vectors[cat_idx];
+                                let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
+                                let cam_v = current_rotation * icrs_v;
+                                if cam_v.z > 0.0 {
+                                    let cx = cam_v.x / cam_v.z;
+                                    let cy = cam_v.y / cam_v.z;
+                                    cam_positions.push((cat_idx, cx, cy));
+                                }
+                            }
+                            cam_positions.truncate(2 * match_centroid_count);
+
+                            let fresh = find_centroid_matches(
+                                &working_vectors[..match_centroid_count],
+                                &cam_positions,
+                                adaptive_radius,
+                            );
+
+                            // Check for set convergence
+                            let mut sorted_fresh = fresh.clone();
+                            sorted_fresh.sort_unstable();
+                            let mut sorted_cur = current_matches.clone();
+                            sorted_cur.sort_unstable();
+                            let set_unchanged = sorted_fresh == sorted_cur;
+
+                            if fresh.len() >= 4 {
+                                if fresh.len() != current_num_matches || !set_unchanged {
+                                    debug!(
+                                        "Clip iter {} re-match: {} -> {} matches (radius {:.1} arcsec)",
+                                        clip_iter + 1,
+                                        current_num_matches,
+                                        fresh.len(),
+                                        adaptive_radius.to_degrees() * 3600.0,
+                                    );
+                                }
+
+                                current_matches = fresh;
+                                current_num_matches = current_matches.len();
+
+                                // ── 6. SVD on re-matched set ──
+                                let rematched_img: Vec<[f32; 3]> = current_matches
+                                    .iter()
+                                    .map(|&(ci, _)| working_vectors[ci])
+                                    .collect();
+                                let rematched_cat: Vec<[f32; 3]> = current_matches
+                                    .iter()
+                                    .map(|&(_, ci)| self.star_vectors[ci])
+                                    .collect();
+                                current_rotation =
+                                    find_rotation_matrix_dyn(&rematched_img, &rematched_cat);
+                            }
+
+                            // Converged: nothing clipped AND match set is stable
+                            if n_rejected == 0 && set_unchanged {
+                                debug!(
+                                    "Clip+re-match converged at iter {} with {} matches (radius {:.1} arcsec)",
+                                    clip_iter + 1,
+                                    current_num_matches,
+                                    adaptive_radius.to_degrees() * 3600.0,
+                                );
+                                break;
+                            }
+                        }
                     }
 
                     // ── Build final output vectors from current_matches ──
