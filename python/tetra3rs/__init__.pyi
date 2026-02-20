@@ -498,8 +498,30 @@ class PolynomialDistortion:
     Where s = scale = image_width/2.
 
     Typically fitted from solve results via
-    ``SolverDatabase.fit_polynomial_distortion()``.
+    ``SolverDatabase.fit_polynomial_distortion()``, or constructed directly
+    from coefficient arrays (e.g. extracted from a FITS WCS SIP model).
     """
+
+    def __init__(
+        self,
+        order: int,
+        scale: float,
+        a_coeffs: list[float],
+        b_coeffs: list[float],
+        ap_coeffs: list[float],
+        bp_coeffs: list[float],
+    ) -> None:
+        """Create a polynomial distortion model from coefficient arrays.
+
+        Args:
+            order: Polynomial order (2–6 typical).
+            scale: Normalization scale (typically image_width / 2).
+            a_coeffs: Forward A coefficients (x correction, ideal → distorted).
+            b_coeffs: Forward B coefficients (y correction, ideal → distorted).
+            ap_coeffs: Inverse AP coefficients (x correction, distorted → ideal).
+            bp_coeffs: Inverse BP coefficients (y correction, distorted → ideal).
+        """
+        ...
 
     @property
     def order(self) -> int:
