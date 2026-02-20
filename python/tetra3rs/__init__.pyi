@@ -287,7 +287,7 @@ class SolverDatabase:
         solve_timeout_ms: Optional[int] = 5000,
         match_max_error: Optional[float] = None,
         refine_iterations: int = 2,
-        distortion: Optional[RadialDistortion] = None,
+        distortion: Optional[Union[RadialDistortion, PolynomialDistortion]] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -414,6 +414,41 @@ class SolverDatabase:
         """
         ...
 
+    def fit_polynomial_distortion(
+        self,
+        solve_results: Union[SolveResult, list[SolveResult]],
+        centroids: Union[
+            list[Centroid],
+            npt.NDArray[np.float64],
+            list[Union[list[Centroid], npt.NDArray[np.float64]]],
+        ],
+        image_width: int,
+        order: int = 4,
+        sigma_clip: float = 3.0,
+        max_iterations: int = 20,
+        stage2_threshold_px: Optional[float] = 5.0,
+    ) -> DistortionFitResult:
+        """Fit a polynomial (SIP-like) distortion model from solve results.
+
+        This model captures arbitrary 2D distortion including radial, tangential,
+        and cross-terms — suitable for wide-field cameras like TESS where the
+        optical center is offset from the CCD center.
+
+        Args:
+            solve_results: A SolveResult or list of SolveResult objects.
+            centroids: Matching centroids.
+            image_width: Image width in pixels.
+            order: Polynomial order (2-6). Default 4.
+            sigma_clip: Sigma threshold for outlier rejection.
+            max_iterations: Maximum sigma-clip iterations.
+            stage2_threshold_px: Loose pixel threshold for second-stage
+                recovery. None to disable.
+
+        Returns:
+            DistortionFitResult with the fitted polynomial model and statistics.
+        """
+        ...
+
 class RadialDistortion:
     """Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
 
@@ -454,14 +489,70 @@ class RadialDistortion:
         """Inverse distortion: distorted → ideal."""
         ...
 
-class DistortionFitResult:
-    """Result of a distortion fitting procedure.
+class PolynomialDistortion:
+    """SIP-like polynomial distortion model with independent x,y correction terms.
 
-    Returned by ``SolverDatabase.fit_radial_distortion``.
+    Forward:  x_d = x + Σ A_pq · (x/s)^p · (y/s)^q   (2 ≤ p+q ≤ order)
+    Inverse:  x_i = x_d + Σ AP_pq · (x_d/s)^p · (y_d/s)^q
+
+    Where s = scale = image_width/2.
+
+    Typically fitted from solve results via
+    ``SolverDatabase.fit_polynomial_distortion()``.
     """
 
     @property
-    def model(self) -> Optional[RadialDistortion]:
+    def order(self) -> int:
+        """Polynomial order."""
+        ...
+
+    @property
+    def scale(self) -> float:
+        """Normalization scale (typically image_width / 2)."""
+        ...
+
+    @property
+    def num_coeffs(self) -> int:
+        """Number of polynomial coefficients per axis."""
+        ...
+
+    @property
+    def a_coeffs(self) -> npt.NDArray[np.float64]:
+        """Forward A coefficients (x correction, ideal → distorted)."""
+        ...
+
+    @property
+    def b_coeffs(self) -> npt.NDArray[np.float64]:
+        """Forward B coefficients (y correction, ideal → distorted)."""
+        ...
+
+    @property
+    def ap_coeffs(self) -> npt.NDArray[np.float64]:
+        """Inverse AP coefficients (x correction, distorted → ideal)."""
+        ...
+
+    @property
+    def bp_coeffs(self) -> npt.NDArray[np.float64]:
+        """Inverse BP coefficients (y correction, distorted → ideal)."""
+        ...
+
+    def distort(self, x: float, y: float) -> tuple[float, float]:
+        """Forward distortion: ideal → distorted."""
+        ...
+
+    def undistort(self, x: float, y: float) -> tuple[float, float]:
+        """Inverse distortion: distorted → ideal."""
+        ...
+
+class DistortionFitResult:
+    """Result of a distortion fitting procedure.
+
+    Returned by ``SolverDatabase.fit_radial_distortion`` or
+    ``SolverDatabase.fit_polynomial_distortion``.
+    """
+
+    @property
+    def model(self) -> Optional[Union[RadialDistortion, PolynomialDistortion]]:
         """The fitted distortion model."""
         ...
 
@@ -526,7 +617,7 @@ def extract_centroids(
 
 def undistort_centroids(
     centroids: list[Centroid],
-    distortion: RadialDistortion,
+    distortion: Union[RadialDistortion, PolynomialDistortion],
 ) -> list[Centroid]:
     """Apply distortion correction to a list of centroids (distorted → ideal).
 
@@ -543,7 +634,7 @@ def undistort_centroids(
 
 def distort_centroids(
     centroids: list[Centroid],
-    distortion: RadialDistortion,
+    distortion: Union[RadialDistortion, PolynomialDistortion],
 ) -> list[Centroid]:
     """Apply forward distortion to a list of centroids (ideal → distorted).
 

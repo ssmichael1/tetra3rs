@@ -518,7 +518,7 @@ impl SolverDatabase {
                         // Floor ≈ 5 arcsec in radians — prevents over-tightening.
                         const RADIUS_FLOOR: f32 = 2.5e-5;
 
-                        let mut adaptive_radius = match_radius_rad;
+                        let mut adaptive_radius: f32;
 
                         for clip_iter in 0..MAX_CLIP_ITERS {
                             if current_matches.len() < 4 {
