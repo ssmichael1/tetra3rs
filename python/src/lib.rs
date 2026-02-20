@@ -9,7 +9,8 @@ use pyo3::types::{PyAny, PyDict};
 
 use tetra3::centroid_extraction::CentroidExtractionConfig;
 use tetra3::distortion::{
-    fit_radial_distortion, Distortion, DistortionFitConfig, RadialDistortion,
+    fit_polynomial_distortion, fit_radial_distortion, Distortion, DistortionFitConfig,
+    PolynomialDistortion, RadialDistortion,
 };
 use tetra3::solver::{
     GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus, SolverDatabase,
@@ -255,9 +256,11 @@ impl PyCentroid {
 fn extract_distortion(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Distortion> {
     if let Ok(r) = obj.extract::<PyRadialDistortion>() {
         Ok(Distortion::Radial(r.inner))
+    } else if let Ok(p) = obj.extract::<PyPolynomialDistortion>() {
+        Ok(Distortion::Polynomial(p.inner))
     } else {
         Err(pyo3::exceptions::PyTypeError::new_err(
-            "distortion must be a RadialDistortion",
+            "distortion must be a RadialDistortion or PolynomialDistortion",
         ))
     }
 }
@@ -892,6 +895,73 @@ impl PySolverDatabase {
 
         Ok(PyDistortionFitResult { inner: result })
     }
+
+    /// Fit a polynomial (SIP-like) distortion model from solve results.
+    ///
+    /// This model captures arbitrary 2D distortion including radial, tangential,
+    /// and cross-terms — suitable for wide-field cameras like TESS where the
+    /// optical center is offset from the CCD center.
+    ///
+    /// Args:
+    ///     solve_results: A SolveResult or list of SolveResult objects.
+    ///     centroids: Matching centroids.
+    ///     image_width: Image width in pixels.
+    ///     order: Polynomial order (2-6). Default 4.
+    ///     sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
+    ///     max_iterations: Maximum sigma-clip iterations. Default 20.
+    ///     stage2_threshold_px: Loose pixel threshold for second-stage recovery.
+    ///         None to disable. Default 5.0.
+    ///
+    /// Returns:
+    ///     DistortionFitResult with the fitted polynomial model and statistics.
+    #[pyo3(signature = (
+        solve_results,
+        centroids,
+        image_width,
+        order = 4,
+        sigma_clip = 3.0,
+        max_iterations = 20,
+        stage2_threshold_px = Some(5.0),
+    ))]
+    fn fit_polynomial_distortion<'py>(
+        &self,
+        _py: Python<'py>,
+        solve_results: &Bound<'py, pyo3::PyAny>,
+        centroids: &Bound<'py, pyo3::PyAny>,
+        image_width: u32,
+        order: u32,
+        sigma_clip: f64,
+        max_iterations: u32,
+        stage2_threshold_px: Option<f64>,
+    ) -> PyResult<PyDistortionFitResult> {
+        if order < 2 || order > 6 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "polynomial order must be in [2, 6]",
+            ));
+        }
+
+        let (sr_vec, cent_vec) = parse_solve_results_and_centroids(solve_results, centroids)?;
+
+        let sr_refs: Vec<&SolveResult> = sr_vec.iter().collect();
+        let cent_refs: Vec<&[Centroid]> = cent_vec.iter().map(|v| v.as_slice()).collect();
+
+        let config = DistortionFitConfig {
+            sigma_clip,
+            max_iterations,
+            stage2_threshold_px,
+        };
+
+        let result = fit_polynomial_distortion(
+            &sr_refs,
+            &cent_refs,
+            &self.inner,
+            image_width,
+            order,
+            &config,
+        );
+
+        Ok(PyDistortionFitResult { inner: result })
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1097,6 +1167,85 @@ impl PyRadialDistortion {
     }
 }
 
+/// SIP-like polynomial distortion model with independent x,y correction terms.
+///
+/// Forward:  x_d = x + Σ A_pq · (x/s)^p · (y/s)^q   (2 ≤ p+q ≤ order)
+/// Inverse:  x_i = x_d + Σ AP_pq · (x_d/s)^p · (y_d/s)^q
+///
+/// Where s = scale = image_width/2.
+///
+/// This model captures radial, tangential, and cross-term distortion — suitable
+/// for cameras where the optical center is offset from the CCD center (e.g. TESS).
+///
+/// Typically fitted from solve results via ``SolverDatabase.fit_polynomial_distortion()``.
+#[pyclass(name = "PolynomialDistortion", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyPolynomialDistortion {
+    inner: PolynomialDistortion,
+}
+
+#[pymethods]
+impl PyPolynomialDistortion {
+    #[getter]
+    fn order(&self) -> u32 {
+        self.inner.order
+    }
+
+    #[getter]
+    fn scale(&self) -> f64 {
+        self.inner.scale
+    }
+
+    /// Number of polynomial coefficients per axis.
+    #[getter]
+    fn num_coeffs(&self) -> usize {
+        self.inner.a_coeffs.len()
+    }
+
+    /// Forward A coefficients (x correction, ideal → distorted) as a numpy array.
+    #[getter]
+    fn a_coeffs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.inner.a_coeffs.clone())
+    }
+
+    /// Forward B coefficients (y correction, ideal → distorted) as a numpy array.
+    #[getter]
+    fn b_coeffs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.inner.b_coeffs.clone())
+    }
+
+    /// Inverse AP coefficients (x correction, distorted → ideal) as a numpy array.
+    #[getter]
+    fn ap_coeffs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.inner.ap_coeffs.clone())
+    }
+
+    /// Inverse BP coefficients (y correction, distorted → ideal) as a numpy array.
+    #[getter]
+    fn bp_coeffs<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.inner.bp_coeffs.clone())
+    }
+
+    /// Forward distortion: ideal → distorted (pixel coords, relative to image center).
+    fn distort(&self, x: f64, y: f64) -> (f64, f64) {
+        self.inner.distort(x, y)
+    }
+
+    /// Inverse distortion: distorted → ideal (pixel coords, relative to image center).
+    fn undistort(&self, x: f64, y: f64) -> (f64, f64) {
+        self.inner.undistort(x, y)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PolynomialDistortion(order={}, scale={:.1}, num_coeffs={})",
+            self.inner.order,
+            self.inner.scale,
+            self.inner.a_coeffs.len(),
+        )
+    }
+}
+
 /// Result of a distortion fitting procedure.
 ///
 /// Attributes:
@@ -1116,12 +1265,16 @@ struct PyDistortionFitResult {
 impl PyDistortionFitResult {
     /// The fitted distortion model.
     ///
-    /// Returns a RadialDistortion, or None if fitting failed.
+    /// Returns a RadialDistortion, PolynomialDistortion, or None if fitting failed.
     #[getter]
     fn model<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         match &self.inner.model {
             Distortion::Radial(r) => {
                 let obj = PyRadialDistortion { inner: r.clone() };
+                Ok(obj.into_pyobject(py)?.into_any().unbind())
+            }
+            Distortion::Polynomial(p) => {
+                let obj = PyPolynomialDistortion { inner: p.clone() };
                 Ok(obj.into_pyobject(py)?.into_any().unbind())
             }
             Distortion::None => Ok(py.None()),
@@ -1272,6 +1425,7 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySolveResult>()?;
     m.add_class::<PySolverDatabase>()?;
     m.add_class::<PyRadialDistortion>()?;
+    m.add_class::<PyPolynomialDistortion>()?;
     m.add_class::<PyDistortionFitResult>()?;
     m.add_function(wrap_pyfunction!(extract_centroids, m)?)?;
     m.add_function(wrap_pyfunction!(undistort_centroids, m)?)?;

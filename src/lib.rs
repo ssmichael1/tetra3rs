@@ -107,7 +107,8 @@ pub use centroid_extraction::{
     CentroidExtractionConfig, CentroidExtractionResult,
 };
 pub use distortion::{
-    Distortion, DistortionFitConfig, DistortionFitResult, RadialDistortion,
+    fit_polynomial_distortion, fit_radial_distortion, Distortion, DistortionFitConfig,
+    DistortionFitResult, PolynomialDistortion, RadialDistortion,
 };
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,

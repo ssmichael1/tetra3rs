@@ -8,6 +8,7 @@
 //! # Supported models
 //!
 //! - [`Distortion::Radial`] — classic radial distortion with up to 3 coefficients (k1, k2, k3)
+//! - [`Distortion::Polynomial`] — SIP-like polynomial distortion with arbitrary cross-terms
 //!
 //! # Usage
 //!
@@ -16,18 +17,23 @@
 //! 1. **Provided** to the solver via [`SolveConfig::distortion`](crate::SolveConfig) if the
 //!    distortion is already known (e.g. from a calibration procedure or FITS header).
 //!
-//! 2. **Fitted** from solve results using [`fit_radial_distortion`]. This function
-//!    performs iterative robust fitting with sigma-clipping to reject mismatched stars.
+//! 2. **Fitted** from solve results using [`fit_radial_distortion`] or
+//!    [`fit_polynomial_distortion`]. These functions perform iterative robust
+//!    fitting with sigma-clipping to reject mismatched stars.
 
 pub mod fit;
+pub mod polynomial;
 pub mod radial;
 
-pub use fit::{fit_radial_distortion, DistortionFitConfig, DistortionFitResult};
+pub use fit::{
+    fit_polynomial_distortion, fit_radial_distortion, DistortionFitConfig, DistortionFitResult,
+};
+pub use polynomial::PolynomialDistortion;
 pub use radial::RadialDistortion;
 
 /// Lens distortion model.
 ///
-/// An enum-based distortion model that supports radial
+/// An enum-based distortion model that supports radial and polynomial
 /// distortion correction. All coordinates are in pixels relative to
 /// the optical center (typically the image center).
 #[derive(Debug, Clone)]
@@ -36,6 +42,8 @@ pub enum Distortion {
     None,
     /// Radial distortion: r_distorted = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
     Radial(RadialDistortion),
+    /// SIP-like polynomial distortion with independent x,y correction terms.
+    Polynomial(PolynomialDistortion),
 }
 
 impl Distortion {
@@ -47,6 +55,7 @@ impl Distortion {
         match self {
             Distortion::None => (x, y),
             Distortion::Radial(r) => r.undistort(x, y),
+            Distortion::Polynomial(p) => p.undistort(x, y),
         }
     }
 
@@ -58,6 +67,7 @@ impl Distortion {
         match self {
             Distortion::None => (x, y),
             Distortion::Radial(r) => r.distort(x, y),
+            Distortion::Polynomial(p) => p.distort(x, y),
         }
     }
 
