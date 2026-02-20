@@ -874,17 +874,138 @@ impl SolverDatabase {
                         .collect();
                     let working_vectors: &[[f32; 3]] = &tuned_centroid_vectors;
 
-                    // ── Final outlier-only clip (no re-association) ──
+                    // ── Post-FOV-tuning re-match + MAD clip ──
+                    // The pixel scale changed during FOV tuning, so the old matches
+                    // may include marginal stars that no longer fit, and new stars
+                    // may now be within radius. Re-project, re-match, then do one
+                    // MAD clip cycle to clean up before the final clip.
+                    {
+                        let fov_diag = fov * 1.42;
+                        let center_icrs =
+                            current_rotation.transpose() * Vector3::new(0.0, 0.0, 1.0);
+                        let nearby = self
+                            .star_catalog
+                            .query_indices_from_uvec(center_icrs, fov_diag / 2.0);
+                        let mut cam_positions: Vec<(usize, f32, f32)> = Vec::new();
+                        for &cat_idx in &nearby {
+                            let sv = &self.star_vectors[cat_idx];
+                            let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
+                            let cam_v = current_rotation * icrs_v;
+                            if cam_v.z > 0.0 {
+                                let cx = cam_v.x / cam_v.z;
+                                let cy = cam_v.y / cam_v.z;
+                                cam_positions.push((cat_idx, cx, cy));
+                            }
+                        }
+                        cam_positions.truncate(2 * match_centroid_count);
+
+                        let fresh = find_centroid_matches(
+                            &working_vectors[..match_centroid_count],
+                            &cam_positions,
+                            match_radius_rad,
+                        );
+
+                        if fresh.len() >= 4 {
+                            debug!(
+                                "Post-FOV-tuning re-match: {} -> {} matches",
+                                current_num_matches,
+                                fresh.len(),
+                            );
+                            current_matches = fresh;
+                            current_num_matches = current_matches.len();
+
+                            // SVD on re-matched set
+                            let rm_img: Vec<[f32; 3]> = current_matches
+                                .iter()
+                                .map(|&(ci, _)| working_vectors[ci])
+                                .collect();
+                            let rm_cat: Vec<[f32; 3]> = current_matches
+                                .iter()
+                                .map(|&(_, ci)| self.star_vectors[ci])
+                                .collect();
+                            current_rotation = find_rotation_matrix_dyn(&rm_img, &rm_cat);
+
+                            // One MAD clip cycle on the fresh matches
+                            if current_matches.len() >= 6 {
+                                const MAD_SCALE_POST: f32 = 1.4826;
+                                const CLIP_NSIGMA_POST: f32 = 3.0;
+
+                                let mut res_post: Vec<(usize, f32)> =
+                                    Vec::with_capacity(current_matches.len());
+                                for (i, &(ci, cat_idx)) in current_matches.iter().enumerate() {
+                                    let img_v = Vector3::new(
+                                        working_vectors[ci][0],
+                                        working_vectors[ci][1],
+                                        working_vectors[ci][2],
+                                    );
+                                    let cat_v = Vector3::new(
+                                        self.star_vectors[cat_idx][0],
+                                        self.star_vectors[cat_idx][1],
+                                        self.star_vectors[cat_idx][2],
+                                    );
+                                    let img_icrs = current_rotation.transpose() * img_v;
+                                    res_post.push((i, angle_between(&img_icrs, &cat_v)));
+                                }
+
+                                let mut sr: Vec<f32> = res_post.iter().map(|&(_, r)| r).collect();
+                                sr.sort_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                let median = sr[sr.len() / 2];
+                                let mut ad: Vec<f32> =
+                                    sr.iter().map(|r| (r - median).abs()).collect();
+                                ad.sort_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                let mad = ad[ad.len() / 2];
+                                let sigma_est = MAD_SCALE_POST * mad;
+                                let thresh = median + CLIP_NSIGMA_POST * sigma_est.max(2.5e-6);
+
+                                let clean: Vec<(usize, usize)> = res_post
+                                    .iter()
+                                    .filter(|&&(_, r)| r <= thresh)
+                                    .map(|&(i, _)| current_matches[i])
+                                    .collect();
+
+                                let n_rej = current_matches.len() - clean.len();
+                                if n_rej > 0 && clean.len() >= 4 {
+                                    debug!(
+                                        "Post-FOV-tuning MAD clip: {} -> {} (rejected {})",
+                                        current_matches.len(),
+                                        clean.len(),
+                                        n_rej,
+                                    );
+                                    let ci_img: Vec<[f32; 3]> =
+                                        clean.iter().map(|&(ci, _)| working_vectors[ci]).collect();
+                                    let ci_cat: Vec<[f32; 3]> = clean
+                                        .iter()
+                                        .map(|&(_, ci)| self.star_vectors[ci])
+                                        .collect();
+                                    current_rotation = find_rotation_matrix_dyn(&ci_img, &ci_cat);
+                                    current_matches = clean;
+                                    current_num_matches = current_matches.len();
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Final outlier-only clip (no re-association, multi-pass) ──
                     // After the iterative MAD clip + re-associate loop has converged,
-                    // do one last MAD clip on the final match set and re-fit SVD on
-                    // the survivors ONLY — no re-matching step, so no new wrong
-                    // associations can creep in. This nearly guarantees the final
-                    // rotation is free of outliers.
+                    // do up to 3 MAD clip passes on the final match set, re-fitting
+                    // SVD on the survivors ONLY — no re-matching step, so no new
+                    // wrong associations can creep in.  Multiple passes handle
+                    // cascading outliers where one bad star inflates the MAD estimate
+                    // enough to mask another.
                     {
                         const MAD_SCALE_FINAL: f32 = 1.4826;
                         const CLIP_NSIGMA_FINAL: f32 = 3.0;
+                        const MAX_FINAL_CLIP_PASSES: usize = 3;
 
-                        if current_matches.len() >= 6 {
+                        for final_pass in 0..MAX_FINAL_CLIP_PASSES {
+                            if current_matches.len() < 6 {
+                                break;
+                            }
+
                             // Compute residuals
                             let mut residuals_final: Vec<(usize, f32)> =
                                 Vec::with_capacity(current_matches.len());
@@ -928,7 +1049,8 @@ impl SolverDatabase {
                             let n_final_rejected = current_matches.len() - clean.len();
                             if n_final_rejected > 0 && clean.len() >= 4 {
                                 debug!(
-                                    "Final clean-up clip: {} -> {} matches (rejected {})",
+                                    "Final clean-up clip pass {}: {} -> {} matches (rejected {})",
+                                    final_pass + 1,
                                     current_matches.len(),
                                     clean.len(),
                                     n_final_rejected,
@@ -941,6 +1063,9 @@ impl SolverDatabase {
                                 current_rotation = find_rotation_matrix_dyn(&clean_img, &clean_cat);
                                 current_matches = clean;
                                 current_num_matches = current_matches.len();
+                            } else {
+                                // Nothing to clip — converged
+                                break;
                             }
                         }
                     }
