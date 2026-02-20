@@ -492,10 +492,17 @@ class RadialDistortion:
 class PolynomialDistortion:
     """SIP-like polynomial distortion model with independent x,y correction terms.
 
-    Forward:  x_d = x + Σ A_pq · (x/s)^p · (y/s)^q   (2 ≤ p+q ≤ order)
+    Forward:  x_d = x + Σ A_pq · (x/s)^p · (y/s)^q   (0 ≤ p+q ≤ order)
     Inverse:  x_i = x_d + Σ AP_pq · (x_d/s)^p · (y_d/s)^q
 
     Where s = scale = image_width/2.
+
+    Includes all polynomial terms from order 0:
+      - (p+q = 0): constant offset — optical center shift
+      - (p+q = 1): linear terms — residual scale & rotation
+      - (p+q ≥ 2): higher-order distortion
+
+    Total coefficients per axis: (order+1)(order+2)/2.
 
     Typically fitted from solve results via
     ``SolverDatabase.fit_polynomial_distortion()``, or constructed directly
@@ -512,6 +519,9 @@ class PolynomialDistortion:
         bp_coeffs: list[float],
     ) -> None:
         """Create a polynomial distortion model from coefficient arrays.
+
+        Each coefficient array must have exactly (order+1)(order+2)/2 elements,
+        covering all terms from p+q=0 (constant offset) through p+q=order.
 
         Args:
             order: Polynomial order (2–6 typical).

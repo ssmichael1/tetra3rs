@@ -240,7 +240,7 @@ pub fn fit_radial_distortion(
 /// Fit a polynomial (SIP-like) distortion model from plate-solve results.
 ///
 /// This model fits arbitrary 2D polynomial correction terms:
-///   x_obs = x_ideal + Σ A_pq · (x_ideal/s)^p · (y_ideal/s)^q   (s = scale)
+///   x_obs = x_ideal + Σ A_pq · (x_ideal/s)^p · (y_ideal/s)^q   (s = scale, 0 ≤ p+q ≤ order)
 ///   y_obs = y_ideal + Σ B_pq · (x_ideal/s)^p · (y_ideal/s)^q
 /// for 2 ≤ p+q ≤ order.
 ///
@@ -248,10 +248,13 @@ pub fn fit_radial_distortion(
 /// undistortion in the solver.
 ///
 /// The `order` parameter determines the polynomial complexity:
-/// - order 2: 3 terms per axis (6 total) — quadratic
-/// - order 3: 7 terms per axis (14 total) — cubic
-/// - order 4: 12 terms per axis (24 total) — quartic (recommended for TESS)
-/// - order 5: 18 terms per axis (36 total) — quintic
+/// - order 2: 6 terms per axis (12 total) — offset + linear + quadratic
+/// - order 3: 10 terms per axis (20 total) — + cubic
+/// - order 4: 15 terms per axis (30 total) — + quartic (recommended for TESS)
+/// - order 5: 21 terms per axis (42 total) — + quintic
+///
+/// Order-0 terms absorb optical center offset; order-1 terms absorb residual
+/// plate scale and rotation errors.
 pub fn fit_polynomial_distortion(
     solve_results: &[&SolveResult],
     centroids: &[&[Centroid]],
@@ -644,7 +647,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 /// Fit the forward polynomial (ideal → distorted) by least-squares.
 ///
-/// Model: x_obs = x_ideal + Σ A_pq · u^p · v^q   (u = x_ideal/scale, v = y_ideal/scale)
+/// Model: x_obs = x_ideal + Σ A_pq · u^p · v^q   (u = x_ideal/scale, v = y_ideal/scale, 0 ≤ p+q ≤ order)
 /// Stacks x and y equations, solves each axis independently.
 fn fit_poly_ls(
     points: &[MatchedPoint],
