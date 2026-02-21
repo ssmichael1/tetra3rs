@@ -7,12 +7,11 @@ use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 
+use tetra3::camera_model::CameraModel;
 use tetra3::centroid_extraction::CentroidExtractionConfig;
+use tetra3::distortion::calibrate::{calibrate_camera, CalibrateConfig};
 use tetra3::distortion::polynomial::num_coeffs as poly_num_coeffs;
-use tetra3::distortion::{
-    fit_polynomial_distortion, fit_radial_distortion, Distortion, DistortionFitConfig,
-    PolynomialDistortion, RadialDistortion,
-};
+use tetra3::distortion::{Distortion, PolynomialDistortion, RadialDistortion};
 use tetra3::solver::{
     GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus, SolverDatabase,
 };
@@ -267,6 +266,155 @@ fn extract_distortion(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Distortion> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PyCameraModel — wraps CameraModel
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Camera intrinsics model: focal length, optical center, parity, and distortion.
+///
+/// Encapsulates the mapping between pixel coordinates and tangent-plane coordinates.
+///
+/// Example:
+///     cam = tetra3rs.CameraModel.from_fov(fov_deg=10.0, image_width=2048)
+///     xi, eta = cam.pixel_to_tanplane(100.0, 200.0)
+#[pyclass(name = "CameraModel", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyCameraModel {
+    inner: CameraModel,
+}
+
+#[pymethods]
+impl PyCameraModel {
+    /// Create a camera model with explicit parameters.
+    ///
+    /// Args:
+    ///     focal_length_px: Focal length in pixels.
+    ///     crpix: Optical center offset from image center [x, y]. Default [0, 0].
+    ///     parity_flip: Whether x-axis is flipped. Default False.
+    ///     distortion: A RadialDistortion or PolynomialDistortion. Default None.
+    #[new]
+    #[pyo3(signature = (focal_length_px, crpix = None, parity_flip = false, distortion = None))]
+    fn new(
+        focal_length_px: f64,
+        crpix: Option<[f64; 2]>,
+        parity_flip: bool,
+        distortion: Option<&Bound<'_, pyo3::PyAny>>,
+    ) -> PyResult<Self> {
+        let dist = match distortion {
+            Some(obj) => extract_distortion(obj)?,
+            None => Distortion::None,
+        };
+        Ok(Self {
+            inner: CameraModel {
+                focal_length_px,
+                crpix: crpix.unwrap_or([0.0, 0.0]),
+                parity_flip,
+                distortion: dist,
+            },
+        })
+    }
+
+    /// Create a camera model from a horizontal field of view and image width.
+    ///
+    /// Args:
+    ///     fov_deg: Horizontal field of view in degrees.
+    ///     image_width: Image width in pixels.
+    ///
+    /// Returns:
+    ///     CameraModel with no distortion, crpix=[0,0], parity_flip=False.
+    #[staticmethod]
+    #[pyo3(signature = (fov_deg, image_width))]
+    fn from_fov(fov_deg: f64, image_width: u32) -> Self {
+        Self {
+            inner: CameraModel::from_fov(fov_deg.to_radians(), image_width),
+        }
+    }
+
+    /// Focal length in pixels.
+    #[getter]
+    fn focal_length_px(&self) -> f64 {
+        self.inner.focal_length_px
+    }
+
+    /// Optical center offset from image center [x, y] in pixels.
+    #[getter]
+    fn crpix(&self) -> [f64; 2] {
+        self.inner.crpix
+    }
+
+    /// Whether the image x-axis is flipped.
+    #[getter]
+    fn parity_flip(&self) -> bool {
+        self.inner.parity_flip
+    }
+
+    /// The distortion model, or None if no distortion.
+    #[getter]
+    fn distortion<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.inner.distortion {
+            Distortion::Radial(r) => {
+                let obj = PyRadialDistortion { inner: r.clone() };
+                Ok(Some(obj.into_pyobject(py)?.into_any().unbind()))
+            }
+            Distortion::Polynomial(p) => {
+                let obj = PyPolynomialDistortion { inner: p.clone() };
+                Ok(Some(obj.into_pyobject(py)?.into_any().unbind()))
+            }
+            Distortion::None => Ok(None),
+        }
+    }
+
+    /// Horizontal field of view in degrees for a given image width.
+    #[pyo3(signature = (image_width))]
+    fn fov_deg(&self, image_width: u32) -> f64 {
+        self.inner.fov_rad(image_width).to_degrees()
+    }
+
+    /// Pixel scale in radians per pixel.
+    fn pixel_scale(&self) -> f64 {
+        self.inner.pixel_scale()
+    }
+
+    /// Convert pixel coordinates to tangent-plane coordinates.
+    ///
+    /// Args:
+    ///     px: X pixel coordinate (from image center).
+    ///     py: Y pixel coordinate (from image center).
+    ///
+    /// Returns:
+    ///     (xi, eta) in radians on the tangent plane.
+    fn pixel_to_tanplane(&self, px: f64, py: f64) -> (f64, f64) {
+        self.inner.pixel_to_tanplane(px, py)
+    }
+
+    /// Convert tangent-plane coordinates to pixel coordinates.
+    ///
+    /// Args:
+    ///     xi: Tangent-plane ξ coordinate in radians.
+    ///     eta: Tangent-plane η coordinate in radians.
+    ///
+    /// Returns:
+    ///     (px, py) in pixels from image center.
+    fn tanplane_to_pixel(&self, xi: f64, eta: f64) -> (f64, f64) {
+        self.inner.tanplane_to_pixel(xi, eta)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CameraModel(f={:.1}px, crpix=[{:.1}, {:.1}], parity={}, distortion={})",
+            self.inner.focal_length_px,
+            self.inner.crpix[0],
+            self.inner.crpix[1],
+            self.inner.parity_flip,
+            if self.inner.distortion.is_none() {
+                "None"
+            } else {
+                "Some"
+            },
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PySolveResult — wraps SolveResult
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -452,23 +600,24 @@ impl PySolveResult {
         self.inner.parity_flip
     }
 
-    /// The distortion model used during solving, if any.
+    /// The camera model used during solving, if any.
     ///
-    /// Returns a ``RadialDistortion`` or ``PolynomialDistortion`` instance,
-    /// or ``None`` if no distortion was applied.
+    /// Returns a ``CameraModel`` instance, or ``None`` if the solve failed.
     #[getter]
-    fn distortion<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
-        match &self.inner.distortion {
-            Some(Distortion::Radial(r)) => {
-                let obj = PyRadialDistortion { inner: r.clone() };
-                Ok(Some(obj.into_pyobject(py)?.into_any().unbind()))
-            }
-            Some(Distortion::Polynomial(p)) => {
-                let obj = PyPolynomialDistortion { inner: p.clone() };
-                Ok(Some(obj.into_pyobject(py)?.into_any().unbind()))
-            }
-            Some(Distortion::None) | None => Ok(None),
-        }
+    fn camera_model(&self) -> Option<PyCameraModel> {
+        self.inner
+            .camera_model
+            .as_ref()
+            .map(|cam| PyCameraModel { inner: cam.clone() })
+    }
+
+    /// Fitted rotation angle in degrees (camera roll in tangent plane).
+    ///
+    /// The angle from the tangent-plane ξ (East) axis to the camera +X axis,
+    /// measured counter-clockwise. ``None`` if the solve failed.
+    #[getter]
+    fn theta_deg(&self) -> Option<f64> {
+        self.inner.theta_rad.map(|t| t.to_degrees())
     }
 
     /// WCS CD matrix as a 2x2 numpy array (tangent-plane radians per pixel).
@@ -503,8 +652,14 @@ impl PySolveResult {
 
     /// Optical center offset from the geometric image center, in pixels [x, y].
     #[getter]
-    fn crpix<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        PyArray1::from_vec(py, vec![self.inner.crpix[0], self.inner.crpix[1]])
+    fn crpix<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        let crpix = self
+            .inner
+            .camera_model
+            .as_ref()
+            .map(|cam| cam.crpix)
+            .unwrap_or([0.0, 0.0]);
+        PyArray1::from_vec(py, vec![crpix[0], crpix[1]])
     }
 
     fn __repr__(&self) -> String {
@@ -774,10 +929,8 @@ impl PySolverDatabase {
     ///     solve_timeout_ms: Timeout in milliseconds. None = no timeout.
     ///     match_max_error: Maximum edge-ratio error. None = use database value.
     ///     refine_iterations: Number of iterative SVD refinement passes. Default 2.
-    ///     distortion: A RadialDistortion model to apply
-    ///         to centroids before solving. None = no distortion correction.
-    ///     crpix: Optical center offset from image center as [x, y] in pixels.
-    ///         None = [0, 0] (optical center at image center).
+    ///     camera_model: A CameraModel specifying optical center, distortion, and parity.
+    ///         None = simple pinhole model with no distortion.
     ///
     /// Returns:
     ///     SolveResult on success, None if no match was found.
@@ -795,8 +948,7 @@ impl PySolverDatabase {
         solve_timeout_ms = Some(5000),
         match_max_error = None,
         refine_iterations = 2,
-        distortion = None,
-        crpix = None,
+        camera_model = None,
     ))]
     fn solve_from_centroids<'py>(
         &self,
@@ -814,8 +966,7 @@ impl PySolverDatabase {
         solve_timeout_ms: Option<u64>,
         match_max_error: Option<f32>,
         refine_iterations: u32,
-        distortion: Option<&Bound<'py, pyo3::PyAny>>,
-        crpix: Option<[f32; 2]>,
+        camera_model: Option<PyCameraModel>,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
         let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
@@ -896,10 +1047,10 @@ impl PySolverDatabase {
             (None, None) => None,
         };
 
-        // Parse distortion model if provided
-        let dist_model = match distortion {
-            Some(obj) => Some(extract_distortion(obj)?),
-            None => None,
+        // Use provided camera model, or create a default pinhole model from FOV
+        let cam = match camera_model {
+            Some(py_cam) => py_cam.inner,
+            None => CameraModel::from_fov(fov_rad as f64, img_width),
         };
 
         let config = SolveConfig {
@@ -912,8 +1063,7 @@ impl PySolverDatabase {
             solve_timeout_ms,
             match_max_error,
             refine_iterations,
-            distortion: dist_model,
-            crpix: crpix.unwrap_or([0.0, 0.0]),
+            camera_model: cam,
         };
 
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
@@ -1034,93 +1184,45 @@ impl PySolverDatabase {
             .collect()
     }
 
-    // ── Distortion fitting ──────────────────────────────────────────────
+    // ── Camera calibration ────────────────────────────────────────────────
 
-    /// Fit a radial distortion model (k1, k2, k3) from solve results.
+    /// Calibrate a camera model from one or more plate-solve results.
+    ///
+    /// Fits a global CameraModel (focal length, optical center, polynomial distortion)
+    /// by alternating per-image constrained WCS refinement with a global linear
+    /// least-squares fit. Distortion terms start at order 2 (SIP convention).
     ///
     /// Args:
     ///     solve_results: A SolveResult or list of SolveResult objects.
-    ///     centroids: Matching centroids.
+    ///     centroids: Matching centroids (list of Centroid lists, or single list).
     ///     image_width: Image width in pixels.
+    ///     order: Polynomial distortion order (2-6). Default 4.
+    ///     max_iterations: Maximum outer iterations. Default 10.
     ///     sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
-    ///     max_iterations: Maximum sigma-clip iterations. Default 20.
-    ///     stage2_threshold_px: Loose pixel threshold for second-stage recovery.
-    ///         None to disable. Default 5.0.
+    ///     convergence_threshold_px: Stop when max update < this (pixels). Default 0.01.
     ///
     /// Returns:
-    ///     DistortionFitResult with the fitted radial model and statistics.
-    #[pyo3(signature = (
-        solve_results,
-        centroids,
-        image_width,
-        sigma_clip = 3.0,
-        max_iterations = 20,
-        stage2_threshold_px = Some(5.0),
-    ))]
-    fn fit_radial_distortion<'py>(
-        &self,
-        _py: Python<'py>,
-        solve_results: &Bound<'py, pyo3::PyAny>,
-        centroids: &Bound<'py, pyo3::PyAny>,
-        image_width: u32,
-        sigma_clip: f64,
-        max_iterations: u32,
-        stage2_threshold_px: Option<f64>,
-    ) -> PyResult<PyDistortionFitResult> {
-        let (sr_vec, cent_vec) = parse_solve_results_and_centroids(solve_results, centroids)?;
-
-        let sr_refs: Vec<&SolveResult> = sr_vec.iter().collect();
-        let cent_refs: Vec<&[Centroid]> = cent_vec.iter().map(|v| v.as_slice()).collect();
-
-        let config = DistortionFitConfig {
-            sigma_clip,
-            max_iterations,
-            stage2_threshold_px,
-        };
-
-        let result = fit_radial_distortion(&sr_refs, &cent_refs, &self.inner, image_width, &config);
-
-        Ok(PyDistortionFitResult { inner: result })
-    }
-
-    /// Fit a polynomial (SIP-like) distortion model from solve results.
-    ///
-    /// This model captures arbitrary 2D distortion including radial, tangential,
-    /// and cross-terms — suitable for wide-field cameras like TESS where the
-    /// optical center is offset from the CCD center.
-    ///
-    /// Args:
-    ///     solve_results: A SolveResult or list of SolveResult objects.
-    ///     centroids: Matching centroids.
-    ///     image_width: Image width in pixels.
-    ///     order: Polynomial order (2-6). Default 4.
-    ///     sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
-    ///     max_iterations: Maximum sigma-clip iterations. Default 20.
-    ///     stage2_threshold_px: Loose pixel threshold for second-stage recovery.
-    ///         None to disable. Default 5.0.
-    ///
-    /// Returns:
-    ///     DistortionFitResult with the fitted polynomial model and statistics.
+    ///     CameraModel with fitted focal length, crpix, and distortion.
     #[pyo3(signature = (
         solve_results,
         centroids,
         image_width,
         order = 4,
+        max_iterations = 10,
         sigma_clip = 3.0,
-        max_iterations = 20,
-        stage2_threshold_px = Some(5.0),
+        convergence_threshold_px = 0.01,
     ))]
-    fn fit_polynomial_distortion<'py>(
+    fn calibrate_camera<'py>(
         &self,
         _py: Python<'py>,
         solve_results: &Bound<'py, pyo3::PyAny>,
         centroids: &Bound<'py, pyo3::PyAny>,
         image_width: u32,
         order: u32,
-        sigma_clip: f64,
         max_iterations: u32,
-        stage2_threshold_px: Option<f64>,
-    ) -> PyResult<PyDistortionFitResult> {
+        sigma_clip: f64,
+        convergence_threshold_px: f64,
+    ) -> PyResult<PyCameraModel> {
         if order < 2 || order > 6 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "polynomial order must be in [2, 6]",
@@ -1132,22 +1234,18 @@ impl PySolverDatabase {
         let sr_refs: Vec<&SolveResult> = sr_vec.iter().collect();
         let cent_refs: Vec<&[Centroid]> = cent_vec.iter().map(|v| v.as_slice()).collect();
 
-        let config = DistortionFitConfig {
-            sigma_clip,
+        let config = CalibrateConfig {
+            polynomial_order: order,
             max_iterations,
-            stage2_threshold_px,
+            sigma_clip,
+            convergence_threshold_px,
         };
 
-        let result = fit_polynomial_distortion(
-            &sr_refs,
-            &cent_refs,
-            &self.inner,
-            image_width,
-            order,
-            &config,
-        );
+        let result = calibrate_camera(&sr_refs, &cent_refs, &self.inner, image_width, &config);
 
-        Ok(PyDistortionFitResult { inner: result })
+        Ok(PyCameraModel {
+            inner: result.camera_model,
+        })
     }
 }
 
@@ -1469,84 +1567,6 @@ impl PyPolynomialDistortion {
     }
 }
 
-/// Result of a distortion fitting procedure.
-///
-/// Attributes:
-///     model: The fitted distortion model (RadialDistortion).
-///     rmse_before_px: RMS pixel residual before distortion correction.
-///     rmse_after_px: RMS pixel residual after distortion correction.
-///     n_inliers: Number of inlier matches in the final fit.
-///     n_outliers: Number of rejected outliers.
-///     iterations: Number of sigma-clip iterations performed.
-///     inlier_mask: Boolean array indicating inlier/outlier status per match.
-#[pyclass(name = "DistortionFitResult", frozen)]
-struct PyDistortionFitResult {
-    inner: tetra3::distortion::DistortionFitResult,
-}
-
-#[pymethods]
-impl PyDistortionFitResult {
-    /// The fitted distortion model.
-    ///
-    /// Returns a RadialDistortion, PolynomialDistortion, or None if fitting failed.
-    #[getter]
-    fn model<'py>(&self, py: Python<'py>) -> PyResult<Py<PyAny>> {
-        match &self.inner.model {
-            Distortion::Radial(r) => {
-                let obj = PyRadialDistortion { inner: r.clone() };
-                Ok(obj.into_pyobject(py)?.into_any().unbind())
-            }
-            Distortion::Polynomial(p) => {
-                let obj = PyPolynomialDistortion { inner: p.clone() };
-                Ok(obj.into_pyobject(py)?.into_any().unbind())
-            }
-            Distortion::None => Ok(py.None()),
-        }
-    }
-
-    #[getter]
-    fn rmse_before_px(&self) -> f64 {
-        self.inner.rmse_before_px
-    }
-
-    #[getter]
-    fn rmse_after_px(&self) -> f64 {
-        self.inner.rmse_after_px
-    }
-
-    #[getter]
-    fn n_inliers(&self) -> usize {
-        self.inner.n_inliers
-    }
-
-    #[getter]
-    fn n_outliers(&self) -> usize {
-        self.inner.n_outliers
-    }
-
-    #[getter]
-    fn iterations(&self) -> u32 {
-        self.inner.iterations
-    }
-
-    /// Boolean inlier mask as a numpy array.
-    #[getter]
-    fn inlier_mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
-        PyArray1::from_vec(py, self.inner.inlier_mask.clone())
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "DistortionFitResult(rmse={:.3} → {:.3} px, inliers={}, outliers={}, iters={})",
-            self.inner.rmse_before_px,
-            self.inner.rmse_after_px,
-            self.inner.n_inliers,
-            self.inner.n_outliers,
-            self.inner.iterations,
-        )
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Helper: parse solve results + centroids from Python
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1645,77 +1665,12 @@ fn parse_centroids_single(centroids: &Bound<'_, pyo3::PyAny>) -> PyResult<Vec<Ce
 fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCentroid>()?;
     m.add_class::<PyCatalogStar>()?;
+    m.add_class::<PyCameraModel>()?;
     m.add_class::<PySolveResult>()?;
     m.add_class::<PySolverDatabase>()?;
     m.add_class::<PyRadialDistortion>()?;
     m.add_class::<PyPolynomialDistortion>()?;
-    m.add_class::<PyDistortionFitResult>()?;
     m.add_function(wrap_pyfunction!(extract_centroids, m)?)?;
-    m.add_function(wrap_pyfunction!(undistort_centroids, m)?)?;
-    m.add_function(wrap_pyfunction!(distort_centroids, m)?)?;
     Ok(())
 }
 
-/// Apply distortion correction to a list of centroids (distorted → ideal).
-///
-/// Returns a new list with corrected positions; brightness and covariance are preserved.
-///
-/// Args:
-///     centroids: List of Centroid objects.
-///     distortion: A RadialDistortion model.
-///
-/// Returns:
-///     A new list of Centroid objects with undistorted positions.
-#[pyfunction]
-fn undistort_centroids(
-    centroids: Vec<PyCentroid>,
-    distortion: &Bound<'_, pyo3::PyAny>,
-) -> PyResult<Vec<PyCentroid>> {
-    let dist = extract_distortion(distortion)?;
-    Ok(centroids
-        .iter()
-        .map(|c| {
-            let (xu, yu) = dist.undistort(c.inner.x as f64, c.inner.y as f64);
-            PyCentroid {
-                inner: tetra3::Centroid {
-                    x: xu as f32,
-                    y: yu as f32,
-                    mass: c.inner.mass,
-                    cov: c.inner.cov,
-                },
-            }
-        })
-        .collect())
-}
-
-/// Apply forward distortion to a list of centroids (ideal → distorted).
-///
-/// Returns a new list with distorted positions; brightness and covariance are preserved.
-///
-/// Args:
-///     centroids: List of Centroid objects.
-///     distortion: A RadialDistortion model.
-///
-/// Returns:
-///     A new list of Centroid objects with distorted positions.
-#[pyfunction]
-fn distort_centroids(
-    centroids: Vec<PyCentroid>,
-    distortion: &Bound<'_, pyo3::PyAny>,
-) -> PyResult<Vec<PyCentroid>> {
-    let dist = extract_distortion(distortion)?;
-    Ok(centroids
-        .iter()
-        .map(|c| {
-            let (xd, yd) = dist.distort(c.inner.x as f64, c.inner.y as f64);
-            PyCentroid {
-                inner: tetra3::Centroid {
-                    x: xd as f32,
-                    y: yd as f32,
-                    mass: c.inner.mass,
-                    cov: c.inner.cov,
-                },
-            }
-        })
-        .collect())
-}

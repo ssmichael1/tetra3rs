@@ -123,8 +123,7 @@ fn test_generate_and_solve_hipparcos() {
         solve_timeout_ms: Some(30_000), // 30s for test
         match_max_error: None,
         refine_iterations: 2,
-        distortion: None,
-        crpix: [0.0, 0.0],
+        ..Default::default()
     };
 
     let result = db.solve_from_centroids(&centroids, &solve_config);
@@ -329,8 +328,7 @@ fn test_statistical_1000_random_orientations() {
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
         refine_iterations: 2,
-        distortion: None,
-        crpix: [0.0, 0.0],
+        ..Default::default()
     };
 
     // Threshold for classifying a solve as "correct" vs "misidentified"
@@ -641,8 +639,7 @@ fn test_statistical_1000_noisy_centroids() {
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
         refine_iterations: 2,
-        distortion: None,
-        crpix: [0.0, 0.0],
+        ..Default::default()
     };
 
     let correct_threshold_arcsec = 180.0;

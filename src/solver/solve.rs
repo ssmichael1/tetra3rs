@@ -51,26 +51,25 @@ impl SolverDatabase {
     ) -> SolveResult {
         let t0 = Instant::now();
 
-        // ── Undistort centroids once (pixel-space, FOV-independent) ──
-        let undistorted: Vec<Centroid>;
-        let working_centroids: &[Centroid] = match &config.distortion {
-            Some(d) => {
-                undistorted = centroids
-                    .iter()
-                    .map(|c| {
-                        let (ux, uy) = d.undistort(c.x as f64, c.y as f64);
-                        Centroid {
-                            x: ux as f32,
-                            y: uy as f32,
-                            mass: c.mass,
-                            cov: c.cov,
-                        }
-                    })
-                    .collect();
-                &undistorted
-            }
-            None => centroids,
-        };
+        // ── Preprocess centroids: subtract CRPIX and undistort (pixel-space, FOV-independent) ──
+        let cam = &config.camera_model;
+        let preprocessed: Vec<Centroid> = centroids
+            .iter()
+            .map(|c| {
+                // Subtract optical center offset
+                let cx = c.x as f64 - cam.crpix[0];
+                let cy = c.y as f64 - cam.crpix[1];
+                // Undistort (distorted observed → ideal pinhole)
+                let (ux, uy) = cam.distortion.undistort(cx, cy);
+                Centroid {
+                    x: ux as f32,
+                    y: uy as f32,
+                    mass: c.mass,
+                    cov: c.cov,
+                }
+            })
+            .collect();
+        let working_centroids: &[Centroid] = &preprocessed;
 
         // Build FOV sweep: exact estimate first, then spiral outward
         let fov_values = build_fov_sweep(
@@ -426,16 +425,20 @@ impl SolverDatabase {
                     );
 
                     // ── WCS TAN-projection refinement ──
-                    // Build pixel coordinates: subtract CRPIX offset, apply parity
+                    // Build pixel coordinates: centroids are already CRPIX-subtracted
+                    // and undistorted. Apply parity from SVD detection.
                     let parity_sign: f64 = if parity_flip { -1.0 } else { 1.0 };
                     let centroids_px: Vec<(f64, f64)> = sorted_indices
                         .iter()
                         .map(|&i| {
-                            let px = parity_sign * (centroids[i].x - config.crpix[0]) as f64;
-                            let py = (centroids[i].y - config.crpix[1]) as f64;
+                            let px = parity_sign * centroids[i].x as f64;
+                            let py = centroids[i].y as f64;
                             (px, py)
                         })
                         .collect();
+
+                    // Compute pixel scale for WCS refine from the pattern-match refined FOV
+                    let ps_refine = fov as f64 / config.image_width as f64;
 
                     let wcs_result = wcs_refine::wcs_refine(
                         &rotation_matrix,
@@ -443,6 +446,8 @@ impl SolverDatabase {
                         &centroids_px,
                         &self.star_vectors,
                         &self.star_catalog,
+                        ps_refine,
+                        parity_flip,
                         match_radius_rad,
                         match_centroid_count,
                         10,
@@ -507,6 +512,13 @@ impl SolverDatabase {
                     let rot3 = Rotation3::from_matrix_unchecked(refined_rotation);
                     let quat = UnitQuaternion::from_rotation_matrix(&rot3);
 
+                    // Build result camera model with refined focal length and detected parity
+                    let mut result_cam = config.camera_model.clone();
+                    let refined_f = (config.image_width as f64 / 2.0)
+                        / (refined_fov as f64 / 2.0).tan();
+                    result_cam.focal_length_px = refined_f;
+                    result_cam.parity_flip = parity_flip;
+
                     return SolveResult {
                         qicrs2cam: Some(quat),
                         fov_rad: Some(refined_fov),
@@ -522,10 +534,10 @@ impl SolverDatabase {
                         matched_centroid_indices: matched_cent_inds,
                         image_width: config.image_width,
                         image_height: config.image_height,
-                        distortion: config.distortion.clone(),
                         cd_matrix: Some(wcs_result.cd_matrix),
                         crval_rad: Some(wcs_result.crval_rad),
-                        crpix: config.crpix,
+                        camera_model: Some(result_cam),
+                        theta_rad: Some(wcs_result.theta_rad),
                     };
 
                 }

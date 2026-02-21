@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use tetra3::{
-    CentroidExtractionConfig, DistortionFitConfig, GenerateDatabaseConfig, SolveConfig,
-    SolveStatus, SolverDatabase,
+    CalibrateConfig, CentroidExtractionConfig, GenerateDatabaseConfig, SolveConfig, SolveStatus,
+    SolverDatabase,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -489,8 +489,7 @@ fn test_tess_fits_solve() {
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
             refine_iterations: 2,
-            distortion: None,
-            crpix: [0.0, 0.0],
+            ..Default::default()
         };
 
         let result = db.solve_from_centroids(&extraction.centroids, &solve_config);
@@ -654,8 +653,7 @@ fn test_tess_distortion_fit_and_center_accuracy() {
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
             refine_iterations: 2,
-            distortion: None,
-            crpix: [0.0, 0.0],
+            ..Default::default()
         };
 
         let result_raw = db.solve_from_centroids(&extraction.centroids, &solve_cfg);
@@ -673,23 +671,25 @@ fn test_tess_distortion_fit_and_center_accuracy() {
             result_raw.num_matches.unwrap_or(0),
         );
 
-        // ── 2. Fit polynomial distortion (order 4) ──
-        let dist_fit = tetra3::fit_polynomial_distortion(
+        // ── 2. Calibrate camera model (polynomial order 4) ──
+        let cal_result = tetra3::calibrate_camera(
             &[&result_raw],
             &[&extraction.centroids[..]],
             &db,
             sci_width,
-            4,
-            &DistortionFitConfig::default(),
+            &CalibrateConfig {
+                polynomial_order: 4,
+                ..CalibrateConfig::default()
+            },
         );
         println!(
-            "  Distortion fit: RMSE {:.3} -> {:.3} px, {} inliers, {} outliers",
-            dist_fit.rmse_before_px, dist_fit.rmse_after_px, dist_fit.n_inliers, dist_fit.n_outliers,
+            "  Calibration: RMSE {:.3} -> {:.3} px, {} inliers, {} outliers",
+            cal_result.rmse_before_px, cal_result.rmse_after_px, cal_result.n_inliers, cal_result.n_outliers,
         );
 
-        // ── 3. Re-solve with distortion correction ──
+        // ── 3. Re-solve with camera model ──
         let solve_cfg_dist = SolveConfig {
-            distortion: Some(dist_fit.model.clone()),
+            camera_model: cal_result.camera_model.clone(),
             ..solve_cfg
         };
         let result_dist = db.solve_from_centroids(&extraction.centroids, &solve_cfg_dist);

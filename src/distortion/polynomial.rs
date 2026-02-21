@@ -160,6 +160,36 @@ pub fn term_pairs(order: u32) -> Vec<(u32, u32)> {
     pairs
 }
 
+/// Number of polynomial coefficients for a restricted order range.
+///
+/// Only terms with `min_order ≤ p+q ≤ max_order` are included.
+/// For SIP-convention calibration, use `min_order=2` to exclude the
+/// constant and linear terms that are degenerate with per-image attitude.
+pub fn num_coeffs_range(min_order: u32, max_order: u32) -> usize {
+    assert!(min_order <= max_order);
+    let total = num_coeffs(max_order);
+    if min_order == 0 {
+        total
+    } else {
+        total - num_coeffs(min_order - 1)
+    }
+}
+
+/// Enumerate (p, q) pairs with `min_order ≤ p+q ≤ max_order`.
+///
+/// Same enumeration order as [`term_pairs`] but skipping low-order terms.
+pub fn term_pairs_range(min_order: u32, max_order: u32) -> Vec<(u32, u32)> {
+    assert!(min_order <= max_order);
+    let mut pairs = Vec::with_capacity(num_coeffs_range(min_order, max_order));
+    for s in min_order..=max_order {
+        for p in (0..=s).rev() {
+            let q = s - p;
+            pairs.push((p, q));
+        }
+    }
+    pairs
+}
+
 /// Evaluate a polynomial correction: Σ c_i · x^p_i · y^q_i
 /// `coeffs` is a flat vector indexed by `coeff_index(p, q)`.
 fn eval_poly(coeffs: &[f64], order: u32, x: f64, y: f64) -> f64 {
@@ -231,6 +261,45 @@ mod tests {
                 (0, 3)
             ]
         );
+    }
+
+    #[test]
+    fn test_num_coeffs_range() {
+        // min_order=2, max_order=4: terms with p+q in {2, 3, 4}
+        // order 2: 3 terms, order 3: 4 terms, order 4: 5 terms = 12 total
+        assert_eq!(num_coeffs_range(2, 4), 12);
+        // Full range should equal num_coeffs
+        assert_eq!(num_coeffs_range(0, 4), num_coeffs(4));
+        // Single order
+        assert_eq!(num_coeffs_range(2, 2), 3); // (2,0),(1,1),(0,2)
+        assert_eq!(num_coeffs_range(3, 3), 4); // (3,0),(2,1),(1,2),(0,3)
+        // Starting from 1
+        assert_eq!(num_coeffs_range(1, 4), num_coeffs(4) - 1); // exclude (0,0)
+    }
+
+    #[test]
+    fn test_term_pairs_range() {
+        let pairs = term_pairs_range(2, 4);
+        assert_eq!(pairs.len(), 12);
+        // All pairs should have p+q >= 2
+        for &(p, q) in &pairs {
+            assert!(p + q >= 2, "({}, {}) has sum < 2", p, q);
+            assert!(p + q <= 4, "({}, {}) has sum > 4", p, q);
+        }
+        // First pair should be (2,0)
+        assert_eq!(pairs[0], (2, 0));
+        // Should not contain any order 0 or 1 terms
+        assert!(!pairs.contains(&(0, 0)));
+        assert!(!pairs.contains(&(1, 0)));
+        assert!(!pairs.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn test_term_pairs_range_matches_full() {
+        // term_pairs_range(0, order) should equal term_pairs(order)
+        let full = term_pairs(4);
+        let range = term_pairs_range(0, 4);
+        assert_eq!(full, range);
     }
 
     #[test]

@@ -92,6 +92,7 @@
 
 /// Raw star catalogs; currently Tycho-2 & Hipparcos
 pub(crate) mod catalogs;
+pub mod camera_model;
 mod centroid;
 #[cfg(feature = "image")]
 pub mod centroid_extraction;
@@ -100,6 +101,7 @@ pub mod solver;
 pub mod star;
 pub mod starcatalog;
 
+pub use camera_model::CameraModel;
 pub use centroid::*;
 #[cfg(feature = "image")]
 pub use centroid_extraction::{
@@ -107,8 +109,8 @@ pub use centroid_extraction::{
     CentroidExtractionConfig, CentroidExtractionResult,
 };
 pub use distortion::{
-    fit_polynomial_distortion, fit_radial_distortion, Distortion, DistortionFitConfig,
-    DistortionFitResult, PolynomialDistortion, RadialDistortion,
+    calibrate_camera, CalibrateConfig, CalibrateResult, Distortion, PolynomialDistortion,
+    RadialDistortion,
 };
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,
