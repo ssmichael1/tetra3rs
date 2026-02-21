@@ -21,13 +21,12 @@
 //!    [`fit_polynomial_distortion`]. These functions perform iterative robust
 //!    fitting with sigma-clipping to reject mismatched stars.
 
+pub mod calibrate;
 pub mod fit;
 pub mod polynomial;
 pub mod radial;
 
-pub use fit::{
-    fit_polynomial_distortion, fit_radial_distortion, DistortionFitConfig, DistortionFitResult,
-};
+pub use calibrate::{calibrate_camera, CalibrateConfig, CalibrateResult};
 pub use polynomial::PolynomialDistortion;
 pub use radial::RadialDistortion;
 

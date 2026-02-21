@@ -550,8 +550,7 @@ fn test_skyview_fits_solve() {
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
             refine_iterations: 2,
-            distortion: None,
-            crpix: [0.0, 0.0],
+            ..Default::default()
         };
 
         let ref_result = db.solve_from_centroids(&ref_centroids, &solve_config);

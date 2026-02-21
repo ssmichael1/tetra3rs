@@ -1,25 +1,25 @@
-//! WCS TAN-projection iterative refinement.
+//! WCS TAN-projection iterative refinement (constrained).
 //!
 //! After the initial 4-star pattern match provides a seed rotation via SVD (Wahba's problem),
-//! this module refines the solution by fitting a WCS CD matrix + CRVAL using linear
-//! least-squares in the gnomonic tangent plane. This replaces the previous iterative-SVD
-//! + golden-section FOV tuning approach.
+//! this module refines the solution by fitting 3 parameters per image:
+//! **rotation angle θ** and **tangent-plane offset (dξ₀, dη₀)**, with the pixel scale
+//! locked from the CameraModel's focal length.
 //!
-//! The CD matrix (2×2) maps pixel offsets from the optical center (CRPIX) to tangent-plane
-//! coordinates (radians) at the reference point (CRVAL). It naturally captures pixel scale,
-//! rotation, parity, and any pixel-axis skew in a single linear transform.
+//! This constrained approach (vs. the full 6-DOF CD matrix fit) avoids degeneracy
+//! between the linear part of the distortion polynomial and the per-image attitude,
+//! which is critical for multi-image calibration.
 //!
 //! ## Algorithm
 //!
-//! 1. Extract initial CRVAL (RA, Dec of boresight) from the SVD rotation matrix.
+//! 1. Extract initial CRVAL (RA, Dec) and rotation angle θ from the SVD rotation matrix.
 //! 2. Iteratively:
 //!    a. TAN-project matched catalog stars at current CRVAL → (ξ, η) in radians.
-//!    b. Solve two independent 3-parameter linear systems for
-//!       `[CD11, CD12, dξ₀]` and `[CD21, CD22, dη₀]`.
-//!    c. Update CRVAL from `(dξ₀, dη₀)` via inverse TAN projection.
-//!    d. MAD-based outlier rejection.
-//!    e. Re-associate: project catalog stars to pixel space via CD⁻¹, match to centroids.
-//!    f. Converge when offsets vanish, no outliers rejected, and match set is stable.
+//!    b. Compute predicted tangent-plane coords from pixel coords using θ and pixel_scale.
+//!    c. Solve a 3-parameter linear system for `[δθ, dξ₀, dη₀]`.
+//!    d. Update θ and CRVAL.
+//!    e. MAD-based outlier rejection.
+//!    f. Re-associate: project catalog stars to pixel space, match to centroids.
+//!    g. Converge when updates vanish, no outliers rejected, and match set is stable.
 
 use nalgebra::{Matrix3, Vector3};
 use tracing::debug;
@@ -92,6 +92,48 @@ pub fn cd_inverse(cd: &[[f64; 2]; 2]) -> Option<[[f64; 2]; 2]> {
         [cd[1][1] * inv_det, -cd[0][1] * inv_det],
         [-cd[1][0] * inv_det, cd[0][0] * inv_det],
     ])
+}
+
+/// Synthesize a CD matrix from rotation angle, pixel scale, and parity.
+///
+/// The CD matrix maps pixel offsets to tangent-plane coordinates:
+/// ```text
+/// CD = ps * R(θ)  (if parity_flip=false, det > 0)
+/// CD = ps * [[−cos θ, sin θ], [sin θ, cos θ]]  (if parity_flip=true, det < 0)
+/// ```
+pub fn cd_from_theta(theta: f64, pixel_scale: f64, parity_flip: bool) -> [[f64; 2]; 2] {
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let ps = pixel_scale;
+    if parity_flip {
+        [[-ps * cos_t, ps * sin_t], [ps * sin_t, ps * cos_t]]
+    } else {
+        [[ps * cos_t, -ps * sin_t], [ps * sin_t, ps * cos_t]]
+    }
+}
+
+/// Decompose a CD matrix into rotation angle, pixel scale (x and y), and parity.
+///
+/// Returns `(theta_rad, scale_x, scale_y, parity_flip)`.
+pub fn decompose_cd(cd: &[[f64; 2]; 2]) -> (f64, f64, f64, bool) {
+    let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
+    let parity_flip = det < 0.0;
+
+    // Scale = norm of each column
+    let scale_x = (cd[0][0] * cd[0][0] + cd[1][0] * cd[1][0]).sqrt();
+    let scale_y = (cd[0][1] * cd[0][1] + cd[1][1] * cd[1][1]).sqrt();
+
+    // Rotation angle from the first column (camera +X direction)
+    // For no parity: CD11 = ps*cos θ, CD21 = ps*sin θ
+    // For parity:    CD11 = -ps*cos θ, CD21 = ps*sin θ
+    let theta = if parity_flip {
+        // CD21 = ps*sin θ, CD11 = -ps*cos θ
+        cd[1][0].atan2(-cd[0][0])
+    } else {
+        cd[1][0].atan2(cd[0][0])
+    };
+
+    (theta, scale_x, scale_y, parity_flip)
 }
 
 // ── 3×3 linear solve ────────────────────────────────────────────────────────
@@ -201,14 +243,41 @@ fn find_pixel_matches(
     matches
 }
 
+// ── Constrained prediction helpers ──────────────────────────────────────────
+
+/// Predict tangent-plane coords from pixel coords using rotation angle and pixel scale.
+///
+/// `ξ = ps·(cos θ · px - sin θ · py)`
+/// `η = ps·(sin θ · px + cos θ · py)`
+#[inline]
+fn predict_tanplane(px: f64, py: f64, cos_t: f64, sin_t: f64, ps: f64) -> (f64, f64) {
+    let xi = ps * (cos_t * px - sin_t * py);
+    let eta = ps * (sin_t * px + cos_t * py);
+    (xi, eta)
+}
+
+/// Predict pixel coords from tangent-plane coords (inverse of predict_tanplane).
+///
+/// `px = (1/ps)·(cos θ · ξ + sin θ · η)`
+/// `py = (1/ps)·(-sin θ · ξ + cos θ · η)`
+#[inline]
+fn predict_pixel(xi: f64, eta: f64, cos_t: f64, sin_t: f64, inv_ps: f64) -> (f64, f64) {
+    let px = inv_ps * (cos_t * xi + sin_t * eta);
+    let py = inv_ps * (-sin_t * xi + cos_t * eta);
+    (px, py)
+}
+
 // ── WCS refinement result ───────────────────────────────────────────────────
 
 /// Result of the WCS TAN-projection iterative refinement.
 pub struct WcsRefineResult {
     /// CD matrix: `[[CD11, CD12], [CD21, CD22]]` in tangent-plane radians per pixel.
+    /// Derived from `(theta, pixel_scale)` for FITS compatibility.
     pub cd_matrix: [[f64; 2]; 2],
     /// Reference point `[RA, Dec]` in radians.
     pub crval_rad: [f64; 2],
+    /// Fitted rotation angle in radians (camera roll in tangent plane).
+    pub theta_rad: f64,
     /// Final matched pairs: `(centroid_local_idx, catalog_star_idx)`.
     pub matches: Vec<(usize, usize)>,
     /// RMSE of angular residuals in radians.
@@ -221,12 +290,12 @@ pub struct WcsRefineResult {
 
 // ── Main refinement entry point ─────────────────────────────────────────────
 
-/// Iterative WCS TAN-projection refinement.
+/// Constrained iterative WCS TAN-projection refinement.
 ///
 /// Starting from an initial rotation matrix (from the SVD pattern match) and an initial
-/// match set (from verification), refines the WCS solution by fitting a CD matrix + CRVAL
-/// via linear least-squares in the tangent plane, with MAD-based outlier rejection and
-/// catalog re-association.
+/// match set (from verification), refines the WCS solution by fitting 3 parameters
+/// (rotation angle θ, tangent-plane offset dξ₀, dη₀) with the pixel scale locked
+/// from the CameraModel.
 ///
 /// # Arguments
 ///
@@ -236,13 +305,16 @@ pub struct WcsRefineResult {
 ///   subtraction, with parity already applied. Indexed by local_idx (brightness-sorted).
 /// * `star_vectors` — catalog star ICRS unit vectors, indexed by catalog star index.
 /// * `star_catalog` — spatial index for cone queries.
+/// * `pixel_scale` — radians per pixel (1/focal_length_px from CameraModel).
+/// * `parity_flip` — whether the image x-axis is flipped.
 /// * `match_radius_rad` — initial match radius in radians (from `config.match_radius * fov`).
 /// * `max_match_centroids` — maximum number of centroids to consider for matching.
 /// * `max_iterations` — maximum outer-loop iterations.
 ///
 /// # Returns
 ///
-/// A [`WcsRefineResult`] with the refined CD matrix, CRVAL, match set, and residual stats.
+/// A [`WcsRefineResult`] with the refined CD matrix, CRVAL, theta, match set, and
+/// residual stats.
 #[allow(clippy::too_many_arguments)]
 pub fn wcs_refine(
     initial_rotation: &Matrix3<f32>,
@@ -250,6 +322,8 @@ pub fn wcs_refine(
     centroids_px: &[(f64, f64)],
     star_vectors: &[[f32; 3]],
     star_catalog: &StarCatalog,
+    pixel_scale: f64,
+    parity_flip: bool,
     match_radius_rad: f32,
     max_match_centroids: usize,
     max_iterations: u32,
@@ -259,41 +333,65 @@ pub fn wcs_refine(
     const CLIP_NSIGMA: f64 = 3.0;
     const CONVERGENCE_RAD: f64 = 1e-12; // tangent-plane offset convergence
 
-    // ── Step 0: Extract initial CRVAL from SVD rotation ─────────────────
-    // Boresight in ICRS = R^T * [0, 0, 1] = third row of R (since R^T_i2 = R_2i)
+    let ps = pixel_scale;
+    let inv_ps = 1.0 / ps; // focal_length_px
+
+    // ── Step 0: Extract initial CRVAL and θ from SVD rotation ──────────
+    // Boresight in ICRS = R^T * [0, 0, 1] = third row of R
     let bx = initial_rotation[(2, 0)] as f64;
     let by = initial_rotation[(2, 1)] as f64;
     let bz = initial_rotation[(2, 2)] as f64;
     let mut crval_ra = by.atan2(bx);
     let mut crval_dec = bz.asin();
 
+    // Extract initial theta from rotation matrix
+    // Camera +X direction in ICRS = first row of R
+    let cam_x_icrs = nalgebra::Vector3::<f64>::new(
+        initial_rotation[(0, 0)] as f64,
+        initial_rotation[(0, 1)] as f64,
+        initial_rotation[(0, 2)] as f64,
+    );
+
+    // Tangent-plane basis vectors at CRVAL
+    let sin_a = crval_ra.sin();
+    let cos_a = crval_ra.cos();
+    let sin_d = crval_dec.sin();
+    let cos_d = crval_dec.cos();
+    let e_xi = nalgebra::Vector3::<f64>::new(-sin_a, cos_a, 0.0);
+    let e_eta = nalgebra::Vector3::<f64>::new(-sin_d * cos_a, -sin_d * sin_a, cos_d);
+
+    // theta = angle of camera X in the tangent plane
+    let xi_comp = cam_x_icrs.dot(&e_xi);
+    let eta_comp = cam_x_icrs.dot(&e_eta);
+    let mut theta = eta_comp.atan2(xi_comp);
+
     debug!(
-        "WCS refine: initial CRVAL = ({:.4}°, {:.4}°), {} matches, {} centroids",
+        "WCS refine: initial CRVAL = ({:.4}°, {:.4}°), θ = {:.4}°, ps = {:.6e} rad/px, {} matches, {} centroids",
         crval_ra.to_degrees(),
         crval_dec.to_degrees(),
+        theta.to_degrees(),
+        ps,
         initial_matches.len(),
         centroids_px.len(),
     );
 
     // ── Working state ───────────────────────────────────────────────────
     let mut current_matches: Vec<(usize, usize)> = initial_matches.to_vec();
-    let mut cd = [[0.0f64; 2]; 2]; // will be set on first iteration
 
     // ── Outer refinement loop ───────────────────────────────────────────
     for outer_iter in 0..max_iterations {
-        // ── Phase A: LS fit CD + offset ─────────────────────────────────
-        // Iterate CRVAL/CD convergence (inner loop — typically 2-4 iterations)
+        // ── Phase A: LS fit (δθ, dξ₀, dη₀) ──────────────────────────
         for inner_iter in 0..10 {
             if current_matches.len() < 3 {
                 break;
             }
 
-            // TAN-project all matched catalog stars at current CRVAL
-            // and build design matrix A = [x_i, y_i, 1]
-            // with observation vectors xi_vec, eta_vec
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
+
+            // Build normal equations AᵀA x = Aᵀb for 3 unknowns: [δθ, dξ₀, dη₀]
             let mut ata = [[0.0f64; 3]; 3];
-            let mut atb_xi = [0.0f64; 3];
-            let mut atb_eta = [0.0f64; 3];
+            let mut atb = [0.0f64; 3];
             let mut n_valid = 0u32;
 
             for &(cent_idx, cat_idx) in &current_matches {
@@ -301,20 +399,34 @@ pub fn wcs_refine(
                 let star_ra = (sv[1] as f64).atan2(sv[0] as f64);
                 let star_dec = (sv[2] as f64).asin();
 
-                let Some((xi, eta)) = tan_project(star_ra, star_dec, crval_ra, crval_dec) else {
+                let Some((xi_cat, eta_cat)) = tan_project(star_ra, star_dec, crval_ra, crval_dec) else {
                     continue;
                 };
 
                 let (px, py) = centroids_px[cent_idx];
-                let row = [px, py, 1.0];
+                let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
 
-                // Accumulate A^T A and A^T b (shared design matrix for both xi and eta)
+                // Residuals
+                let r_xi = xi_cat - xi_pred;
+                let r_eta = eta_cat - eta_pred;
+
+                // Jacobian rows:
+                // ξ row: [∂ξ/∂θ, 1, 0] where ∂ξ/∂θ = ps·(-sin θ · px - cos θ · py)
+                // η row: [∂η/∂θ, 0, 1] where ∂η/∂θ = ps·(cos θ · px - sin θ · py)
+                let j_xi_theta = ps * (-sin_t * px - cos_t * py);
+                let j_eta_theta = ps * (cos_t * px - sin_t * py);
+
+                // ξ row: J = [j_xi_theta, 1, 0]
+                let jxi = [j_xi_theta, 1.0, 0.0];
+                // η row: J = [j_eta_theta, 0, 1]
+                let jeta = [j_eta_theta, 0.0, 1.0];
+
+                // Accumulate AᵀA and Aᵀb
                 for i in 0..3 {
                     for j in 0..3 {
-                        ata[i][j] += row[i] * row[j];
+                        ata[i][j] += jxi[i] * jxi[j] + jeta[i] * jeta[j];
                     }
-                    atb_xi[i] += row[i] * xi;
-                    atb_eta[i] += row[i] * eta;
+                    atb[i] += jxi[i] * r_xi + jeta[i] * r_eta;
                 }
                 n_valid += 1;
             }
@@ -323,41 +435,37 @@ pub fn wcs_refine(
                 break;
             }
 
-            // Solve the two 3×3 systems
-            let Some(sol_xi) = solve_3x3(&ata, &atb_xi) else {
-                debug!("WCS refine: singular normal equations (xi), aborting");
-                break;
-            };
-            let Some(sol_eta) = solve_3x3(&ata, &atb_eta) else {
-                debug!("WCS refine: singular normal equations (eta), aborting");
+            // Solve the 3×3 system
+            let Some(sol) = solve_3x3(&ata, &atb) else {
+                debug!("WCS refine: singular normal equations, aborting");
                 break;
             };
 
-            // Extract CD matrix and tangent-plane offset
-            cd = [
-                [sol_xi[0], sol_xi[1]],
-                [sol_eta[0], sol_eta[1]],
-            ];
-            let dxi_0 = sol_xi[2];
-            let deta_0 = sol_eta[2];
+            let d_theta = sol[0];
+            let dxi_0 = sol[1];
+            let deta_0 = sol[2];
 
-            // Update CRVAL from tangent-plane offset
+            // Update theta and CRVAL
+            theta += d_theta;
             let (new_ra, new_dec) = inverse_tan_project(dxi_0, deta_0, crval_ra, crval_dec);
             crval_ra = new_ra;
             crval_dec = new_dec;
 
             debug!(
-                "  inner {}: CD=[{:.6e}, {:.6e}; {:.6e}, {:.6e}], offset=({:.3e}, {:.3e}) rad",
-                inner_iter, cd[0][0], cd[0][1], cd[1][0], cd[1][1], dxi_0, deta_0,
+                "  inner {}: δθ={:.3e}°, offset=({:.3e}, {:.3e}) rad",
+                inner_iter, d_theta.to_degrees(), dxi_0, deta_0,
             );
 
             // Check convergence
-            if dxi_0.abs() + deta_0.abs() < CONVERGENCE_RAD {
+            if d_theta.abs() < 1e-10 && dxi_0.abs() + deta_0.abs() < CONVERGENCE_RAD {
                 break;
             }
         }
 
         // ── Phase B: Compute residuals ──────────────────────────────────
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+
         let mut residuals: Vec<(usize, f64)> = Vec::with_capacity(current_matches.len());
         for (match_idx, &(cent_idx, cat_idx)) in current_matches.iter().enumerate() {
             let sv = &star_vectors[cat_idx];
@@ -366,11 +474,10 @@ pub fn wcs_refine(
 
             if let Some((xi_cat, eta_cat)) = tan_project(star_ra, star_dec, crval_ra, crval_dec) {
                 let (px, py) = centroids_px[cent_idx];
-                let xi_pred = cd[0][0] * px + cd[0][1] * py;
-                let eta_pred = cd[1][0] * px + cd[1][1] * py;
+                let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
                 let dxi = xi_pred - xi_cat;
                 let deta = eta_pred - eta_cat;
-                let residual = (dxi * dxi + deta * deta).sqrt(); // radians
+                let residual = (dxi * dxi + deta * deta).sqrt();
                 residuals.push((match_idx, residual));
             }
         }
@@ -408,98 +515,91 @@ pub fn wcs_refine(
                 );
                 current_matches = keep_matches;
             } else {
-                n_rejected = 0; // not enough inliers or nothing to clip
+                n_rejected = 0;
             }
         }
 
         // ── Phase D: Re-associate (search for new inliers) ─────────────
-        // Only on iterations after the first (let the first iteration establish CD)
         if outer_iter > 0 || n_rejected > 0 {
-            if let Some(cd_inv) = cd_inverse(&cd) {
-                // Pixel scale (approx) for converting match radius
-                let ps_x = (cd[0][0] * cd[0][0] + cd[1][0] * cd[1][0]).sqrt();
-                let radius_px = match_radius_rad as f64 / ps_x;
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
 
-                // Adaptive radius from MAD if available
-                let adaptive_radius_px = if residuals.len() >= 6 {
-                    let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
-                    res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let mad = {
-                        let median = res_vals[res_vals.len() / 2];
-                        let mut ad: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
-                        ad.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        ad[ad.len() / 2]
-                    };
-                    let sigma_est = MAD_SCALE * mad;
-                    let adaptive_rad = (5.0 * sigma_est / ps_x).max(2.5).min(radius_px);
-                    adaptive_rad
-                } else {
-                    radius_px
+            // Pixel radius for matching
+            let radius_px = match_radius_rad as f64 / ps;
+
+            // Adaptive radius from MAD if available
+            let adaptive_radius_px = if residuals.len() >= 6 {
+                let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
+                res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let mad = {
+                    let median = res_vals[res_vals.len() / 2];
+                    let mut ad: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
+                    ad.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    ad[ad.len() / 2]
                 };
+                let sigma_est = MAD_SCALE * mad;
+                (5.0 * sigma_est / ps).max(2.5).min(radius_px)
+            } else {
+                radius_px
+            };
 
-                // Query catalog stars near boresight
-                let boresight = Vector3::new(
-                    crval_dec.cos() * crval_ra.cos(),
-                    crval_dec.cos() * crval_ra.sin(),
-                    crval_dec.sin(),
-                );
-                // Search cone: use maximum centroid distance from center (in pixels)
-                // converted to radians, with 1.5× margin for edge effects.
-                let max_cent_dist_px = centroids_px
-                    .iter()
-                    .map(|(x, y)| (x * x + y * y).sqrt())
-                    .fold(0.0f64, f64::max);
-                let search_radius =
-                    (ps_x * max_cent_dist_px * 1.5).max(match_radius_rad as f64 * 2.0);
-                let nearby_indices = star_catalog.query_indices_from_uvec(
-                    Vector3::new(boresight.x as f32, boresight.y as f32, boresight.z as f32),
-                    search_radius as f32,
-                );
+            // Query catalog stars near boresight
+            let boresight = Vector3::new(
+                crval_dec.cos() * crval_ra.cos(),
+                crval_dec.cos() * crval_ra.sin(),
+                crval_dec.sin(),
+            );
+            let max_cent_dist_px = centroids_px
+                .iter()
+                .map(|(x, y)| (x * x + y * y).sqrt())
+                .fold(0.0f64, f64::max);
+            let search_radius =
+                (ps * max_cent_dist_px * 1.5).max(match_radius_rad as f64 * 2.0);
+            let nearby_indices = star_catalog.query_indices_from_uvec(
+                Vector3::new(boresight.x as f32, boresight.y as f32, boresight.z as f32),
+                search_radius as f32,
+            );
 
-                // Project each catalog star to pixel coords via TAN + CD_inv
-                let mut predicted: Vec<(usize, f64, f64)> = Vec::new();
-                for &cat_idx in &nearby_indices {
-                    let sv = &star_vectors[cat_idx];
-                    let sra = (sv[1] as f64).atan2(sv[0] as f64);
-                    let sdec = (sv[2] as f64).asin();
-                    if let Some((xi, eta)) = tan_project(sra, sdec, crval_ra, crval_dec) {
-                        let pred_x = cd_inv[0][0] * xi + cd_inv[0][1] * eta;
-                        let pred_y = cd_inv[1][0] * xi + cd_inv[1][1] * eta;
-                        predicted.push((cat_idx, pred_x, pred_y));
-                    }
+            // Project each catalog star to pixel coords via TAN + inverse rotation
+            let mut predicted: Vec<(usize, f64, f64)> = Vec::new();
+            for &cat_idx in &nearby_indices {
+                let sv = &star_vectors[cat_idx];
+                let sra = (sv[1] as f64).atan2(sv[0] as f64);
+                let sdec = (sv[2] as f64).asin();
+                if let Some((xi, eta)) = tan_project(sra, sdec, crval_ra, crval_dec) {
+                    let (pred_x, pred_y) = predict_pixel(xi, eta, cos_t, sin_t, inv_ps);
+                    predicted.push((cat_idx, pred_x, pred_y));
                 }
+            }
 
-                let new_matches = find_pixel_matches(
-                    centroids_px,
-                    max_match_centroids,
-                    &predicted,
-                    adaptive_radius_px,
-                );
+            let new_matches = find_pixel_matches(
+                centroids_px,
+                max_match_centroids,
+                &predicted,
+                adaptive_radius_px,
+            );
 
-                if new_matches.len() >= 4 {
-                    let mut sorted_new = new_matches.clone();
-                    sorted_new.sort();
-                    let mut sorted_cur = current_matches.clone();
-                    sorted_cur.sort();
+            if new_matches.len() >= 4 {
+                let mut sorted_new = new_matches.clone();
+                sorted_new.sort();
+                let mut sorted_cur = current_matches.clone();
+                sorted_cur.sort();
 
-                    if sorted_new != sorted_cur {
-                        debug!(
-                            "  outer {}: re-associate: {} → {} matches (radius={:.1} px)",
-                            outer_iter,
-                            current_matches.len(),
-                            new_matches.len(),
-                            adaptive_radius_px,
-                        );
-                        current_matches = new_matches;
-                        // Do another refinement pass with the new match set
-                        continue;
-                    }
+                if sorted_new != sorted_cur {
+                    debug!(
+                        "  outer {}: re-associate: {} → {} matches (radius={:.1} px)",
+                        outer_iter,
+                        current_matches.len(),
+                        new_matches.len(),
+                        adaptive_radius_px,
+                    );
+                    current_matches = new_matches;
+                    continue;
                 }
             }
         }
 
-        // Converged: either no outliers rejected, or re-association returned
-        // the same match set (clipped matches were genuine outliers, no replacements)
+        // Converged
         if outer_iter > 0 {
             debug!("  outer {}: converged", outer_iter);
             break;
@@ -512,6 +612,9 @@ pub fn wcs_refine(
             break;
         }
 
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+
         let mut residuals: Vec<(usize, f64)> = Vec::new();
         for (match_idx, &(cent_idx, cat_idx)) in current_matches.iter().enumerate() {
             let sv = &star_vectors[cat_idx];
@@ -519,8 +622,7 @@ pub fn wcs_refine(
             let sdec = (sv[2] as f64).asin();
             if let Some((xi_cat, eta_cat)) = tan_project(sra, sdec, crval_ra, crval_dec) {
                 let (px, py) = centroids_px[cent_idx];
-                let xi_pred = cd[0][0] * px + cd[0][1] * py;
-                let eta_pred = cd[1][0] * px + cd[1][1] * py;
+                let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
                 let dxi = xi_pred - xi_cat;
                 let deta = eta_pred - eta_cat;
                 residuals.push((match_idx, (dxi * dxi + deta * deta).sqrt()));
@@ -560,35 +662,49 @@ pub fn wcs_refine(
         );
         current_matches = keep;
 
-        // Re-fit CD on cleaned set (one inner LS pass)
-        let mut ata = [[0.0f64; 3]; 3];
-        let mut atb_xi = [0.0f64; 3];
-        let mut atb_eta = [0.0f64; 3];
-        for &(cent_idx, cat_idx) in &current_matches {
-            let sv = &star_vectors[cat_idx];
-            let sra = (sv[1] as f64).atan2(sv[0] as f64);
-            let sdec = (sv[2] as f64).asin();
-            if let Some((xi, eta)) = tan_project(sra, sdec, crval_ra, crval_dec) {
-                let (px, py) = centroids_px[cent_idx];
-                let row = [px, py, 1.0];
-                for i in 0..3 {
-                    for j in 0..3 {
-                        ata[i][j] += row[i] * row[j];
+        // Re-fit theta + CRVAL on cleaned set (one inner LS pass)
+        {
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
+
+            let mut ata = [[0.0f64; 3]; 3];
+            let mut atb = [0.0f64; 3];
+            for &(cent_idx, cat_idx) in &current_matches {
+                let sv = &star_vectors[cat_idx];
+                let sra = (sv[1] as f64).atan2(sv[0] as f64);
+                let sdec = (sv[2] as f64).asin();
+                if let Some((xi_cat, eta_cat)) = tan_project(sra, sdec, crval_ra, crval_dec) {
+                    let (px, py) = centroids_px[cent_idx];
+                    let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
+                    let r_xi = xi_cat - xi_pred;
+                    let r_eta = eta_cat - eta_pred;
+
+                    let j_xi_theta = ps * (-sin_t * px - cos_t * py);
+                    let j_eta_theta = ps * (cos_t * px - sin_t * py);
+                    let jxi = [j_xi_theta, 1.0, 0.0];
+                    let jeta = [j_eta_theta, 0.0, 1.0];
+
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            ata[i][j] += jxi[i] * jxi[j] + jeta[i] * jeta[j];
+                        }
+                        atb[i] += jxi[i] * r_xi + jeta[i] * r_eta;
                     }
-                    atb_xi[i] += row[i] * xi;
-                    atb_eta[i] += row[i] * eta;
                 }
             }
-        }
-        if let (Some(sx), Some(se)) = (solve_3x3(&ata, &atb_xi), solve_3x3(&ata, &atb_eta)) {
-            cd = [[sx[0], sx[1]], [se[0], se[1]]];
-            let (new_ra, new_dec) = inverse_tan_project(sx[2], se[2], crval_ra, crval_dec);
-            crval_ra = new_ra;
-            crval_dec = new_dec;
+            if let Some(sol) = solve_3x3(&ata, &atb) {
+                theta += sol[0];
+                let (new_ra, new_dec) = inverse_tan_project(sol[1], sol[2], crval_ra, crval_dec);
+                crval_ra = new_ra;
+                crval_dec = new_dec;
+            }
         }
     }
 
     // ── Compute final residual statistics ────────────────────────────────
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+
     let mut final_residuals: Vec<f64> = Vec::with_capacity(current_matches.len());
     for &(cent_idx, cat_idx) in &current_matches {
         let sv = &star_vectors[cat_idx];
@@ -596,8 +712,7 @@ pub fn wcs_refine(
         let sdec = (sv[2] as f64).asin();
         if let Some((xi_cat, eta_cat)) = tan_project(sra, sdec, crval_ra, crval_dec) {
             let (px, py) = centroids_px[cent_idx];
-            let xi_pred = cd[0][0] * px + cd[0][1] * py;
-            let eta_pred = cd[1][0] * px + cd[1][1] * py;
+            let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
             let dxi = xi_pred - xi_cat;
             let deta = eta_pred - eta_cat;
             final_residuals.push((dxi * dxi + deta * deta).sqrt());
@@ -617,9 +732,13 @@ pub fn wcs_refine(
     };
     let max_err = final_residuals.last().copied().unwrap_or(0.0);
 
+    // Derive CD matrix from (theta, pixel_scale, parity)
+    let cd = cd_from_theta(theta, ps, parity_flip);
+
     debug!(
-        "WCS refine done: {} matches, RMSE={:.2}\" p90={:.2}\" max={:.2}\"",
+        "WCS refine done: {} matches, θ={:.4}°, RMSE={:.2}\" p90={:.2}\" max={:.2}\"",
         current_matches.len(),
+        theta.to_degrees(),
         rmse.to_degrees() * 3600.0,
         p90e.to_degrees() * 3600.0,
         max_err.to_degrees() * 3600.0,
@@ -628,6 +747,7 @@ pub fn wcs_refine(
     WcsRefineResult {
         cd_matrix: cd,
         crval_rad: [crval_ra, crval_dec],
+        theta_rad: theta,
         matches: current_matches,
         rmse_rad: rmse,
         p90e_rad: p90e,
@@ -707,15 +827,14 @@ mod tests {
 
     #[test]
     fn test_tan_project_roundtrip() {
-        // Test at several positions
-        let crval_ra = 1.2_f64; // ~69°
-        let crval_dec = 0.3_f64; // ~17°
+        let crval_ra = 1.2_f64;
+        let crval_dec = 0.3_f64;
 
         let test_points = [
-            (1.21, 0.31),  // near reference
-            (1.25, 0.25),  // offset
-            (1.15, 0.35),  // other side
-            (1.0, 0.0),    // further away
+            (1.21, 0.31),
+            (1.25, 0.25),
+            (1.15, 0.35),
+            (1.0, 0.0),
         ];
 
         for &(ra, dec) in &test_points {
@@ -739,7 +858,6 @@ mod tests {
 
     #[test]
     fn test_tan_project_behind() {
-        // Point opposite to reference should fail
         let crval_ra = 0.0;
         let crval_dec = 0.0;
         assert!(tan_project(std::f64::consts::PI, 0.0, crval_ra, crval_dec).is_none());
@@ -766,10 +884,6 @@ mod tests {
 
     #[test]
     fn test_solve_3x3_known() {
-        // 2x + 3y + z = 11
-        // x + y + z = 6
-        // x + 2y + 3z = 14
-        // Solution: x=1, y=2, z=3
         let a = [[2.0, 3.0, 1.0], [1.0, 1.0, 1.0], [1.0, 2.0, 3.0]];
         let b = [11.0, 6.0, 14.0];
         let x = solve_3x3(&a, &b).unwrap();
@@ -789,7 +903,6 @@ mod tests {
     fn test_cd_inverse_roundtrip() {
         let cd = [[1.2e-5, -3.0e-6], [2.5e-6, 1.1e-5]];
         let inv = cd_inverse(&cd).unwrap();
-        // CD * CD_inv should be identity
         let i00 = cd[0][0] * inv[0][0] + cd[0][1] * inv[1][0];
         let i01 = cd[0][0] * inv[0][1] + cd[0][1] * inv[1][1];
         let i10 = cd[1][0] * inv[0][0] + cd[1][1] * inv[1][0];
@@ -801,24 +914,81 @@ mod tests {
     }
 
     #[test]
+    fn test_cd_from_theta_no_parity() {
+        let theta = 0.3_f64; // ~17°
+        let ps = 1.7e-5;
+        let cd = cd_from_theta(theta, ps, false);
+
+        // det should be positive
+        let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
+        assert!(det > 0.0);
+
+        // Decompose should recover theta and scale
+        let (t, sx, sy, parity) = decompose_cd(&cd);
+        assert!(!parity);
+        assert!((t - theta).abs() < 1e-12, "theta: {:.6} vs {:.6}", t, theta);
+        assert!((sx - ps).abs() < 1e-18, "scale_x: {:.6e} vs {:.6e}", sx, ps);
+        assert!((sy - ps).abs() < 1e-18, "scale_y: {:.6e} vs {:.6e}", sy, ps);
+    }
+
+    #[test]
+    fn test_cd_from_theta_with_parity() {
+        let theta = -0.5_f64;
+        let ps = 2.0e-5;
+        let cd = cd_from_theta(theta, ps, true);
+
+        // det should be negative
+        let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
+        assert!(det < 0.0);
+
+        let (t, sx, sy, parity) = decompose_cd(&cd);
+        assert!(parity);
+        assert!((t - theta).abs() < 1e-12);
+        assert!((sx - ps).abs() < 1e-18);
+        assert!((sy - ps).abs() < 1e-18);
+    }
+
+    #[test]
+    fn test_predict_tanplane_roundtrip() {
+        let cos_t = 0.3_f64.cos();
+        let sin_t = 0.3_f64.sin();
+        let ps = 1.5e-5;
+        let inv_ps = 1.0 / ps;
+
+        let (px, py) = (100.0, -200.0);
+        let (xi, eta) = predict_tanplane(px, py, cos_t, sin_t, ps);
+        let (px2, py2) = predict_pixel(xi, eta, cos_t, sin_t, inv_ps);
+        assert!((px - px2).abs() < 1e-10);
+        assert!((py - py2).abs() < 1e-10);
+    }
+
+    #[test]
     fn test_wcs_to_rotation_simple() {
-        // A simple camera pointed at RA=90°, Dec=0° with 10° FOV, 1000px wide
-        let crval_ra = std::f64::consts::FRAC_PI_2; // 90°
+        let crval_ra = std::f64::consts::FRAC_PI_2;
         let crval_dec = 0.0;
         let fov_deg = 10.0_f64;
         let image_width = 1000u32;
-        let ps = fov_deg.to_radians() / image_width as f64; // rad/px
+        let ps = fov_deg.to_radians() / image_width as f64;
 
-        // Simple unrotated camera: CD = [[ps, 0], [0, ps]]
         let cd = [[ps, 0.0], [0.0, ps]];
         let (rot, fov, parity) = wcs_to_rotation(&cd, crval_ra, crval_dec, image_width);
 
         assert!(!parity);
         assert!((fov.to_degrees() - 10.0).abs() < 0.01, "FOV: {}", fov.to_degrees());
 
-        // Boresight should be at RA=90°, Dec=0° → ICRS (0, 1, 0)
-        // R * [0, 1, 0] should give [0, 0, 1] (camera boresight)
         let bore_cam = rot * Vector3::new(0.0_f32, 1.0, 0.0);
         assert!(bore_cam.z > 0.99, "boresight z = {}", bore_cam.z);
+    }
+
+    #[test]
+    fn test_decompose_cd_identity_like() {
+        let ps = 1.5e-5;
+        // No rotation, no parity
+        let cd = [[ps, 0.0], [0.0, ps]];
+        let (theta, sx, sy, parity) = decompose_cd(&cd);
+        assert!(!parity);
+        assert!(theta.abs() < 1e-12);
+        assert!((sx - ps).abs() < 1e-18);
+        assert!((sy - ps).abs() < 1e-18);
     }
 }
