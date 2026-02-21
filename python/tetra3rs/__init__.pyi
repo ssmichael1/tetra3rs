@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from typing import Optional, Union
+from typing import Optional, TypedDict, Union
 
 class SolveResult:
     """Result of a successful plate-solve.
