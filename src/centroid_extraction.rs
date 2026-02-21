@@ -630,7 +630,10 @@ fn compute_blob_centroids(
 ) -> Vec<RawCentroid> {
     let w = width as usize;
 
-    // Accumulators for each label: intensity-weighted moments
+    // Accumulators for each label: intensity-weighted moments.
+    // Moments are computed relative to a reference pixel (ref_col, ref_row)
+    // within each blob to avoid floating-point bias from large absolute
+    // coordinates. The first pixel encountered sets the reference.
     struct BlobAccum {
         sum_x: f64,
         sum_y: f64,
@@ -640,6 +643,9 @@ fn compute_blob_centroids(
         sum_yy: f64,
         sum_xy: f64,
         pixel_count: usize,
+        // Reference pixel: moments are relative to this origin
+        ref_col: usize,
+        ref_row: usize,
         // Bounding box for compactness check
         min_col: usize,
         max_col: usize,
@@ -656,6 +662,8 @@ fn compute_blob_centroids(
             sum_yy: 0.0,
             sum_xy: 0.0,
             pixel_count: 0,
+            ref_col: 0,
+            ref_row: 0,
             min_col: usize::MAX,
             max_col: 0,
             min_row: usize::MAX,
@@ -672,13 +680,22 @@ fn compute_blob_centroids(
         let intensity = (pixel_val - bg_level).max(0.0) as f64;
 
         let acc = &mut accums[label as usize];
-        let cf = col as f64;
-        let rf = row as f64;
-        acc.sum_x += cf * intensity;
-        acc.sum_y += rf * intensity;
-        acc.sum_xx += cf * cf * intensity;
-        acc.sum_yy += rf * rf * intensity;
-        acc.sum_xy += cf * rf * intensity;
+
+        // Set reference pixel on first encounter
+        if acc.pixel_count == 0 {
+            acc.ref_col = col;
+            acc.ref_row = row;
+        }
+
+        // Accumulate moments relative to reference pixel (signed — blob pixels
+        // can be in any direction from the first pixel encountered)
+        let dx = col as f64 - acc.ref_col as f64;
+        let dy = row as f64 - acc.ref_row as f64;
+        acc.sum_x += dx * intensity;
+        acc.sum_y += dy * intensity;
+        acc.sum_xx += dx * dx * intensity;
+        acc.sum_yy += dy * dy * intensity;
+        acc.sum_xy += dx * dy * intensity;
         acc.sum_intensity += intensity;
         acc.pixel_count += 1;
         acc.min_col = acc.min_col.min(col);
@@ -698,11 +715,16 @@ fn compute_blob_centroids(
                 return None;
             }
 
-            let xbar = acc.sum_x / acc.sum_intensity;
-            let ybar = acc.sum_y / acc.sum_intensity;
-            let cxx = acc.sum_xx / acc.sum_intensity - xbar * xbar;
-            let cyy = acc.sum_yy / acc.sum_intensity - ybar * ybar;
-            let cxy = acc.sum_xy / acc.sum_intensity - xbar * ybar;
+            // Local centroid relative to reference pixel
+            let dx_bar = acc.sum_x / acc.sum_intensity;
+            let dy_bar = acc.sum_y / acc.sum_intensity;
+            // Convert back to absolute pixel coordinates
+            let xbar = acc.ref_col as f64 + dx_bar;
+            let ybar = acc.ref_row as f64 + dy_bar;
+            // Covariance is translation-invariant — computed from local moments
+            let cxx = acc.sum_xx / acc.sum_intensity - dx_bar * dx_bar;
+            let cyy = acc.sum_yy / acc.sum_intensity - dy_bar * dy_bar;
+            let cxy = acc.sum_xy / acc.sum_intensity - dx_bar * dy_bar;
 
             // Elongation filter: compute the ratio of major to minor axis
             // from the intensity-weighted covariance matrix.
