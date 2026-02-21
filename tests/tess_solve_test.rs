@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use tetra3::{
-    CentroidExtractionConfig, GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase,
+    CentroidExtractionConfig, DistortionFitConfig, GenerateDatabaseConfig, SolveConfig,
+    SolveStatus, SolverDatabase,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -236,47 +237,6 @@ fn apply_sip_forward(hdu: &FitsHdu, u: f64, v: f64) -> (f64, f64) {
     let mut g = 0.0;
     for p in 0..=b_order {
         for q in 0..=(b_order - p) {
-            let c = get_sip_coeff(hdu, "B", p, q);
-            if c != 0.0 {
-                g += c * u.powi(p as i32) * v.powi(q as i32);
-            }
-        }
-    }
-
-    (u + f, v + g)
-}
-
-/// Apply only the high-order (degree ≥ 3) SIP forward correction.
-///
-/// Same as `apply_sip_forward` but skips terms where p+q < 3.
-/// The low-order (degree-2) terms are already absorbed by the solver's
-/// rotation + FOV fit, so applying them disrupts solving without benefit.
-fn apply_sip_forward_ho(
-    hdu: &FitsHdu,
-    u: f64,
-    v: f64,
-    a_order: usize,
-    b_order: usize,
-) -> (f64, f64) {
-    let mut f = 0.0;
-    for p in 0..=a_order {
-        for q in 0..=(a_order - p) {
-            if p + q < 3 {
-                continue;
-            }
-            let c = get_sip_coeff(hdu, "A", p, q);
-            if c != 0.0 {
-                f += c * u.powi(p as i32) * v.powi(q as i32);
-            }
-        }
-    }
-
-    let mut g = 0.0;
-    for p in 0..=b_order {
-        for q in 0..=(b_order - p) {
-            if p + q < 3 {
-                continue;
-            }
             let c = get_sip_coeff(hdu, "B", p, q);
             if c != 0.0 {
                 g += c * u.powi(p as i32) * v.powi(q as i32);
@@ -530,6 +490,7 @@ fn test_tess_fits_solve() {
             match_max_error: None,
             refine_iterations: 2,
             distortion: None,
+            crpix: [0.0, 0.0],
         };
 
         let result = db.solve_from_centroids(&extraction.centroids, &solve_config);
@@ -593,23 +554,17 @@ fn test_tess_fits_solve() {
     assert_eq!(failed, 0, "{} TESS solve tests failed", failed);
 }
 
-/// Test that applying SIP distortion correction to centroids improves the
-/// solver's RMSE compared to solving with raw (distorted) centroids.
+/// Test the polynomial distortion fitting pipeline on TESS images.
 ///
 /// For each TESS image we:
-/// 1. Extract centroids from the science region (raw, distorted pixel positions).
-/// 2. Apply the high-order (degree ≥ 3) SIP forward correction from the FITS
-///    WCS header to produce corrected centroids.
-/// 3. Solve both the raw and corrected centroid sets.
-/// 4. Assert the corrected solve has lower RMSE.
-///
-/// Only high-order terms are used because the solver's rotation + FOV fit can
-/// absorb the quadratic (degree-2) distortion pattern. Applying the full SIP
-/// correction actually worsens RMSE because the large quadratic shift (~16 px
-/// RMS for TESS) disrupts the solver's pattern matching without providing
-/// information the solver couldn't recover on its own.
+/// 1. Solve with raw (distorted) centroids.
+/// 2. Fit a 4th-order polynomial distortion model from the solve result.
+/// 3. Re-solve with the fitted distortion model applied.
+/// 4. Verify that the distortion-corrected solve has lower RMSE.
+/// 5. Verify that the solved RA/Dec of the center pixel matches the FITS WCS
+///    solution within 1 arcmin.
 #[test]
-fn test_tess_sip_distortion_improves_residuals() {
+fn test_tess_distortion_fit_and_center_accuracy() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("debug")
         .try_init();
@@ -622,9 +577,9 @@ fn test_tess_sip_distortion_improves_residuals() {
     let db = build_tess_database();
 
     println!("\n══════════════════════════════════════════════════════════════");
-    println!("DISTORTION TEST: high-order SIP polynomial from WCS header");
+    println!("DISTORTION TEST: fit polynomial model, re-solve, check center");
 
-    let mut all_improved = true;
+    let mut failed = 0;
 
     for tc in TESS_TEST_CASES {
         let fits_path = format!("data/tess_test_images/{}", tc.filename);
@@ -662,15 +617,15 @@ fn test_tess_sip_distortion_improves_residuals() {
 
         // ── Extract centroids ──
         let extract_config = CentroidExtractionConfig {
-            sigma_threshold: 300.0,
+            sigma_threshold: 250.0,
             min_pixels: 3,
             max_pixels: 10000,
             max_centroids: None,
             sigma_clip_iterations: 5,
             sigma_clip_factor: 3.0,
             use_8_connectivity: true,
-            local_bg_block_size: Some(64),
-            max_elongation: Some(50.0),
+            local_bg_block_size: Some(128),
+            max_elongation: Some(30.0),
         };
 
         let extraction = tetra3::extract_centroids_from_raw(
@@ -688,119 +643,118 @@ fn test_tess_sip_distortion_improves_residuals() {
             continue;
         }
 
-        // ── Apply high-order SIP forward correction to centroids ──
-        // Centroids are centered at image center. Convert to SIP pixel offsets
-        // from CRPIX, apply SIP forward (measured → ideal), convert back.
-        //
-        // SIP convention: u_ideal = u + Σ A_{p,q} · u^p · v^q
-        // Only terms with p+q ≥ 3 are applied; degree-2 terms are absorbed
-        // by the solver's rotation + FOV fit.
-        let crpix1 = get_f64(image_hdu, "CRPIX1").unwrap_or(0.0);
-        let crpix2 = get_f64(image_hdu, "CRPIX2").unwrap_or(0.0);
-
-        let a_order = match image_hdu.headers.get("A_ORDER") {
-            Some(FitsValue::Int(n)) => *n as usize,
-            _ => 0,
-        };
-        let b_order = match image_hdu.headers.get("B_ORDER") {
-            Some(FitsValue::Int(n)) => *n as usize,
-            _ => 0,
-        };
-
-        // Centroid x=0 maps to full-frame 0-indexed pixel (44 + sci_width/2),
-        // which is 1-indexed (44 + sci_width/2 + 1).
-        // SIP u = (1-indexed pixel) - CRPIX1
-        let ox = 44.0 + sci_width as f64 / 2.0 + 1.0 - crpix1;
-        let oy = sci_height as f64 / 2.0 + 1.0 - crpix2;
-
-        let corrected_centroids: Vec<tetra3::Centroid> = extraction
-            .centroids
-            .iter()
-            .map(|c| {
-                // Convert to SIP pixel offsets from CRPIX
-                let u = c.x as f64 + ox;
-                let v = c.y as f64 + oy;
-                // Evaluate only high-order (p+q >= 3) SIP terms
-                let (u_corr, v_corr) = apply_sip_forward_ho(image_hdu, u, v, a_order, b_order);
-                // Convert back to solver-centered coords
-                tetra3::Centroid {
-                    x: (u_corr - ox) as f32,
-                    y: (v_corr - oy) as f32,
-                    mass: c.mass,
-                    cov: c.cov,
-                }
-            })
-            .collect();
-
-        // Show high-order distortion magnitude at a corner
-        {
-            let corner_u = sci_width as f64 / 2.0 + ox;
-            let corner_v = sci_height as f64 / 2.0 + oy;
-            let (cu, cv) = apply_sip_forward_ho(image_hdu, corner_u, corner_v, a_order, b_order);
-            let shift = ((cu - corner_u).powi(2) + (cv - corner_v).powi(2)).sqrt();
-            println!("  SIP HO shift at corner: {:.2} px", shift);
-        }
-
+        // ── 1. Initial solve (raw centroids) ──
         let solve_cfg = SolveConfig {
             fov_estimate_rad: (12.0_f32).to_radians(),
             image_width: sci_width,
             image_height: sci_height,
-            fov_max_error_rad: Some((1.0_f32).to_radians()),
+            fov_max_error_rad: Some((2.0_f32).to_radians()),
             match_radius: 0.01,
             match_threshold: 1e-5,
-            solve_timeout_ms: Some(5_000),
+            solve_timeout_ms: Some(60_000),
             match_max_error: None,
             refine_iterations: 2,
             distortion: None,
+            crpix: [0.0, 0.0],
         };
 
-        // ── Solve with RAW centroids ──
         let result_raw = db.solve_from_centroids(&extraction.centroids, &solve_cfg);
-        if result_raw.status != SolveStatus::MatchFound {
-            println!(
-                "  SKIP: No match with raw centroids ({:?})",
-                result_raw.status
-            );
-            continue;
-        }
-        let rmse_raw = result_raw.rmse_rad.unwrap_or(0.0).to_degrees() as f64 * 3600.0;
+        assert_eq!(
+            result_raw.status,
+            SolveStatus::MatchFound,
+            "Raw solve failed for {}",
+            tc.filename
+        );
 
-        // ── Solve with HO SIP-corrected centroids ──
-        let result_corr = db.solve_from_centroids(&corrected_centroids, &solve_cfg);
-        if result_corr.status != SolveStatus::MatchFound {
-            println!(
-                "  SKIP: No match with corrected centroids ({:?})",
-                result_corr.status
-            );
-            continue;
-        }
-        let rmse_corr = result_corr.rmse_rad.unwrap_or(0.0).to_degrees() as f64 * 3600.0;
-
-        let improvement_pct = (rmse_raw - rmse_corr) / rmse_raw * 100.0;
-
+        let rmse_raw_arcsec = result_raw.rmse_rad.unwrap().to_degrees() as f64 * 3600.0;
         println!(
-            "  Raw:       RMSE={:.2}\", {} matches",
-            rmse_raw,
+            "  Raw solve:   RMSE={:.1}\", {} matches",
+            rmse_raw_arcsec,
             result_raw.num_matches.unwrap_or(0),
         );
+
+        // ── 2. Fit polynomial distortion (order 4) ──
+        let dist_fit = tetra3::fit_polynomial_distortion(
+            &[&result_raw],
+            &[&extraction.centroids[..]],
+            &db,
+            sci_width,
+            4,
+            &DistortionFitConfig::default(),
+        );
         println!(
-            "  Corrected: RMSE={:.2}\", {} matches  ({:+.1}%)",
-            rmse_corr,
-            result_corr.num_matches.unwrap_or(0),
-            improvement_pct,
+            "  Distortion fit: RMSE {:.3} -> {:.3} px, {} inliers, {} outliers",
+            dist_fit.rmse_before_px, dist_fit.rmse_after_px, dist_fit.n_inliers, dist_fit.n_outliers,
         );
 
-        if rmse_corr >= rmse_raw {
-            println!("  *** FAIL: SIP HO correction did not improve RMSE ***");
-            all_improved = false;
-        } else {
+        // ── 3. Re-solve with distortion correction ──
+        let solve_cfg_dist = SolveConfig {
+            distortion: Some(dist_fit.model.clone()),
+            ..solve_cfg
+        };
+        let result_dist = db.solve_from_centroids(&extraction.centroids, &solve_cfg_dist);
+        assert_eq!(
+            result_dist.status,
+            SolveStatus::MatchFound,
+            "Distortion-corrected solve failed for {}",
+            tc.filename
+        );
+
+        let rmse_dist_arcsec = result_dist.rmse_rad.unwrap().to_degrees() as f64 * 3600.0;
+        println!(
+            "  Dist solve:  RMSE={:.1}\", {} matches",
+            rmse_dist_arcsec,
+            result_dist.num_matches.unwrap_or(0),
+        );
+
+        // ── 4. Verify center pixel RA/Dec matches FITS WCS ──
+        let (solved_ra, solved_dec) = result_dist
+            .pixel_to_world(0.0, 0.0)
+            .expect("pixel_to_world failed for center pixel");
+
+        // Center of science region in full-frame 0-indexed coordinates
+        let center_x_ff = 44.0 + sci_width as f64 / 2.0;
+        let center_y_ff = sci_height as f64 / 2.0;
+        let (wcs_ra, wcs_dec) = pixel_to_radec(image_hdu, center_x_ff, center_y_ff);
+
+        let sep_arcmin = angular_separation(
+            &radec_to_uvec(solved_ra, solved_dec),
+            &radec_to_uvec(wcs_ra, wcs_dec),
+        )
+        .to_degrees()
+            * 60.0;
+
+        println!(
+            "  Center pixel: solved=({:.4} deg, {:.4} deg), WCS=({:.4} deg, {:.4} deg), sep={:.2}'",
+            solved_ra, solved_dec, wcs_ra, wcs_dec, sep_arcmin,
+        );
+
+        // ── 5. Assertions ──
+        let mut test_passed = true;
+
+        if rmse_dist_arcsec >= rmse_raw_arcsec {
+            println!(
+                "  *** FAIL: distortion-corrected RMSE ({:.1}\") >= raw RMSE ({:.1}\") ***",
+                rmse_dist_arcsec, rmse_raw_arcsec,
+            );
+            test_passed = false;
+        }
+
+        if sep_arcmin >= 1.0 {
+            println!(
+                "  *** FAIL: center pixel separation {:.2}' exceeds 1' ***",
+                sep_arcmin,
+            );
+            test_passed = false;
+        }
+
+        if test_passed {
             println!("  PASS");
+        } else {
+            failed += 1;
         }
     }
 
     println!("\n══════════════════════════════════════════════════════════════");
-    assert!(
-        all_improved,
-        "High-order SIP distortion correction should reduce RMSE for all test images"
-    );
+    assert_eq!(failed, 0, "{} TESS distortion tests failed", failed);
 }
