@@ -106,6 +106,33 @@ class SolveResult:
         """
         ...
 
+    @property
+    def cd_matrix(self) -> Optional[npt.NDArray[np.float64]]:
+        """WCS CD matrix as a 2x2 numpy array (tangent-plane radians per pixel).
+
+        Maps pixel offsets from CRPIX to gnomonic tangent-plane coordinates
+        at CRVAL. ``None`` if the solve failed.
+        """
+        ...
+
+    @property
+    def crval_ra_deg(self) -> Optional[float]:
+        """WCS reference point RA in degrees.
+
+        The tangent point of the gnomonic (TAN) projection, close to the boresight.
+        """
+        ...
+
+    @property
+    def crval_dec_deg(self) -> Optional[float]:
+        """WCS reference point Dec in degrees."""
+        ...
+
+    @property
+    def crpix(self) -> npt.NDArray[np.float32]:
+        """Optical center offset from the geometric image center, in pixels [x, y]."""
+        ...
+
     from typing import overload
 
     @overload
@@ -357,6 +384,7 @@ class SolverDatabase:
         match_max_error: Optional[float] = None,
         refine_iterations: int = 2,
         distortion: Optional[Union[RadialDistortion, PolynomialDistortion]] = None,
+        crpix: Optional[list[float]] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -385,6 +413,8 @@ class SolverDatabase:
             distortion: Lens distortion model to apply to centroids before solving.
                 When provided, observed centroid pixel coordinates are undistorted
                 before being converted to unit vectors.
+            crpix: Optical center offset from image center as [x, y] in pixels.
+                None defaults to [0, 0] (optical center = image center).
 
         Returns:
             A SolveResult on success, or None if no match was found.
