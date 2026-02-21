@@ -551,6 +551,7 @@ fn test_skyview_fits_solve() {
             match_max_error: None,
             refine_iterations: 2,
             distortion: None,
+            crpix: [0.0, 0.0],
         };
 
         let ref_result = db.solve_from_centroids(&ref_centroids, &solve_config);

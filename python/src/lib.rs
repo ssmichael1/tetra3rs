@@ -471,6 +471,42 @@ impl PySolveResult {
         }
     }
 
+    /// WCS CD matrix as a 2x2 numpy array (tangent-plane radians per pixel).
+    ///
+    /// Maps pixel offsets from CRPIX to gnomonic tangent-plane coordinates
+    /// at CRVAL. ``None`` if the solve failed.
+    #[getter]
+    fn cd_matrix<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.inner.cd_matrix.map(|cd| {
+            PyArray2::from_owned_array(
+                py,
+                ndarray::array![[cd[0][0], cd[0][1]], [cd[1][0], cd[1][1]]],
+            )
+        })
+    }
+
+    /// WCS reference point RA in degrees.
+    ///
+    /// The tangent point of the gnomonic (TAN) projection, close to the boresight.
+    #[getter]
+    fn crval_ra_deg(&self) -> Option<f64> {
+        self.inner
+            .crval_rad
+            .map(|c| c[0].to_degrees().rem_euclid(360.0))
+    }
+
+    /// WCS reference point Dec in degrees.
+    #[getter]
+    fn crval_dec_deg(&self) -> Option<f64> {
+        self.inner.crval_rad.map(|c| c[1].to_degrees())
+    }
+
+    /// Optical center offset from the geometric image center, in pixels [x, y].
+    #[getter]
+    fn crpix<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        PyArray1::from_vec(py, vec![self.inner.crpix[0], self.inner.crpix[1]])
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SolveResult(ra={:.4}°, dec={:.4}°, roll={:.2}°, matches={}, rmse={:.2}\", parity_flip={})",
@@ -740,6 +776,8 @@ impl PySolverDatabase {
     ///     refine_iterations: Number of iterative SVD refinement passes. Default 2.
     ///     distortion: A RadialDistortion model to apply
     ///         to centroids before solving. None = no distortion correction.
+    ///     crpix: Optical center offset from image center as [x, y] in pixels.
+    ///         None = [0, 0] (optical center at image center).
     ///
     /// Returns:
     ///     SolveResult on success, None if no match was found.
@@ -758,6 +796,7 @@ impl PySolverDatabase {
         match_max_error = None,
         refine_iterations = 2,
         distortion = None,
+        crpix = None,
     ))]
     fn solve_from_centroids<'py>(
         &self,
@@ -776,6 +815,7 @@ impl PySolverDatabase {
         match_max_error: Option<f32>,
         refine_iterations: u32,
         distortion: Option<&Bound<'py, pyo3::PyAny>>,
+        crpix: Option<[f32; 2]>,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
         let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
@@ -873,6 +913,7 @@ impl PySolverDatabase {
             match_max_error,
             refine_iterations,
             distortion: dist_model,
+            crpix: crpix.unwrap_or([0.0, 0.0]),
         };
 
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
