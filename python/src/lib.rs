@@ -3,7 +3,7 @@
 //! Exposes the star plate solver to Python as the `tetra3rs` module.
 
 use numpy::ndarray;
-use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 
@@ -452,6 +452,25 @@ impl PySolveResult {
         self.inner.parity_flip
     }
 
+    /// The distortion model used during solving, if any.
+    ///
+    /// Returns a ``RadialDistortion`` or ``PolynomialDistortion`` instance,
+    /// or ``None`` if no distortion was applied.
+    #[getter]
+    fn distortion<'py>(&self, py: Python<'py>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.inner.distortion {
+            Some(Distortion::Radial(r)) => {
+                let obj = PyRadialDistortion { inner: r.clone() };
+                Ok(Some(obj.into_pyobject(py)?.into_any().unbind()))
+            }
+            Some(Distortion::Polynomial(p)) => {
+                let obj = PyPolynomialDistortion { inner: p.clone() };
+                Ok(Some(obj.into_pyobject(py)?.into_any().unbind()))
+            }
+            Some(Distortion::None) | None => Ok(None),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SolveResult(ra={:.4}°, dec={:.4}°, roll={:.2}°, matches={}, rmse={:.2}\", parity_flip={})",
@@ -483,6 +502,132 @@ impl PySolveResult {
             self.inner.prob.unwrap_or(0.0),
             flip_str,
         )
+    }
+
+    /// Convert centered pixel coordinates to world coordinates (RA, Dec in degrees).
+    ///
+    /// Pixel coordinates use the same convention as solver centroids:
+    /// origin at the image center, +X right, +Y down.
+    ///
+    /// Args:
+    ///     x: X pixel coordinate(s). Scalar or 1D numpy array.
+    ///     y: Y pixel coordinate(s). Scalar or 1D numpy array.
+    ///
+    /// Returns:
+    ///     (ra_deg, dec_deg): Tuple of RA and Dec in degrees.
+    ///         Scalars if input is scalar, numpy arrays if input is array.
+    ///         Array elements are NaN where the transform is undefined.
+    #[pyo3(signature = (x, y))]
+    fn pixel_to_world<'py>(
+        &self,
+        py: Python<'py>,
+        x: &Bound<'py, pyo3::PyAny>,
+        y: &Bound<'py, pyo3::PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        // Try array path first
+        if let (Ok(x_arr), Ok(y_arr)) = (
+            x.extract::<PyReadonlyArray1<f64>>(),
+            y.extract::<PyReadonlyArray1<f64>>(),
+        ) {
+            let xa = x_arr.as_array();
+            let ya = y_arr.as_array();
+            let n = xa.len();
+            if ya.len() != n {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "x and y arrays must have the same length",
+                ));
+            }
+            let mut ra_vec = Vec::with_capacity(n);
+            let mut dec_vec = Vec::with_capacity(n);
+            for i in 0..n {
+                match self.inner.pixel_to_world(xa[i], ya[i]) {
+                    Some((r, d)) => {
+                        ra_vec.push(r);
+                        dec_vec.push(d);
+                    }
+                    None => {
+                        ra_vec.push(f64::NAN);
+                        dec_vec.push(f64::NAN);
+                    }
+                }
+            }
+            let ra_out = PyArray1::from_vec(py, ra_vec);
+            let dec_out = PyArray1::from_vec(py, dec_vec);
+            Ok((ra_out, dec_out).into_pyobject(py)?.into_any().unbind())
+        } else if let (Ok(xf), Ok(yf)) = (x.extract::<f64>(), y.extract::<f64>()) {
+            // Scalar path
+            match self.inner.pixel_to_world(xf, yf) {
+                Some((ra, dec)) => Ok((ra, dec).into_pyobject(py)?.into_any().unbind()),
+                None => Ok(py.None()),
+            }
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "x and y must be scalars or 1D numpy arrays of float64",
+            ))
+        }
+    }
+
+    /// Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.
+    ///
+    /// Returns pixel coordinates in the same convention as solver centroids:
+    /// origin at the image center, +X right, +Y down.
+    ///
+    /// Args:
+    ///     ra_deg: Right ascension in degrees. Scalar or 1D numpy array.
+    ///     dec_deg: Declination in degrees. Scalar or 1D numpy array.
+    ///
+    /// Returns:
+    ///     (x, y): Tuple of pixel coordinates.
+    ///         Scalars if input is scalar, numpy arrays if input is array.
+    ///         Array elements are NaN for points behind the camera.
+    #[pyo3(signature = (ra_deg, dec_deg))]
+    fn world_to_pixel<'py>(
+        &self,
+        py: Python<'py>,
+        ra_deg: &Bound<'py, pyo3::PyAny>,
+        dec_deg: &Bound<'py, pyo3::PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        // Try array path first
+        if let (Ok(ra_arr), Ok(dec_arr)) = (
+            ra_deg.extract::<PyReadonlyArray1<f64>>(),
+            dec_deg.extract::<PyReadonlyArray1<f64>>(),
+        ) {
+            let ra_a = ra_arr.as_array();
+            let dec_a = dec_arr.as_array();
+            let n = ra_a.len();
+            if dec_a.len() != n {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "ra_deg and dec_deg arrays must have the same length",
+                ));
+            }
+            let mut x_vec = Vec::with_capacity(n);
+            let mut y_vec = Vec::with_capacity(n);
+            for i in 0..n {
+                match self.inner.world_to_pixel(ra_a[i], dec_a[i]) {
+                    Some((px, py_val)) => {
+                        x_vec.push(px);
+                        y_vec.push(py_val);
+                    }
+                    None => {
+                        x_vec.push(f64::NAN);
+                        y_vec.push(f64::NAN);
+                    }
+                }
+            }
+            let x_out = PyArray1::from_vec(py, x_vec);
+            let y_out = PyArray1::from_vec(py, y_vec);
+            Ok((x_out, y_out).into_pyobject(py)?.into_any().unbind())
+        } else if let (Ok(ra_f), Ok(dec_f)) = (ra_deg.extract::<f64>(), dec_deg.extract::<f64>()) {
+            // Scalar path
+            match self.inner.world_to_pixel(ra_f, dec_f) {
+                Some((x, y)) => Ok((x, y).into_pyobject(py)?.into_any().unbind()),
+                None => Ok(py.None()),
+            }
+        } else {
+            Err(pyo3::exceptions::PyTypeError::new_err(
+                "ra_deg and dec_deg must be scalars or 1D numpy arrays of float64",
+            ))
+        }
     }
 }
 
