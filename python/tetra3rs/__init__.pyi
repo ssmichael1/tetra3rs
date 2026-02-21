@@ -97,6 +97,75 @@ class SolveResult:
         """
         ...
 
+    @property
+    def distortion(self) -> Optional[Union["RadialDistortion", "PolynomialDistortion"]]:
+        """The distortion model used during solving, if any.
+
+        Returns a ``RadialDistortion`` or ``PolynomialDistortion`` instance,
+        or ``None`` if no distortion was applied.
+        """
+        ...
+
+    from typing import overload
+
+    @overload
+    def pixel_to_world(self, x: float, y: float) -> Optional[tuple[float, float]]: ...
+    @overload
+    def pixel_to_world(
+        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+
+    def pixel_to_world(
+        self,
+        x: Union[float, npt.NDArray[np.float64]],
+        y: Union[float, npt.NDArray[np.float64]],
+    ) -> Union[Optional[tuple[float, float]], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]]:
+        """Convert centered pixel coordinates to world coordinates (RA, Dec in degrees).
+
+        Pixel coordinates use the same convention as solver centroids:
+        origin at the image center, +X right, +Y down.
+
+        Args:
+            x: X pixel coordinate(s). Scalar or 1D numpy array.
+            y: Y pixel coordinate(s). Scalar or 1D numpy array.
+
+        Returns:
+            (ra_deg, dec_deg): Tuple of RA and Dec in degrees.
+                Scalars if input is scalar, numpy arrays if input is array.
+                Array elements are NaN where the transform is undefined.
+                Returns None for scalar input if the point is degenerate.
+        """
+        ...
+
+    @overload
+    def world_to_pixel(self, ra_deg: float, dec_deg: float) -> Optional[tuple[float, float]]: ...
+    @overload
+    def world_to_pixel(
+        self, ra_deg: npt.NDArray[np.float64], dec_deg: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+
+    def world_to_pixel(
+        self,
+        ra_deg: Union[float, npt.NDArray[np.float64]],
+        dec_deg: Union[float, npt.NDArray[np.float64]],
+    ) -> Union[Optional[tuple[float, float]], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]]:
+        """Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.
+
+        Returns pixel coordinates in the same convention as solver centroids:
+        origin at the image center, +X right, +Y down.
+
+        Args:
+            ra_deg: Right ascension in degrees. Scalar or 1D numpy array.
+            dec_deg: Declination in degrees. Scalar or 1D numpy array.
+
+        Returns:
+            (x, y): Tuple of pixel coordinates.
+                Scalars if input is scalar, numpy arrays if input is array.
+                Array elements are NaN for points behind the camera.
+                Returns None for scalar input if the point is behind the camera.
+        """
+        ...
+
 class CatalogStar:
     """A star from the solver catalog.
 

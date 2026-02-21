@@ -271,6 +271,12 @@ pub struct SolveResult {
     pub matched_catalog_ids: Vec<u64>,
     /// Indices into the input centroid slice for each match.
     pub matched_centroid_indices: Vec<usize>,
+    /// Image width in pixels (used for coordinate transforms).
+    pub image_width: u32,
+    /// Image height in pixels (used for coordinate transforms).
+    pub image_height: u32,
+    /// Distortion model used during solving (stored for coordinate transforms).
+    pub distortion: Option<Distortion>,
 }
 
 impl SolveResult {
@@ -289,6 +295,115 @@ impl SolveResult {
             parity_flip: false,
             matched_catalog_ids: Vec::new(),
             matched_centroid_indices: Vec::new(),
+            image_width: 0,
+            image_height: 0,
+            distortion: None,
         }
+    }
+
+    /// Convert centered pixel coordinates to world coordinates (RA, Dec) in degrees.
+    ///
+    /// Pixel coordinates use the same convention as solver centroids:
+    /// origin at the image center, +X right, +Y down.
+    ///
+    /// The full pipeline is:
+    /// 1. Undistort pixel coords (if distortion model present)
+    /// 2. Scale to radians using the solved pixel scale
+    /// 3. Apply parity flip if needed
+    /// 4. Project to camera-frame unit vector
+    /// 5. Rotate to ICRS using the solved attitude
+    /// 6. Convert to RA/Dec
+    ///
+    /// Returns `None` if the solve was unsuccessful (no quaternion or FOV).
+    pub fn pixel_to_world(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let q = self.qicrs2cam.as_ref()?;
+        let fov = self.fov_rad? as f64;
+        let pixel_scale = fov / self.image_width.max(1) as f64;
+
+        // 1. Undistort
+        let (ux, uy) = match &self.distortion {
+            Some(d) => d.undistort(x, y),
+            None => (x, y),
+        };
+
+        // 2–3. Scale to radians with parity
+        let ps = if self.parity_flip { -1.0 } else { 1.0 };
+        let xr = ps * ux * pixel_scale;
+        let yr = uy * pixel_scale;
+
+        // 4. Camera-frame unit vector via gnomonic (tangent-plane) projection
+        let norm = (xr * xr + yr * yr + 1.0).sqrt();
+        let cx = xr / norm;
+        let cy = yr / norm;
+        let cz = 1.0 / norm;
+
+        // 5. Rotate to ICRS: R maps ICRS→camera, so R^T maps camera→ICRS
+        let rot = q.to_rotation_matrix();
+        let m = rot.matrix();
+        let ix = m[(0, 0)] as f64 * cx + m[(1, 0)] as f64 * cy + m[(2, 0)] as f64 * cz;
+        let iy = m[(0, 1)] as f64 * cx + m[(1, 1)] as f64 * cy + m[(2, 1)] as f64 * cz;
+        let iz = m[(0, 2)] as f64 * cx + m[(1, 2)] as f64 * cy + m[(2, 2)] as f64 * cz;
+
+        // 6. ICRS unit vector → RA/Dec
+        let dec = iz.asin();
+        let ra = iy.atan2(ix);
+        Some((ra.to_degrees().rem_euclid(360.0), dec.to_degrees()))
+    }
+
+    /// Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.
+    ///
+    /// Returns pixel coordinates in the same convention as solver centroids:
+    /// origin at the image center, +X right, +Y down.
+    ///
+    /// The full pipeline is:
+    /// 1. Convert RA/Dec to ICRS unit vector
+    /// 2. Rotate to camera frame using the solved attitude
+    /// 3. Gnomonic (tangent-plane) projection
+    /// 4. Apply parity flip if needed
+    /// 5. Scale to pixels using the solved pixel scale
+    /// 6. Distort pixel coords (if distortion model present)
+    ///
+    /// Returns `None` if the solve was unsuccessful or the point is behind the camera.
+    pub fn world_to_pixel(&self, ra_deg: f64, dec_deg: f64) -> Option<(f64, f64)> {
+        let q = self.qicrs2cam.as_ref()?;
+        let fov = self.fov_rad? as f64;
+        let pixel_scale = fov / self.image_width.max(1) as f64;
+
+        // 1. RA/Dec → ICRS unit vector
+        let ra = ra_deg.to_radians();
+        let dec = dec_deg.to_radians();
+        let cos_dec = dec.cos();
+        let ix = ra.cos() * cos_dec;
+        let iy = ra.sin() * cos_dec;
+        let iz = dec.sin();
+
+        // 2. Rotate to camera frame: cam = R * icrs
+        let rot = q.to_rotation_matrix();
+        let m = rot.matrix();
+        let cx = m[(0, 0)] as f64 * ix + m[(0, 1)] as f64 * iy + m[(0, 2)] as f64 * iz;
+        let cy = m[(1, 0)] as f64 * ix + m[(1, 1)] as f64 * iy + m[(1, 2)] as f64 * iz;
+        let cz = m[(2, 0)] as f64 * ix + m[(2, 1)] as f64 * iy + m[(2, 2)] as f64 * iz;
+
+        // Behind camera
+        if cz <= 0.0 {
+            return None;
+        }
+
+        // 3. Gnomonic projection
+        let xr = cx / cz;
+        let yr = cy / cz;
+
+        // 4–5. Undo parity and scale to pixels
+        let ps = if self.parity_flip { -1.0 } else { 1.0 };
+        let ux = ps * xr / pixel_scale;
+        let uy = yr / pixel_scale;
+
+        // 6. Distort
+        let (dx, dy) = match &self.distortion {
+            Some(d) => d.distort(ux, uy),
+            None => (ux, uy),
+        };
+
+        Some((dx, dy))
     }
 }
