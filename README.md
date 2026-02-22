@@ -19,6 +19,10 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
 - **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading
+- **Centroid extraction** — detect stars from images with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement (requires `image` feature)
+- **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
+- **Distortion calibration** — fit SIP polynomial or radial distortion models from one or more solved images via `calibrate_camera`
+- **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
 
 ## Installation
 
@@ -90,7 +94,7 @@ let solve_config = SolveConfig {
 
 let result = db.solve_from_centroids(&centroids, &solve_config);
 if result.status == SolveStatus::MatchFound {
-    let q = result.quaternion.unwrap();
+    let q = result.qicrs2cam.unwrap();
     println!("Attitude: {q}");
     println!("Matched {} stars in {:.1} ms",
         result.num_matches.unwrap(), result.solve_time_ms);
@@ -103,7 +107,8 @@ if result.status == SolveStatus::MatchFound {
 2. **Hash lookup** — quantize the edge ratios into a key and probe a precomputed hash table for matching catalog patterns
 3. **Attitude estimation** — solve Wahba's problem via SVD to find the rotation from catalog (ICRS) to camera frame
 4. **Verification** — project nearby catalog stars into the camera frame, count matches, and accept only if the false-positive probability (binomial CDF) is below threshold
-5. **Refinement** — re-estimate the rotation using all matched star pairs
+5. **Refinement** — re-estimate the rotation using all matched star pairs via iterative SVD passes
+6. **WCS fit** — constrained 3-DOF tangent-plane refinement (rotation angle θ + CRVAL offset) with sigma-clipping, producing FITS-standard WCS output (CD matrix, CRVAL)
 
 ### Parity flip detection
 
@@ -144,7 +149,7 @@ cargo test --test skyview_solve_test --features image -- --nocapture
 
 Solves 3 Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
 
-The solved boresight is compared against the true boresight computed from the full WCS (CRPIX, SIP, CD matrix, TAN deprojection) at the center of the science region. Because the solver assumes a perfect pinhole projection while TESS has up to ~65 px of SIP distortion at the corners, the boresight error is typically 1-3 arcminutes and the RMSE is ~3-4 arcminutes. This is a known limitation of the pinhole model on wide-field distorted optics; see the Roadmap for planned distortion correction support.
+The solved boresight is compared against the true boresight computed from the full WCS (CRPIX, SIP, CD matrix, TAN deprojection) at the center of the science region. Passing a `CameraModel` with a fitted `PolynomialDistortion` (via `calibrate_camera`) significantly reduces residuals on distorted wide-field optics like TESS.
 
 ```sh
 cargo test --test tess_solve_test --features image -- --nocapture
@@ -153,7 +158,6 @@ cargo test --test tess_solve_test --features image -- --nocapture
 ## Roadmap (not in order)
 
 - **Tracking mode** — accept an initial attitude guess to restrict the search to nearby catalog stars, improving speed and robustness for sequential frames (e.g. star trackers solution on previous frame)
-- **Image distortion estimation and correction** — the solver currently assumes a perfect pinhole (gnomonic) projection; cameras with significant optical distortion (e.g. TESS, wide-angle lenses) produce ~1-5' boresight error and elevated RMSE
 - **Stellar aberration** — correct for the apparent shift in star positions caused by the observer's velocity (up to ~20" for Earth-orbiting spacecraft)
 - **Gaia catalog support** — complete the Gaia bright star catalog import (`--features gaia`)
 - **Tycho-2 catalog support** — import the Tycho-2 catalog (~2.5 million stars, fills the gap between Hipparcos and Gaia)

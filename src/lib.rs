@@ -21,6 +21,14 @@
 //! - **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
 //! - **Zero-copy deserialization** — databases serialize with [rkyv](https://docs.rs/rkyv)
 //!   for instant loading
+//! - **Centroid extraction** — detect stars from images with local background subtraction,
+//!   connected-component labeling, and quadratic sub-pixel peak refinement (`image` feature)
+//! - **Camera model** — unified [`CameraModel`] struct (focal length, optical center, parity,
+//!   distortion) used throughout the solve and calibration pipeline
+//! - **Distortion calibration** — fit SIP polynomial or radial distortion models from one or
+//!   more solved images via [`calibrate_camera`]
+//! - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and
+//!   [`SolveResult::pixel_to_world`] / [`SolveResult::world_to_pixel`] methods
 //!
 //! ## Example
 //!
@@ -73,7 +81,10 @@
 //!    catalog (ICRS) to camera frame
 //! 4. **Verification** — project nearby catalog stars into the camera frame, count matches,
 //!    and accept only if the false-positive probability (binomial CDF) is below threshold
-//! 5. **Refinement** — re-estimate the rotation using all matched star pairs
+//! 5. **Refinement** — re-estimate the rotation using all matched star pairs via iterative
+//!    SVD passes
+//! 6. **WCS fit** — constrained 3-DOF tangent-plane refinement (rotation angle θ + CRVAL
+//!    offset) with sigma-clipping, producing FITS-standard WCS output
 //!
 //! ## Credits
 //!
