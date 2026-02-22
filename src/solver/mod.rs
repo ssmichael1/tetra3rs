@@ -15,9 +15,12 @@ pub mod combinations;
 pub mod database;
 pub mod pattern;
 pub mod solve;
+pub mod wcs_refine;
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::camera_model::CameraModel;
+use crate::distortion::Distortion;
 use crate::{Quaternion, StarCatalog};
 
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
@@ -170,6 +173,36 @@ pub struct SolveConfig {
     pub solve_timeout_ms: Option<u64>,
     /// Maximum edge-ratio error for matching. None = use database value.
     pub match_max_error: Option<f32>,
+    /// Number of iterative SVD refinement passes after the initial match.
+    ///
+    /// Each pass re-projects catalog stars using the refined rotation and
+    /// re-matches centroids, potentially discovering additional inliers at
+    /// the edges of the match radius.  Terminates early if no new inliers
+    /// are found.
+    ///
+    /// - `1` = single refinement pass (original behavior)
+    /// - `2` = one additional re-match after the first refinement (default)
+    ///
+    /// Default: 2.
+    pub refine_iterations: u32,
+    /// Camera intrinsics model (focal length, optical center, parity, distortion).
+    ///
+    /// Encapsulates the lens distortion model, optical center offset (CRPIX),
+    /// and parity flip into a single struct. The solver uses this to preprocess
+    /// centroids before pattern matching and WCS refinement.
+    ///
+    /// If not explicitly set, uses a simple pinhole model with no distortion,
+    /// crpix=[0,0], and no parity flip.
+    pub camera_model: CameraModel,
+    /// Observer's barycentric velocity in km/s (ICRS/GCRF Cartesian).
+    ///
+    /// When set, catalog star positions are aberration-corrected to apparent
+    /// positions before matching and refinement, removing the ~20" systematic
+    /// bias from Earth's orbital velocity.
+    ///
+    /// For ground-based or Earth-orbiting observers, this is dominated by
+    /// Earth's orbital velocity (~30 km/s). Default: `None` (no correction).
+    pub observer_velocity_km_s: Option<[f64; 3]>,
 }
 
 impl Default for SolveConfig {
@@ -183,6 +216,16 @@ impl Default for SolveConfig {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(5000),
             match_max_error: None,
+            refine_iterations: 2,
+            camera_model: CameraModel {
+                focal_length_px: 1.0,
+                image_width: 0,
+                image_height: 0,
+                crpix: [0.0, 0.0],
+                parity_flip: false,
+                distortion: Distortion::None,
+            },
+            observer_velocity_km_s: None,
         }
     }
 }
@@ -194,6 +237,7 @@ impl SolveConfig {
             fov_estimate_rad,
             image_width,
             image_height,
+            camera_model: CameraModel::from_fov(fov_estimate_rad as f64, image_width, image_height),
             ..Default::default()
         }
     }
@@ -242,6 +286,32 @@ pub struct SolveResult {
     pub matched_catalog_ids: Vec<u64>,
     /// Indices into the input centroid slice for each match.
     pub matched_centroid_indices: Vec<usize>,
+    /// Image width in pixels (used for coordinate transforms).
+    pub image_width: u32,
+    /// Image height in pixels (used for coordinate transforms).
+    pub image_height: u32,
+    /// WCS CD matrix: `[[CD11, CD12], [CD21, CD22]]` in tangent-plane radians per pixel.
+    ///
+    /// Maps pixel offsets from the optical center (CRPIX) to gnomonic tangent-plane
+    /// coordinates at the reference point (CRVAL). Follows the FITS WCS TAN convention.
+    /// Only populated on successful solve (`MatchFound`).
+    pub cd_matrix: Option<[[f64; 2]; 2]>,
+    /// WCS reference point `[RA, Dec]` in radians.
+    ///
+    /// The tangent point of the gnomonic (TAN) projection, typically very close to
+    /// the camera boresight. Only populated on successful solve (`MatchFound`).
+    pub crval_rad: Option<[f64; 2]>,
+    /// Camera model used during solving (stored for coordinate transforms).
+    ///
+    /// On success, this contains the camera model with the refined focal length
+    /// (from the matched FOV) and detected parity. The distortion model and CRPIX
+    /// are copied from the input [`SolveConfig::camera_model`].
+    pub camera_model: Option<CameraModel>,
+    /// Fitted rotation angle in radians (camera roll in tangent plane).
+    ///
+    /// The angle from the tangent-plane ξ (East) axis to the camera +X axis,
+    /// measured counter-clockwise. Only populated on successful solve.
+    pub theta_rad: Option<f64>,
 }
 
 impl SolveResult {
@@ -260,6 +330,143 @@ impl SolveResult {
             parity_flip: false,
             matched_catalog_ids: Vec::new(),
             matched_centroid_indices: Vec::new(),
+            image_width: 0,
+            image_height: 0,
+            cd_matrix: None,
+            crval_rad: None,
+            camera_model: None,
+            theta_rad: None,
+        }
+    }
+
+    /// Convert centered pixel coordinates to world coordinates (RA, Dec) in degrees.
+    ///
+    /// Pixel coordinates use the same convention as solver centroids:
+    /// origin at the geometric image center, +X right, +Y down.
+    ///
+    /// When a CameraModel and theta are available (from the constrained WCS refinement),
+    /// the pipeline is:
+    /// 1. CameraModel.pixel_to_tanplane: crpix subtract → undistort → parity → divide by f
+    /// 2. Rotate from camera frame to sky frame using theta
+    /// 3. Inverse TAN projection at CRVAL → (RA, Dec)
+    ///
+    /// Falls back to the CD matrix path, then to the quaternion + FOV path.
+    ///
+    /// Returns `None` if the solve was unsuccessful.
+    pub fn pixel_to_world(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        if let (Some(ref cam), Some(crval), Some(theta)) =
+            (&self.camera_model, &self.crval_rad, self.theta_rad)
+        {
+            // ── CameraModel + theta path ──
+            let (xi_cam, eta_cam) = cam.pixel_to_tanplane(x, y);
+            // Rotate from camera frame to sky frame: R(θ) * [xi_cam, eta_cam]
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
+            let xi = cos_t * xi_cam - sin_t * eta_cam;
+            let eta = sin_t * xi_cam + cos_t * eta_cam;
+            let (ra, dec) = wcs_refine::inverse_tan_project(xi, eta, crval[0], crval[1]);
+            Some((ra.to_degrees().rem_euclid(360.0), dec.to_degrees()))
+        } else if let (Some(cd), Some(crval)) = (&self.cd_matrix, &self.crval_rad) {
+            // ── Legacy CD-matrix fallback (no CameraModel) ──
+            let xi = cd[0][0] * x + cd[0][1] * y;
+            let eta = cd[1][0] * x + cd[1][1] * y;
+            let (ra, dec) = wcs_refine::inverse_tan_project(xi, eta, crval[0], crval[1]);
+            Some((ra.to_degrees().rem_euclid(360.0), dec.to_degrees()))
+        } else {
+            // ── Fallback: quaternion + FOV ──
+            let q = self.qicrs2cam.as_ref()?;
+            let fov = self.fov_rad? as f64;
+            let pixel_scale = fov / self.image_width.max(1) as f64;
+
+            let ps = if self.parity_flip { -1.0 } else { 1.0 };
+            let xr = ps * x * pixel_scale;
+            let yr = y * pixel_scale;
+
+            let norm = (xr * xr + yr * yr + 1.0).sqrt();
+            let cx = xr / norm;
+            let cy = yr / norm;
+            let cz = 1.0 / norm;
+
+            let rot = q.to_rotation_matrix();
+            let m = rot.matrix();
+            let ix = m[(0, 0)] as f64 * cx + m[(1, 0)] as f64 * cy + m[(2, 0)] as f64 * cz;
+            let iy = m[(0, 1)] as f64 * cx + m[(1, 1)] as f64 * cy + m[(2, 1)] as f64 * cz;
+            let iz = m[(0, 2)] as f64 * cx + m[(1, 2)] as f64 * cy + m[(2, 2)] as f64 * cz;
+
+            let dec = iz.asin();
+            let ra = iy.atan2(ix);
+            Some((ra.to_degrees().rem_euclid(360.0), dec.to_degrees()))
+        }
+    }
+
+    /// Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.
+    ///
+    /// Returns pixel coordinates in the same convention as solver centroids:
+    /// origin at the geometric image center, +X right, +Y down.
+    ///
+    /// When a CameraModel and theta are available, the pipeline is:
+    /// 1. TAN project (RA, Dec) at CRVAL → sky tangent-plane (ξ, η)
+    /// 2. Rotate from sky frame to camera frame using -theta
+    /// 3. CameraModel.tanplane_to_pixel: multiply by f → parity → distort → add crpix
+    ///
+    /// Falls back to the CD matrix path, then to the quaternion + FOV path.
+    ///
+    /// Returns `None` if the solve was unsuccessful or the point is behind the camera.
+    pub fn world_to_pixel(&self, ra_deg: f64, dec_deg: f64) -> Option<(f64, f64)> {
+        if let (Some(ref cam), Some(crval), Some(theta)) =
+            (&self.camera_model, &self.crval_rad, self.theta_rad)
+        {
+            // ── CameraModel + theta path ──
+            let ra = ra_deg.to_radians();
+            let dec = dec_deg.to_radians();
+            let (xi, eta) = wcs_refine::tan_project(ra, dec, crval[0], crval[1])?;
+            // Rotate from sky frame to camera frame: R(-θ) * [xi, eta]
+            let cos_t = theta.cos();
+            let sin_t = theta.sin();
+            let xi_cam = cos_t * xi + sin_t * eta;
+            let eta_cam = -sin_t * xi + cos_t * eta;
+            let (px, py) = cam.tanplane_to_pixel(xi_cam, eta_cam);
+            Some((px, py))
+        } else if let (Some(cd), Some(crval)) = (&self.cd_matrix, &self.crval_rad) {
+            // ── Legacy CD-matrix fallback ──
+            let ra = ra_deg.to_radians();
+            let dec = dec_deg.to_radians();
+            let (xi, eta) = wcs_refine::tan_project(ra, dec, crval[0], crval[1])?;
+            let cd_inv = wcs_refine::cd_inverse(cd)?;
+            let px = cd_inv[0][0] * xi + cd_inv[0][1] * eta;
+            let py = cd_inv[1][0] * xi + cd_inv[1][1] * eta;
+            Some((px, py))
+        } else {
+            // ── Fallback: quaternion + FOV ──
+            let q = self.qicrs2cam.as_ref()?;
+            let fov = self.fov_rad? as f64;
+            let pixel_scale = fov / self.image_width.max(1) as f64;
+
+            let ra = ra_deg.to_radians();
+            let dec = dec_deg.to_radians();
+            let cos_dec = dec.cos();
+            let ix = ra.cos() * cos_dec;
+            let iy = ra.sin() * cos_dec;
+            let iz = dec.sin();
+
+            let rot = q.to_rotation_matrix();
+            let m = rot.matrix();
+            let cx = m[(0, 0)] as f64 * ix + m[(0, 1)] as f64 * iy + m[(0, 2)] as f64 * iz;
+            let cy = m[(1, 0)] as f64 * ix + m[(1, 1)] as f64 * iy + m[(1, 2)] as f64 * iz;
+            let cz = m[(2, 0)] as f64 * ix + m[(2, 1)] as f64 * iy + m[(2, 2)] as f64 * iz;
+
+            if cz <= 0.0 {
+                return None;
+            }
+
+            let xr = cx / cz;
+            let yr = cy / cz;
+
+            let ps = if self.parity_flip { -1.0 } else { 1.0 };
+            let ux = ps * xr / pixel_scale;
+            let uy = yr / pixel_scale;
+
+            Some((ux, uy))
         }
     }
 }

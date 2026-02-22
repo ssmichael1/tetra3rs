@@ -5,8 +5,9 @@
 //! 2. Estimating and subtracting the background (sigma-clipped median)
 //! 3. Thresholding to identify bright pixels
 //! 4. Labeling connected components (blobs)
-//! 5. Computing intensity-weighted centroids for each blob
-//! 6. Converting pixel positions to centered coordinates (origin at image center)
+//! 5. Computing intensity-weighted centroids for each blob, with:
+//!    - Per-blob local background from an annulus of non-blob pixels
+//!    - Quadratic peak refinement (2D fit to 3×3 around peak pixel)
 //!
 //! Requires the `image` feature to be enabled.
 //!
@@ -617,6 +618,16 @@ struct RawCentroid {
 
 /// Compute intensity-weighted centroids for each labeled blob.
 ///
+/// For each blob that passes size and elongation filters:
+/// 1. A local background is estimated from the median of non-blob pixels in a
+///    5-pixel annulus around the blob's bounding box.
+/// 2. Intensity-weighted moments are re-accumulated with the local background
+///    subtracted, yielding a center-of-mass (CoM) position.
+/// 3. A 2D quadratic is fit to the 3×3 neighborhood around the peak pixel to
+///    interpolate the sub-pixel intensity maximum. The quadratic position is
+///    used only when it agrees with the CoM (within 0.5 px); otherwise the CoM
+///    is kept as-is.
+///
 /// When `max_elongation` is set in config, blobs with elongation ratio
 /// (major/minor axis) exceeding the threshold are rejected as non-stellar.
 fn compute_blob_centroids(
@@ -624,13 +635,16 @@ fn compute_blob_centroids(
     labels: &[u32],
     num_labels: usize,
     width: u32,
-    _height: u32,
+    height: u32,
     bg_level: f32,
     config: &CentroidExtractionConfig,
 ) -> Vec<RawCentroid> {
     let w = width as usize;
 
-    // Accumulators for each label: intensity-weighted moments
+    // Accumulators for each label: intensity-weighted moments.
+    // Moments are computed relative to a reference pixel (ref_col, ref_row)
+    // within each blob to avoid floating-point bias from large absolute
+    // coordinates. The first pixel encountered sets the reference.
     struct BlobAccum {
         sum_x: f64,
         sum_y: f64,
@@ -640,11 +654,18 @@ fn compute_blob_centroids(
         sum_yy: f64,
         sum_xy: f64,
         pixel_count: usize,
+        // Reference pixel: moments are relative to this origin
+        ref_col: usize,
+        ref_row: usize,
         // Bounding box for compactness check
         min_col: usize,
         max_col: usize,
         min_row: usize,
         max_row: usize,
+        // Peak pixel tracking
+        peak_col: usize,
+        peak_row: usize,
+        peak_val: f32,
     }
 
     let mut accums: Vec<BlobAccum> = (0..=num_labels)
@@ -656,10 +677,15 @@ fn compute_blob_centroids(
             sum_yy: 0.0,
             sum_xy: 0.0,
             pixel_count: 0,
+            ref_col: 0,
+            ref_row: 0,
             min_col: usize::MAX,
             max_col: 0,
             min_row: usize::MAX,
             max_row: 0,
+            peak_col: 0,
+            peak_row: 0,
+            peak_val: f32::NEG_INFINITY,
         })
         .collect();
 
@@ -672,25 +698,42 @@ fn compute_blob_centroids(
         let intensity = (pixel_val - bg_level).max(0.0) as f64;
 
         let acc = &mut accums[label as usize];
-        let cf = col as f64;
-        let rf = row as f64;
-        acc.sum_x += cf * intensity;
-        acc.sum_y += rf * intensity;
-        acc.sum_xx += cf * cf * intensity;
-        acc.sum_yy += rf * rf * intensity;
-        acc.sum_xy += cf * rf * intensity;
+
+        // Set reference pixel on first encounter
+        if acc.pixel_count == 0 {
+            acc.ref_col = col;
+            acc.ref_row = row;
+        }
+
+        // Accumulate moments relative to reference pixel (signed — blob pixels
+        // can be in any direction from the first pixel encountered)
+        let dx = col as f64 - acc.ref_col as f64;
+        let dy = row as f64 - acc.ref_row as f64;
+        acc.sum_x += dx * intensity;
+        acc.sum_y += dy * intensity;
+        acc.sum_xx += dx * dx * intensity;
+        acc.sum_yy += dy * dy * intensity;
+        acc.sum_xy += dx * dy * intensity;
         acc.sum_intensity += intensity;
         acc.pixel_count += 1;
         acc.min_col = acc.min_col.min(col);
         acc.max_col = acc.max_col.max(col);
         acc.min_row = acc.min_row.min(row);
         acc.max_row = acc.max_row.max(row);
+        if pixel_val > acc.peak_val {
+            acc.peak_val = pixel_val;
+            acc.peak_col = col;
+            acc.peak_row = row;
+        }
     }
+
+    let h = height as usize;
 
     accums
         .into_iter()
+        .enumerate()
         .skip(1) // skip label 0 (background)
-        .filter_map(|acc| {
+        .filter_map(|(blob_label, acc)| {
             if acc.pixel_count < config.min_pixels
                 || acc.pixel_count > config.max_pixels
                 || acc.sum_intensity <= 0.0
@@ -698,16 +741,15 @@ fn compute_blob_centroids(
                 return None;
             }
 
-            let xbar = acc.sum_x / acc.sum_intensity;
-            let ybar = acc.sum_y / acc.sum_intensity;
-            let cxx = acc.sum_xx / acc.sum_intensity - xbar * xbar;
-            let cyy = acc.sum_yy / acc.sum_intensity - ybar * ybar;
-            let cxy = acc.sum_xy / acc.sum_intensity - xbar * ybar;
+            // --- Initial CoM for elongation filter (uses global bg) ---
+            let dx_bar = acc.sum_x / acc.sum_intensity;
+            let dy_bar = acc.sum_y / acc.sum_intensity;
+            let cxx = acc.sum_xx / acc.sum_intensity - dx_bar * dx_bar;
+            let cyy = acc.sum_yy / acc.sum_intensity - dy_bar * dy_bar;
+            let cxy = acc.sum_xy / acc.sum_intensity - dx_bar * dy_bar;
 
-            // Elongation filter: compute the ratio of major to minor axis
-            // from the intensity-weighted covariance matrix.
+            // Elongation filter
             if let Some(max_elong) = config.max_elongation {
-                // Eigenvalues of [[cxx, cxy], [cxy, cyy]]
                 let trace = cxx + cyy;
                 let det = cxx * cyy - cxy * cxy;
                 let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
@@ -719,10 +761,123 @@ fn compute_blob_centroids(
                 }
             }
 
+            // --- Per-blob local background from annulus ---
+            // Expand bounding box by margin, collect non-blob pixels
+            const ANNULUS_MARGIN: usize = 5;
+            let r0 = acc.min_row.saturating_sub(ANNULUS_MARGIN);
+            let r1 = (acc.max_row + ANNULUS_MARGIN + 1).min(h);
+            let c0 = acc.min_col.saturating_sub(ANNULUS_MARGIN);
+            let c1 = (acc.max_col + ANNULUS_MARGIN + 1).min(w);
+
+            let mut annulus_vals: Vec<f32> = Vec::new();
+            for r in r0..r1 {
+                let row_off = r * w;
+                for c in c0..c1 {
+                    let idx = row_off + c;
+                    if labels[idx] == 0 {
+                        annulus_vals.push(gray[idx]);
+                    }
+                }
+            }
+
+            // Median of annulus (residual local background in bg-subtracted image)
+            let local_bg = if annulus_vals.is_empty() {
+                0.0_f64
+            } else {
+                annulus_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                let mid = annulus_vals.len() / 2;
+                if annulus_vals.len() % 2 == 0 {
+                    (annulus_vals[mid - 1] + annulus_vals[mid]) as f64 / 2.0
+                } else {
+                    annulus_vals[mid] as f64
+                }
+            };
+
+            // --- Re-accumulate moments with local background correction ---
+            let ref_col = acc.ref_col;
+            let ref_row = acc.ref_row;
+            let mut sum_x = 0.0_f64;
+            let mut sum_y = 0.0_f64;
+            let mut sum_xx = 0.0_f64;
+            let mut sum_yy = 0.0_f64;
+            let mut sum_xy = 0.0_f64;
+            let mut sum_i = 0.0_f64;
+
+            for r in acc.min_row..=acc.max_row {
+                let row_off = r * w;
+                for c in acc.min_col..=acc.max_col {
+                    let idx = row_off + c;
+                    if labels[idx] as usize == blob_label {
+                        let intensity = (gray[idx] as f64 - local_bg).max(0.0);
+                        let dx = c as f64 - ref_col as f64;
+                        let dy = r as f64 - ref_row as f64;
+                        sum_x += dx * intensity;
+                        sum_y += dy * intensity;
+                        sum_xx += dx * dx * intensity;
+                        sum_yy += dy * dy * intensity;
+                        sum_xy += dx * dy * intensity;
+                        sum_i += intensity;
+                    }
+                }
+            }
+
+            if sum_i <= 0.0 {
+                return None;
+            }
+
+            let dx_bar = sum_x / sum_i;
+            let dy_bar = sum_y / sum_i;
+            let xbar = ref_col as f64 + dx_bar;
+            let ybar = ref_row as f64 + dy_bar;
+            let cxx = sum_xx / sum_i - dx_bar * dx_bar;
+            let cyy = sum_yy / sum_i - dy_bar * dy_bar;
+            let cxy = sum_xy / sum_i - dx_bar * dy_bar;
+
+            // --- Quadratic peak refinement ---
+            let mut final_x = xbar;
+            let mut final_y = ybar;
+
+            let pc = acc.peak_col;
+            let pr = acc.peak_row;
+            if acc.pixel_count >= 5 && pc >= 1 && pr >= 1 && pc + 1 < w && pr + 1 < h {
+                // Build 3x3 grid of background-subtracted values around peak
+                let effective_bg = local_bg;
+                let v = |dy: isize, dx: isize| -> f64 {
+                    let r = (pr as isize + dy) as usize;
+                    let c = (pc as isize + dx) as usize;
+                    gray[r * w + c] as f64 - effective_bg
+                };
+
+                let b = (v(0, 1) - v(0, -1)) / 2.0;
+                let c_coeff = (v(1, 0) - v(-1, 0)) / 2.0;
+                let d = (v(0, 1) + v(0, -1) - 2.0 * v(0, 0)) / 2.0;
+                let f = (v(1, 0) + v(-1, 0) - 2.0 * v(0, 0)) / 2.0;
+                let e = (v(1, 1) - v(1, -1) - v(-1, 1) + v(-1, -1)) / 4.0;
+
+                let denom = 4.0 * d * f - e * e;
+                if denom.abs() > 1e-10 {
+                    let x_off = (e * c_coeff - 2.0 * f * b) / denom;
+                    let y_off = (e * b - 2.0 * d * c_coeff) / denom;
+
+                    // Only apply if offset is within half a pixel
+                    if x_off.abs() <= 0.5 && y_off.abs() <= 0.5 {
+                        let qx = pc as f64 + x_off;
+                        let qy = pr as f64 + y_off;
+                        // Only use quadratic when it agrees with CoM (within 0.5 px).
+                        // For asymmetric or blended blobs, CoM is more reliable.
+                        let dist_sq = (qx - xbar) * (qx - xbar) + (qy - ybar) * (qy - ybar);
+                        if dist_sq < 0.25 {
+                            final_x = qx;
+                            final_y = qy;
+                        }
+                    }
+                }
+            }
+
             Some(RawCentroid {
-                x_px: xbar as f32,
-                y_px: ybar as f32,
-                mass: acc.sum_intensity as f32,
+                x_px: final_x as f32,
+                y_px: final_y as f32,
+                mass: sum_i as f32,
                 cov: crate::Matrix2::new(cxx as f32, cxy as f32, cxy as f32, cyy as f32),
             })
         })
@@ -879,5 +1034,123 @@ mod tests {
 
         let result = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
         assert_eq!(result.centroids.len(), 2);
+    }
+
+    #[test]
+    fn test_quadratic_refinement() {
+        // Place a Gaussian star at a known sub-pixel offset on uniform background
+        let width = 64u32;
+        let height = 64u32;
+        let bg = 100.0_f32;
+        let true_x = 32.3_f32;
+        let true_y = 32.7_f32;
+        let sigma_px = 2.0_f32;
+        let peak_brightness = 2000.0_f32;
+
+        let mut pixels = vec![bg; (width * height) as usize];
+        for row in 0..height {
+            for col in 0..width {
+                let dx = col as f32 - true_x;
+                let dy = row as f32 - true_y;
+                let r2 = dx * dx + dy * dy;
+                pixels[(row * width + col) as usize] +=
+                    peak_brightness * (-r2 / (2.0 * sigma_px * sigma_px)).exp();
+            }
+        }
+
+        let config = CentroidExtractionConfig {
+            sigma_threshold: 3.0,
+            min_pixels: 3,
+            ..Default::default()
+        };
+
+        let result = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
+        assert_eq!(result.centroids.len(), 1, "Expected 1 star, got {}", result.centroids.len());
+
+        // Centroid is in centered coords (origin at image center)
+        let c = &result.centroids[0];
+        let cx = width as f32 / 2.0;
+        let cy = height as f32 / 2.0;
+        let abs_x = c.x + cx;
+        let abs_y = c.y + cy;
+
+        let err_x = (abs_x - true_x).abs();
+        let err_y = (abs_y - true_y).abs();
+        assert!(
+            err_x < 0.15,
+            "X error too large: centroid={abs_x:.4}, true={true_x}, err={err_x:.4}"
+        );
+        assert!(
+            err_y < 0.15,
+            "Y error too large: centroid={abs_y:.4}, true={true_y}, err={err_y:.4}"
+        );
+    }
+
+    #[test]
+    fn test_quadratic_refinement_with_gradient_background() {
+        // Place a star on a gradient background to test local background correction
+        let width = 128u32;
+        let height = 128u32;
+        let true_x = 64.4_f32;
+        let true_y = 64.6_f32;
+        let sigma_px = 2.0_f32;
+        let peak_brightness = 2000.0_f32;
+
+        let mut pixels = vec![0.0_f32; (width * height) as usize];
+        // Add a gradient background: increases from left to right (50 to 150)
+        for row in 0..height {
+            for col in 0..width {
+                let bg = 50.0 + 100.0 * (col as f32 / width as f32);
+                pixels[(row * width + col) as usize] = bg;
+            }
+        }
+        // Add Gaussian star
+        for row in 0..height {
+            for col in 0..width {
+                let dx = col as f32 - true_x;
+                let dy = row as f32 - true_y;
+                let r2 = dx * dx + dy * dy;
+                pixels[(row * width + col) as usize] +=
+                    peak_brightness * (-r2 / (2.0 * sigma_px * sigma_px)).exp();
+            }
+        }
+
+        let config = CentroidExtractionConfig {
+            sigma_threshold: 5.0,
+            min_pixels: 3,
+            ..Default::default()
+        };
+
+        let result = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
+        assert!(
+            !result.centroids.is_empty(),
+            "Should detect at least one star on gradient background"
+        );
+
+        // Find the centroid closest to our true position
+        let cx = width as f32 / 2.0;
+        let cy = height as f32 / 2.0;
+        let best = result
+            .centroids
+            .iter()
+            .min_by(|a, b| {
+                let da = (a.x + cx - true_x).powi(2) + (a.y + cy - true_y).powi(2);
+                let db = (b.x + cx - true_x).powi(2) + (b.y + cy - true_y).powi(2);
+                da.partial_cmp(&db).unwrap()
+            })
+            .unwrap();
+
+        let abs_x = best.x + cx;
+        let abs_y = best.y + cy;
+        let err_x = (abs_x - true_x).abs();
+        let err_y = (abs_y - true_y).abs();
+        assert!(
+            err_x < 0.3,
+            "X error too large on gradient bg: centroid={abs_x:.4}, true={true_x}, err={err_x:.4}"
+        );
+        assert!(
+            err_y < 0.3,
+            "Y error too large on gradient bg: centroid={abs_y:.4}, true={true_y}, err={err_y:.4}"
+        );
     }
 }

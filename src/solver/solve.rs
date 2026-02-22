@@ -10,6 +10,7 @@
 //!    c. Verify by projecting catalog stars and counting matches.
 //!    d. Accept if false-positive probability is below threshold.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
@@ -19,11 +20,30 @@ use crate::Centroid;
 
 use super::combinations::BreadthFirstCombinations;
 use super::pattern::{
-    angle_from_distance, compute_edge_ratios, compute_pattern_key, compute_pattern_key_hash,
-    compute_sorted_edge_angles, get_table_indices, hash_to_index, NUM_EDGES, NUM_EDGE_RATIOS,
-    PATTERN_SIZE,
+    compute_edge_ratios, compute_pattern_key, compute_pattern_key_hash, compute_sorted_edge_angles,
+    get_table_indices, hash_to_index, NUM_EDGES, NUM_EDGE_RATIOS, PATTERN_SIZE,
 };
+use super::wcs_refine;
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
+
+/// Speed of light in km/s.
+const C_KM_S: f64 = 299_792.458;
+
+/// First-order stellar aberration: true ICRS unit vector → apparent.
+///
+/// `beta` = observer barycentric velocity / c (dimensionless, ICRS frame).
+/// Formula: s' = s + β - s(s·β), then renormalize.
+fn aberration_correct(sv: &[f32; 3], beta: &[f64; 3]) -> [f32; 3] {
+    let sx = sv[0] as f64;
+    let sy = sv[1] as f64;
+    let sz = sv[2] as f64;
+    let dot = sx * beta[0] + sy * beta[1] + sz * beta[2];
+    let ax = sx + beta[0] - sx * dot;
+    let ay = sy + beta[1] - sy * dot;
+    let az = sz + beta[2] - sz * dot;
+    let norm = (ax * ax + ay * ay + az * az).sqrt();
+    [(ax / norm) as f32, (ay / norm) as f32, (az / norm) as f32]
+}
 
 // ── Solve entry point ───────────────────────────────────────────────────────
 
@@ -51,6 +71,40 @@ impl SolverDatabase {
     ) -> SolveResult {
         let t0 = Instant::now();
 
+        // ── Aberration correction: build corrected catalog vectors if velocity is set ──
+        let star_vecs: Cow<[[f32; 3]]> = match config.observer_velocity_km_s {
+            Some(v) => {
+                let beta = [v[0] / C_KM_S, v[1] / C_KM_S, v[2] / C_KM_S];
+                Cow::Owned(
+                    self.star_vectors
+                        .iter()
+                        .map(|sv| aberration_correct(sv, &beta))
+                        .collect(),
+                )
+            }
+            None => Cow::Borrowed(&self.star_vectors),
+        };
+
+        // ── Preprocess centroids: subtract CRPIX and undistort (pixel-space, FOV-independent) ──
+        let cam = &config.camera_model;
+        let preprocessed: Vec<Centroid> = centroids
+            .iter()
+            .map(|c| {
+                // Subtract optical center offset
+                let cx = c.x as f64 - cam.crpix[0];
+                let cy = c.y as f64 - cam.crpix[1];
+                // Undistort (distorted observed → ideal pinhole)
+                let (ux, uy) = cam.distortion.undistort(cx, cy);
+                Centroid {
+                    x: ux as f32,
+                    y: uy as f32,
+                    mass: c.mass,
+                    cov: c.cov,
+                }
+            })
+            .collect();
+        let working_centroids: &[Centroid] = &preprocessed;
+
         // Build FOV sweep: exact estimate first, then spiral outward
         let fov_values = build_fov_sweep(
             config.fov_estimate_rad,
@@ -61,8 +115,18 @@ impl SolverDatabase {
         debug!(
             "FOV sweep: {} values from {:.2}° to {:.2}°",
             fov_values.len(),
-            fov_values.iter().cloned().reduce(f32::min).unwrap_or(0.0).to_degrees(),
-            fov_values.iter().cloned().reduce(f32::max).unwrap_or(0.0).to_degrees(),
+            fov_values
+                .iter()
+                .cloned()
+                .reduce(f32::min)
+                .unwrap_or(0.0)
+                .to_degrees(),
+            fov_values
+                .iter()
+                .cloned()
+                .reduce(f32::max)
+                .unwrap_or(0.0)
+                .to_degrees(),
         );
 
         let mut last_status = SolveStatus::NoMatch;
@@ -76,7 +140,7 @@ impl SolverDatabase {
             }
 
             debug!("Trying FOV = {:.3}°", fov_try.to_degrees());
-            let result = self.solve_at_fov(centroids, config, fov_try, t0);
+            let result = self.solve_at_fov(working_centroids, config, fov_try, &star_vecs, t0);
             match result.status {
                 SolveStatus::MatchFound => return result,
                 SolveStatus::TooFew => return result,
@@ -93,6 +157,7 @@ impl SolverDatabase {
         centroids: &[Centroid],
         config: &SolveConfig,
         fov_estimate: f32,
+        star_vectors: &[[f32; 3]],
         t0: Instant,
     ) -> SolveResult {
         let pixel_scale = if config.image_width > 0 {
@@ -118,13 +183,21 @@ impl SolverDatabase {
 
         // ── Compute unit vectors in camera frame ──
         // Centroid (x, y) in pixels → scale to radians → uvec = normalize(x_rad, y_rad, 1)
-        let mut centroid_vectors: Vec<[f32; 3]> = sorted_indices
+        // Note: distortion correction (if any) was already applied in solve_from_centroids.
+        let centroid_vectors: Vec<[f32; 3]> = sorted_indices
             .iter()
             .map(|&i| {
-                let v = centroids[i].uvec(pixel_scale);
-                [v.x, v.y, v.z]
+                let x = centroids[i].x * pixel_scale;
+                let y = centroids[i].y * pixel_scale;
+                let z = 1.0f32;
+                let norm = (x * x + y * y + z * z).sqrt();
+                [x / norm, y / norm, z / norm]
             })
             .collect();
+
+        // Lazily-created x-flipped copy for parity-flipped images.
+        // Built on first use, cached for subsequent pattern attempts.
+        let mut flipped_vectors: Option<Vec<[f32; 3]>> = None;
 
         // ── Cluster-buster thinning ──
         // Apply the same separation constraint as database generation to avoid
@@ -265,10 +338,10 @@ impl SolverDatabase {
                     // Full edge-ratio comparison
                     let cat_pat = self.pattern_catalog[tidx];
                     let cat_vecs: [[f32; 3]; 4] = [
-                        self.star_vectors[cat_pat[0] as usize],
-                        self.star_vectors[cat_pat[1] as usize],
-                        self.star_vectors[cat_pat[2] as usize],
-                        self.star_vectors[cat_pat[3] as usize],
+                        star_vectors[cat_pat[0] as usize],
+                        star_vectors[cat_pat[1] as usize],
+                        star_vectors[cat_pat[2] as usize],
+                        star_vectors[cat_pat[3] as usize],
                     ];
                     let cat_edges = compute_sorted_edge_angles(&cat_vecs);
                     let cat_largest_edge = cat_edges[NUM_EDGES - 1];
@@ -299,33 +372,44 @@ impl SolverDatabase {
                     // SVD rotation: finds R such that camera_vec ≈ R * icrs_vec
                     let mut rotation_matrix = find_rotation_matrix(&matched_img, &matched_cat);
 
-                    let mut parity_flip = false;
+                    // Determine parity from the rotation determinant.
+                    // centroid_vectors is never mutated; when parity is needed we use
+                    // a lazily-created x-flipped copy for verification matching.
+                    let parity_flip;
+                    let working_vectors: &[[f32; 3]];
                     if rotation_matrix.determinant() < 0.0 {
                         // Wrong parity (e.g. FITS image with CDELT1 < 0).
-                        // Fix by negating x on ALL centroid vectors and recomputing.
-                        debug!("Detected negative determinant — flipping x parity");
                         parity_flip = true;
-                        for v in centroid_vectors.iter_mut() {
-                            v[0] = -v[0];
-                        }
-                        // Recompute this pattern's matched image vectors with flipped x
+                        // Recompute rotation with flipped image pattern vectors
                         let matched_img_flip: [[f32; 3]; 4] = std::array::from_fn(|i| {
                             let orig = image_vecs[img_order[i]];
                             [-orig[0], orig[1], orig[2]]
                         });
-                        rotation_matrix =
-                            find_rotation_matrix(&matched_img_flip, &matched_cat);
+                        rotation_matrix = find_rotation_matrix(&matched_img_flip, &matched_cat);
                         if rotation_matrix.determinant() < 0.0 {
                             continue; // still a reflection — skip
                         }
+                        // Lazily create flipped centroid vectors for matching
+                        let fv = flipped_vectors.get_or_insert_with(|| {
+                            centroid_vectors
+                                .iter()
+                                .map(|v| [-v[0], v[1], v[2]])
+                                .collect()
+                        });
+                        working_vectors = fv;
+                    } else {
+                        parity_flip = false;
+                        working_vectors = &centroid_vectors;
                     }
 
                     // ── Verify by matching nearby catalog stars ──
 
+                    let fov_diagonal = fov * 1.42; // sqrt(2) ≈ 1.42 for square FOV
+                    let match_radius_rad = config.match_radius * fov;
+
                     // Find catalog stars within the diagonal FOV
                     let image_center_icrs =
                         rotation_matrix.transpose() * Vector3::new(0.0, 0.0, 1.0);
-                    let fov_diagonal = fov * 1.42; // sqrt(2) ≈ 1.42 for square FOV
                     let nearby_inds = self
                         .star_catalog
                         .query_indices_from_uvec(image_center_icrs, fov_diagonal / 2.0);
@@ -333,7 +417,7 @@ impl SolverDatabase {
                     // Project catalog stars to camera frame
                     let mut nearby_cam_positions: Vec<(usize, f32, f32)> = Vec::new();
                     for &cat_idx in &nearby_inds {
-                        let sv = &self.star_vectors[cat_idx];
+                        let sv = &star_vectors[cat_idx];
                         let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
                         let cam_v = rotation_matrix * icrs_v;
                         // Only keep stars in front of the camera (z > 0)
@@ -348,18 +432,18 @@ impl SolverDatabase {
                     let num_nearby = nearby_cam_positions.len();
 
                     // Match image centroids to projected catalog stars
-                    let match_radius_rad = config.match_radius * fov;
-                    let matches = find_centroid_matches(
-                        &centroid_vectors[..match_centroid_count],
+                    let current_matches = find_centroid_matches(
+                        &working_vectors[..match_centroid_count],
                         &nearby_cam_positions,
                         match_radius_rad,
                     );
-                    let num_matches = matches.len();
+                    let current_num_matches = current_matches.len();
 
                     // ── Compute false-positive probability ──
                     let prob_single = num_nearby as f64 * (config.match_radius as f64).powi(2);
                     let prob_mismatch = binomial_cdf(
-                        (match_centroid_count as i64 - (num_matches as i64 - 2)).max(0) as u32,
+                        (match_centroid_count as i64 - (current_num_matches as i64 - 2)).max(0)
+                            as u32,
                         match_centroid_count as u32,
                         1.0 - prob_single.min(1.0),
                     );
@@ -370,67 +454,110 @@ impl SolverDatabase {
 
                     debug!(
                         "MATCH: {} matches, prob={:.2e}, fov={:.3}°",
-                        num_matches,
+                        current_num_matches,
                         prob_mismatch * self.props.num_patterns as f64,
                         fov.to_degrees()
                     );
 
-                    // ── Refine rotation using all matched stars ──
-                    let mut all_img_vecs: Vec<[f32; 3]> = Vec::with_capacity(num_matches);
-                    let mut all_cat_vecs: Vec<[f32; 3]> = Vec::with_capacity(num_matches);
-                    let mut matched_cat_ids: Vec<u64> = Vec::with_capacity(num_matches);
-                    let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(num_matches);
+                    // ── WCS TAN-projection refinement ──
+                    // Build pixel coordinates: centroids are already CRPIX-subtracted
+                    // and undistorted. Apply parity from SVD detection.
+                    let parity_sign: f64 = if parity_flip { -1.0 } else { 1.0 };
+                    let centroids_px: Vec<(f64, f64)> = sorted_indices
+                        .iter()
+                        .map(|&i| {
+                            let px = parity_sign * centroids[i].x as f64;
+                            let py = centroids[i].y as f64;
+                            (px, py)
+                        })
+                        .collect();
 
-                    for &(cent_local_idx, cat_idx) in &matches {
-                        all_img_vecs.push(centroid_vectors[cent_local_idx]);
-                        all_cat_vecs.push(self.star_vectors[cat_idx]);
-                        matched_cat_ids.push(self.star_catalog_ids[cat_idx]);
+                    // Compute pixel scale for WCS refine from the pattern-match refined FOV
+                    let ps_refine = fov as f64 / config.image_width as f64;
+
+                    let wcs_result = wcs_refine::wcs_refine(
+                        &rotation_matrix,
+                        &current_matches,
+                        &centroids_px,
+                        star_vectors,
+                        &self.star_catalog,
+                        ps_refine,
+                        parity_flip,
+                        match_radius_rad,
+                        match_centroid_count,
+                        10,
+                    );
+
+                    if wcs_result.matches.len() < 4 {
+                        continue;
+                    }
+
+                    // Derive rotation, FOV, and parity from the refined WCS
+                    let (refined_rotation, refined_fov, _) =
+                        wcs_refine::wcs_to_rotation(
+                            &wcs_result.cd_matrix,
+                            wcs_result.crval_rad[0],
+                            wcs_result.crval_rad[1],
+                            config.image_width,
+                        );
+
+                    // Build matched catalog IDs, centroid indices, and angular residuals
+                    let ps = refined_fov / config.image_width.max(1) as f32;
+                    let mut matched_cat_ids: Vec<u64> =
+                        Vec::with_capacity(wcs_result.matches.len());
+                    let mut matched_cent_inds: Vec<usize> =
+                        Vec::with_capacity(wcs_result.matches.len());
+                    let mut angular_residuals: Vec<f32> =
+                        Vec::with_capacity(wcs_result.matches.len());
+                    for &(cent_local_idx, cat_star_idx) in &wcs_result.matches {
+                        matched_cat_ids.push(self.star_catalog_ids[cat_star_idx]);
                         matched_cent_inds.push(sorted_indices[cent_local_idx]);
+                        // Compute angular residual using rotation matrix
+                        let (px, py) = centroids_px[cent_local_idx];
+                        let ix = px as f32 * ps;
+                        let iy = py as f32 * ps;
+                        let iz = 1.0f32;
+                        let norm = (ix * ix + iy * iy + iz * iz).sqrt();
+                        let img_v = refined_rotation.transpose()
+                            * Vector3::new(ix / norm, iy / norm, iz / norm);
+                        let sv = &star_vectors[cat_star_idx];
+                        let cat_v = Vector3::new(sv[0], sv[1], sv[2]);
+                        let cross = img_v.cross(&cat_v);
+                        let ang = cross.norm().atan2(img_v.dot(&cat_v));
+                        angular_residuals.push(ang);
                     }
-
-                    let refined_rot = find_rotation_matrix_dyn(&all_img_vecs, &all_cat_vecs);
-
-                    // ── Compute residuals ──
-                    let mut residuals: Vec<f32> = Vec::with_capacity(num_matches);
-                    for i in 0..num_matches {
-                        let img_v = Vector3::new(
-                            all_img_vecs[i][0],
-                            all_img_vecs[i][1],
-                            all_img_vecs[i][2],
-                        );
-                        let cat_v = Vector3::new(
-                            all_cat_vecs[i][0],
-                            all_cat_vecs[i][1],
-                            all_cat_vecs[i][2],
-                        );
-                        // Rotate image vector to ICRS and compare
-                        let img_in_icrs = refined_rot.transpose() * img_v;
-                        let dist = ((img_in_icrs - cat_v).norm()).min(2.0);
-                        residuals.push(angle_from_distance(dist));
-                    }
-                    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-                    let rmse = if residuals.is_empty() {
+                    angular_residuals
+                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let rmse = if angular_residuals.is_empty() {
                         0.0
                     } else {
-                        (residuals.iter().map(|r| r * r).sum::<f32>() / residuals.len() as f32)
+                        (angular_residuals.iter().map(|r| r * r).sum::<f32>()
+                            / angular_residuals.len() as f32)
                             .sqrt()
                     };
-                    let p90e = if residuals.is_empty() {
+                    let p90e = if angular_residuals.is_empty() {
                         0.0
                     } else {
-                        residuals[(0.9 * (residuals.len() - 1) as f32) as usize]
+                        angular_residuals
+                            [(0.9 * (angular_residuals.len() - 1) as f32) as usize]
                     };
-                    let max_err = residuals.last().copied().unwrap_or(0.0);
+                    let max_err = angular_residuals.last().copied().unwrap_or(0.0);
 
-                    // Convert to quaternion
-                    let rot3 = Rotation3::from_matrix_unchecked(refined_rot);
+                    // Convert rotation to quaternion
+                    let rot3 = Rotation3::from_matrix_unchecked(refined_rotation);
                     let quat = UnitQuaternion::from_rotation_matrix(&rot3);
+
+                    // Build result camera model with refined focal length and detected parity
+                    let mut result_cam = config.camera_model.clone();
+                    let refined_f = (config.image_width as f64 / 2.0)
+                        / (refined_fov as f64 / 2.0).tan();
+                    result_cam.focal_length_px = refined_f;
+                    result_cam.parity_flip = parity_flip;
 
                     return SolveResult {
                         qicrs2cam: Some(quat),
-                        fov_rad: Some(fov),
-                        num_matches: Some(num_matches as u32),
+                        fov_rad: Some(refined_fov),
+                        num_matches: Some(wcs_result.matches.len() as u32),
                         rmse_rad: Some(rmse),
                         p90e_rad: Some(p90e),
                         max_err_rad: Some(max_err),
@@ -440,7 +567,14 @@ impl SolverDatabase {
                         parity_flip,
                         matched_catalog_ids: matched_cat_ids,
                         matched_centroid_indices: matched_cent_inds,
+                        image_width: config.image_width,
+                        image_height: config.image_height,
+                        cd_matrix: Some(wcs_result.cd_matrix),
+                        crval_rad: Some(wcs_result.crval_rad),
+                        camera_model: Some(result_cam),
+                        theta_rad: Some(wcs_result.theta_rad),
                     };
+
                 }
             }
         }
@@ -589,24 +723,6 @@ fn find_rotation_matrix<const N: usize>(
     r64.cast::<f32>()
 }
 
-/// Also support dynamically-sized slices for the refinement step.
-fn find_rotation_matrix_dyn(
-    image_vectors: &[[f32; 3]],
-    catalog_vectors: &[[f32; 3]],
-) -> Matrix3<f32> {
-    let mut h = nalgebra::Matrix3::<f64>::zeros();
-    for (img, cat) in image_vectors.iter().zip(catalog_vectors.iter()) {
-        let img_v = nalgebra::Vector3::<f64>::new(img[0] as f64, img[1] as f64, img[2] as f64);
-        let cat_v = nalgebra::Vector3::<f64>::new(cat[0] as f64, cat[1] as f64, cat[2] as f64);
-        h += img_v * cat_v.transpose();
-    }
-    let svd = h.svd(true, true);
-    let u = svd.u.unwrap();
-    let v_t = svd.v_t.unwrap();
-    let r64 = u * v_t;
-    r64.cast::<f32>()
-}
-
 /// Find unique 1-to-1 matches between image centroids and projected catalog positions.
 ///
 /// Returns Vec<(centroid_local_idx, catalog_star_idx)>.
@@ -689,4 +805,67 @@ fn binomial_cdf(k: u32, n: u32, p: f64) -> f64 {
     }
 
     cdf.min(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aberration_correct_shift_direction() {
+        // Star along +X, velocity 30 km/s along +Y
+        // Aberration should shift the apparent position toward +Y
+        let star = [1.0f32, 0.0, 0.0];
+        let beta = [0.0, 30.0 / C_KM_S, 0.0];
+        let apparent = aberration_correct(&star, &beta);
+
+        // Output should be normalized
+        let norm = (apparent[0] as f64 * apparent[0] as f64
+            + apparent[1] as f64 * apparent[1] as f64
+            + apparent[2] as f64 * apparent[2] as f64)
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "output not unit length: {norm}");
+
+        // Y component should be positive (shifted toward velocity direction)
+        assert!(apparent[1] > 0.0, "expected positive Y shift, got {}", apparent[1]);
+
+        // Shift magnitude should be ~v/c ≈ 1e-4 rad ≈ 20"
+        let shift_rad = (apparent[1] as f64).atan2(apparent[0] as f64);
+        let expected = 30.0 / C_KM_S; // ~1e-4 rad
+        assert!(
+            (shift_rad - expected).abs() < 1e-6,
+            "shift {shift_rad:.2e} rad, expected ~{expected:.2e} rad"
+        );
+    }
+
+    #[test]
+    fn test_aberration_correct_zero_velocity() {
+        // Zero velocity should return the original unit vector unchanged
+        let s = 1.0f32 / 3.0f32.sqrt();
+        let star = [s, s, s];
+        let beta = [0.0, 0.0, 0.0];
+        let apparent = aberration_correct(&star, &beta);
+        for i in 0..3 {
+            assert!(
+                (apparent[i] - star[i]).abs() < 1e-6,
+                "component {i} changed: {} -> {}",
+                star[i],
+                apparent[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_aberration_correct_parallel_velocity() {
+        // Velocity parallel to star direction should produce zero transverse shift
+        let star = [1.0f32, 0.0, 0.0];
+        let beta = [30.0 / C_KM_S, 0.0, 0.0];
+        let apparent = aberration_correct(&star, &beta);
+
+        // Y and Z should remain essentially zero
+        assert!(apparent[1].abs() < 1e-7, "Y not zero: {}", apparent[1]);
+        assert!(apparent[2].abs() < 1e-7, "Z not zero: {}", apparent[2]);
+        // X should still be ~1.0 (normalized)
+        assert!((apparent[0] - 1.0).abs() < 1e-6);
+    }
 }
