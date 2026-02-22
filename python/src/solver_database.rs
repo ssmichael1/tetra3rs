@@ -3,9 +3,7 @@ use pyo3::prelude::*;
 
 use tetra3::camera_model::CameraModel;
 use tetra3::distortion::calibrate::{calibrate_camera, CalibrateConfig};
-use tetra3::solver::{
-    GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase,
-};
+use tetra3::solver::{GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 use tetra3::Centroid;
 
 use crate::calibrate::PyCalibrateResult;
@@ -454,7 +452,14 @@ impl PySolverDatabase {
             convergence_threshold_px,
         };
 
-        let result = calibrate_camera(&sr_refs, &cent_refs, &self.inner, img_width, img_height, &config);
+        let result = calibrate_camera(
+            &sr_refs,
+            &cent_refs,
+            &self.inner,
+            img_width,
+            img_height,
+            &config,
+        );
 
         Ok(PyCalibrateResult {
             camera_model: PyCameraModel {
