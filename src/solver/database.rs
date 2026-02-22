@@ -20,7 +20,7 @@ use super::pattern::{
     compute_sorted_edge_angles, distance_from_angle, hash_to_index, insert_pattern, next_prime,
     sort_u32_pattern_by_centroid_distance, PATTERN_SIZE,
 };
-use super::{DatabaseProperties, GenerateDatabaseConfig, SolverDatabase};
+use super::{DatabaseProperties, GenerateDatabaseConfig, PatternEntry, SolverDatabase};
 
 // ── Sky geometry utilities ──────────────────────────────────────────────────
 
@@ -266,9 +266,7 @@ impl SolverDatabase {
             pattern_list.len() as f64 / catalog_length as f64
         );
 
-        let mut pattern_catalog = vec![[0u32; PATTERN_SIZE]; catalog_length];
-        let mut pattern_largest_edge_table = vec![0.0f32; catalog_length];
-        let mut pattern_key_hashes_table = vec![0u16; catalog_length];
+        let mut pattern_catalog = vec![PatternEntry::EMPTY; catalog_length];
 
         for pat in &pattern_list {
             // Get the 4 star vectors
@@ -292,9 +290,12 @@ impl SolverDatabase {
             sort_u32_pattern_by_centroid_distance(&mut sorted_pat, &star_vectors);
 
             // Insert into hash table
-            let slot = insert_pattern(sorted_pat, hidx, &mut pattern_catalog);
-            pattern_largest_edge_table[slot] = largest_angle;
-            pattern_key_hashes_table[slot] = (pkey_hash & 0xFFFF) as u16;
+            let entry = PatternEntry::new(
+                sorted_pat,
+                largest_angle,
+                (pkey_hash & 0xFFFF) as u16,
+            );
+            insert_pattern(entry, hidx, &mut pattern_catalog);
         }
 
         info!("Database generation complete.");
@@ -306,7 +307,7 @@ impl SolverDatabase {
         info!(
             "Pattern catalog: {} slots ({} bytes)",
             catalog_length,
-            catalog_length * PATTERN_SIZE * 4
+            catalog_length * std::mem::size_of::<PatternEntry>()
         );
 
         let props = DatabaseProperties {
@@ -328,8 +329,6 @@ impl SolverDatabase {
             star_vectors,
             star_catalog_ids,
             pattern_catalog,
-            pattern_largest_edge: pattern_largest_edge_table,
-            pattern_key_hashes: pattern_key_hashes_table,
             props,
         })
     }

@@ -23,6 +23,52 @@ use crate::camera_model::CameraModel;
 use crate::distortion::Distortion;
 use crate::{Quaternion, StarCatalog};
 
+// ── Pattern hash table entry ────────────────────────────────────────────────
+
+/// A single slot in the pattern hash table.
+///
+/// Packing star indices, largest-edge angle, and key hash into one struct
+/// means a single cache-line fetch per quadratic-probe step instead of three.
+#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+#[repr(C)]
+pub struct PatternEntry {
+    /// Indices into the star catalog for the 4 stars in this pattern.
+    pub star_indices: [u32; 4],
+    /// Largest pairwise edge angle (radians) — used for FOV consistency filtering.
+    pub largest_edge: f32,
+    /// Lower 16 bits of the pattern key hash — fast pre-filter.
+    pub key_hash: u16,
+    /// Explicit padding to 24 bytes (8-byte aligned).
+    _pad: u16,
+}
+
+impl PatternEntry {
+    /// Sentinel value for an empty hash-table slot.
+    pub const EMPTY: Self = Self {
+        star_indices: [0, 0, 0, 0],
+        largest_edge: 0.0,
+        key_hash: 0,
+        _pad: 0,
+    };
+
+    /// Create a new pattern entry.
+    #[inline]
+    pub fn new(star_indices: [u32; 4], largest_edge: f32, key_hash: u16) -> Self {
+        Self {
+            star_indices,
+            largest_edge,
+            key_hash,
+            _pad: 0,
+        }
+    }
+
+    /// Returns `true` if this slot is empty (sentinel).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.star_indices == [0, 0, 0, 0]
+    }
+}
+
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
 
 /// Outcome of a plate-solve attempt.
@@ -88,18 +134,9 @@ pub struct SolverDatabase {
     pub star_catalog_ids: Vec<u64>,
 
     /// Pattern hash table (open addressing, quadratic probing).
-    /// Each slot holds [star_idx0, star_idx1, star_idx2, star_idx3].
-    /// Empty slots are [0, 0, 0, 0]. Since patterns always have 4 *distinct*
-    /// star indices, all-zero is an unambiguous empty marker.
-    pub pattern_catalog: Vec<[u32; 4]>,
-
-    /// Largest edge angle (radians) for each pattern slot.
-    /// Used for fast FOV-consistency filtering during solve.
-    pub pattern_largest_edge: Vec<f32>,
-
-    /// Lower 16 bits of the pattern key hash for each slot.
-    /// Used as a fast pre-filter before full edge-ratio comparison.
-    pub pattern_key_hashes: Vec<u16>,
+    /// Each entry packs the star indices, largest edge angle, and key hash
+    /// into a single cache-friendly struct. Empty slots have `star_indices == [0,0,0,0]`.
+    pub pattern_catalog: Vec<PatternEntry>,
 
     /// Database generation parameters.
     pub props: DatabaseProperties,

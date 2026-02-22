@@ -105,18 +105,18 @@ pub fn hash_to_index(hash: u64, table_size: u64) -> u64 {
 
 // ── Hash table operations (quadratic probing) ───────────────────────────────
 
-/// Insert a pattern into the hash table at the first available slot
+/// Insert a pattern entry into the hash table at the first available slot
 /// using quadratic probing. Returns the table index where it was stored.
 pub fn insert_pattern(
-    pattern: [u32; PATTERN_SIZE],
+    entry: super::PatternEntry,
     hash_index: u64,
-    table: &mut [[u32; PATTERN_SIZE]],
+    table: &mut [super::PatternEntry],
 ) -> usize {
     let max_ind = table.len() as u64;
     for c in 0u64.. {
         let i = ((hash_index.wrapping_add(c.wrapping_mul(c))) % max_ind) as usize;
-        if table[i] == [0, 0, 0, 0] {
-            table[i] = pattern;
+        if table[i].is_empty() {
+            table[i] = entry;
             return i;
         }
     }

@@ -319,16 +319,17 @@ impl SolverDatabase {
                 // Walk the hash chain inline (quadratic probing)
                 for c in 0u64.. {
                     let tidx = ((hidx.wrapping_add(c.wrapping_mul(c))) % table_len) as usize;
-                    if self.pattern_catalog[tidx] == [0, 0, 0, 0] {
+                    let entry = &self.pattern_catalog[tidx];
+                    if entry.is_empty() {
                         break; // end of chain
                     }
-                    if self.pattern_key_hashes[tidx] != key_hash16 {
+                    if entry.key_hash != key_hash16 {
                         continue;
                     }
 
                     // FOV consistency check: the catalog pattern's largest edge
                     // should be close to the image pattern's largest edge.
-                    let cat_largest = self.pattern_largest_edge[tidx];
+                    let cat_largest = entry.largest_edge;
                     if let Some(fov_err) = config.fov_max_error_rad {
                         // Implied FOV from this match
                         let implied_fov = cat_largest / image_largest_edge * fov_estimate;
@@ -338,7 +339,7 @@ impl SolverDatabase {
                     }
 
                     // Full edge-ratio comparison
-                    let cat_pat = self.pattern_catalog[tidx];
+                    let cat_pat = entry.star_indices;
                     let cat_vecs: [[f32; 3]; 4] = [
                         star_vectors[cat_pat[0] as usize],
                         star_vectors[cat_pat[1] as usize],
