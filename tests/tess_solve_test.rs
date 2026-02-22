@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use tetra3::{
-    CentroidExtractionConfig, GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase,
+    CalibrateConfig, CentroidExtractionConfig, GenerateDatabaseConfig, SolveConfig, SolveStatus,
+    SolverDatabase,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -163,7 +164,11 @@ fn read_f32_image(path: &str, hdu: &FitsHdu) -> Vec<f32> {
 
 /// Trim TESS image to science region: rows 0–2047, columns 44–2091.
 /// Returns (trimmed_pixels, sci_width, sci_height).
-fn trim_tess_science_region(pixels: &[f32], full_width: u32, full_height: u32) -> (Vec<f32>, u32, u32) {
+fn trim_tess_science_region(
+    pixels: &[f32],
+    full_width: u32,
+    full_height: u32,
+) -> (Vec<f32>, u32, u32) {
     let sci_col_start = 44_u32;
     let sci_col_end = 2092_u32;
     let sci_row_end = 2048_u32.min(full_height);
@@ -315,7 +320,7 @@ fn build_tess_database() -> SolverDatabase {
         pattern_max_error: 0.005,
         lattice_field_oversampling: 100,
         patterns_per_lattice_field: 150,
-        verification_stars_per_fov: 150,
+        verification_stars_per_fov: 1000,
         multiscale_step: 1.5,
         epoch_proper_motion_year: Some(2018.0), // TESS launched 2018
         catalog_nside: 8,
@@ -356,7 +361,10 @@ fn test_tess_fits_solve() {
 
         // ── Read the FITS file (data is in HDU 1 for TESS) ──
         let hdus = read_fits_hdus(&fits_path);
-        assert!(hdus.len() >= 2, "Expected at least 2 HDUs in TESS FITS file");
+        assert!(
+            hdus.len() >= 2,
+            "Expected at least 2 HDUs in TESS FITS file"
+        );
 
         let image_hdu = &hdus[1]; // HDU 1 = image extension
         let naxis1 = match image_hdu.headers.get("NAXIS1") {
@@ -401,7 +409,10 @@ fn test_tess_fits_solve() {
         let crval_ra = get_f64(image_hdu, "CRVAL1").unwrap();
         let crval_dec = get_f64(image_hdu, "CRVAL2").unwrap();
         println!("  WCS CRVAL: RA={:.4}°, Dec={:.4}°", crval_ra, crval_dec);
-        println!("  WCS boresight (center pixel): RA={:.4}°, Dec={:.4}°", boresight_ra, boresight_dec);
+        println!(
+            "  WCS boresight (center pixel): RA={:.4}°, Dec={:.4}°",
+            boresight_ra, boresight_dec
+        );
 
         // Print CD matrix
         if let (Some(cd11), Some(cd12), Some(cd21), Some(cd22)) = (
@@ -410,9 +421,8 @@ fn test_tess_fits_solve() {
             get_f64(image_hdu, "CD2_1"),
             get_f64(image_hdu, "CD2_2"),
         ) {
-            let pixel_scale_deg = ((cd11 * cd11 + cd21 * cd21).sqrt()
-                + (cd12 * cd12 + cd22 * cd22).sqrt())
-                / 2.0;
+            let pixel_scale_deg =
+                ((cd11 * cd11 + cd21 * cd21).sqrt() + (cd12 * cd12 + cd22 * cd22).sqrt()) / 2.0;
             println!(
                 "  CD matrix: [{:.6}, {:.6}; {:.6}, {:.6}]",
                 cd11, cd12, cd21, cd22
@@ -440,9 +450,13 @@ fn test_tess_fits_solve() {
             max_elongation: Some(30.0),
         };
 
-        let extraction =
-            tetra3::extract_centroids_from_raw(&clean_pixels, sci_width, sci_height, &extract_config)
-                .expect("Centroid extraction failed");
+        let extraction = tetra3::extract_centroids_from_raw(
+            &clean_pixels,
+            sci_width,
+            sci_height,
+            &extract_config,
+        )
+        .expect("Centroid extraction failed");
 
         println!(
             "  Extracted {} centroids (from {} raw blobs)",
@@ -474,6 +488,8 @@ fn test_tess_fits_solve() {
             match_threshold: 1e-5,
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
+            refine_iterations: 2,
+            ..Default::default()
         };
 
         let result = db.solve_from_centroids(&extraction.centroids, &solve_config);
@@ -535,4 +551,545 @@ fn test_tess_fits_solve() {
     );
     println!("══════════════════════════════════════════════════════════════");
     assert_eq!(failed, 0, "{} TESS solve tests failed", failed);
+}
+
+/// Test the polynomial distortion fitting pipeline on TESS images.
+///
+/// For each TESS image we:
+/// 1. Solve with raw (distorted) centroids.
+/// 2. Fit a 4th-order polynomial distortion model from the solve result.
+/// 3. Re-solve with the fitted distortion model applied.
+/// 4. Verify that the distortion-corrected solve has lower RMSE.
+/// 5. Verify that the solved RA/Dec of the center pixel matches the FITS WCS
+///    solution within 1 arcmin.
+#[test]
+fn test_tess_distortion_fit_and_center_accuracy() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .try_init();
+
+    test_data::ensure_test_file("data/hip2.dat");
+    for tc in TESS_TEST_CASES {
+        test_data::ensure_test_file(&format!("data/tess_test_images/{}", tc.filename));
+    }
+
+    let db = build_tess_database();
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    println!("DISTORTION TEST: fit polynomial model, re-solve, check center");
+
+    let mut failed = 0;
+
+    for tc in TESS_TEST_CASES {
+        let fits_path = format!("data/tess_test_images/{}", tc.filename);
+        println!("\n──────────────────────────────────────────────────────────────");
+        println!("Testing: {} ({})", tc.filename, tc.description);
+
+        // ── Read and prepare image ──
+        let hdus = read_fits_hdus(&fits_path);
+        assert!(hdus.len() >= 2);
+        let image_hdu = &hdus[1];
+
+        let naxis1 = match image_hdu.headers.get("NAXIS1") {
+            Some(FitsValue::Int(n)) => *n as u32,
+            _ => panic!("Missing NAXIS1"),
+        };
+        let naxis2 = match image_hdu.headers.get("NAXIS2") {
+            Some(FitsValue::Int(n)) => *n as u32,
+            _ => panic!("Missing NAXIS2"),
+        };
+
+        let pixels = read_f32_image(&fits_path, image_hdu);
+        let (trimmed_pixels, sci_width, sci_height) =
+            trim_tess_science_region(&pixels, naxis1, naxis2);
+
+        let clean_pixels: Vec<f32> = trimmed_pixels
+            .iter()
+            .map(|&v| {
+                if v.is_nan() || v.is_infinite() {
+                    0.0
+                } else {
+                    v
+                }
+            })
+            .collect();
+
+        // ── Extract centroids ──
+        let extract_config = CentroidExtractionConfig {
+            sigma_threshold: 250.0,
+            min_pixels: 3,
+            max_pixels: 10000,
+            max_centroids: None,
+            sigma_clip_iterations: 5,
+            sigma_clip_factor: 3.0,
+            use_8_connectivity: true,
+            local_bg_block_size: Some(128),
+            max_elongation: Some(30.0),
+        };
+
+        let extraction = tetra3::extract_centroids_from_raw(
+            &clean_pixels,
+            sci_width,
+            sci_height,
+            &extract_config,
+        )
+        .expect("Centroid extraction failed");
+
+        println!("  Extracted {} centroids", extraction.centroids.len());
+
+        if extraction.centroids.len() < 4 {
+            println!("  SKIP: Too few centroids");
+            continue;
+        }
+
+        // ── 1. Initial solve (raw centroids) ──
+        let solve_cfg = SolveConfig {
+            fov_estimate_rad: (12.0_f32).to_radians(),
+            image_width: sci_width,
+            image_height: sci_height,
+            fov_max_error_rad: Some((2.0_f32).to_radians()),
+            match_radius: 0.01,
+            match_threshold: 1e-5,
+            solve_timeout_ms: Some(60_000),
+            match_max_error: None,
+            refine_iterations: 2,
+            ..Default::default()
+        };
+
+        let result_raw = db.solve_from_centroids(&extraction.centroids, &solve_cfg);
+        assert_eq!(
+            result_raw.status,
+            SolveStatus::MatchFound,
+            "Raw solve failed for {}",
+            tc.filename
+        );
+
+        let rmse_raw_arcsec = result_raw.rmse_rad.unwrap().to_degrees() as f64 * 3600.0;
+        println!(
+            "  Raw solve:   RMSE={:.1}\", {} matches",
+            rmse_raw_arcsec,
+            result_raw.num_matches.unwrap_or(0),
+        );
+
+        // ── 2. Calibrate camera model (polynomial order 4) ──
+        let cal_result = tetra3::calibrate_camera(
+            &[&result_raw],
+            &[&extraction.centroids[..]],
+            &db,
+            sci_width,
+            sci_height,
+            &CalibrateConfig {
+                polynomial_order: 4,
+                ..CalibrateConfig::default()
+            },
+        );
+        println!(
+            "  Calibration: RMSE {:.3} -> {:.3} px, {} inliers, {} outliers",
+            cal_result.rmse_before_px,
+            cal_result.rmse_after_px,
+            cal_result.n_inliers,
+            cal_result.n_outliers,
+        );
+
+        // ── 3. Re-solve with camera model ──
+        let solve_cfg_dist = SolveConfig {
+            camera_model: cal_result.camera_model.clone(),
+            ..solve_cfg
+        };
+        let result_dist = db.solve_from_centroids(&extraction.centroids, &solve_cfg_dist);
+        assert_eq!(
+            result_dist.status,
+            SolveStatus::MatchFound,
+            "Distortion-corrected solve failed for {}",
+            tc.filename
+        );
+
+        let rmse_dist_arcsec = result_dist.rmse_rad.unwrap().to_degrees() as f64 * 3600.0;
+        println!(
+            "  Dist solve:  RMSE={:.1}\", {} matches",
+            rmse_dist_arcsec,
+            result_dist.num_matches.unwrap_or(0),
+        );
+
+        // ── 4. Verify center pixel RA/Dec matches FITS WCS ──
+        let (solved_ra, solved_dec) = result_dist
+            .pixel_to_world(0.0, 0.0)
+            .expect("pixel_to_world failed for center pixel");
+
+        // Center of science region in full-frame 0-indexed coordinates
+        let center_x_ff = 44.0 + sci_width as f64 / 2.0;
+        let center_y_ff = sci_height as f64 / 2.0;
+        let (wcs_ra, wcs_dec) = pixel_to_radec(image_hdu, center_x_ff, center_y_ff);
+
+        let sep_arcmin = angular_separation(
+            &radec_to_uvec(solved_ra, solved_dec),
+            &radec_to_uvec(wcs_ra, wcs_dec),
+        )
+        .to_degrees()
+            * 60.0;
+
+        println!(
+            "  Center pixel: solved=({:.4} deg, {:.4} deg), WCS=({:.4} deg, {:.4} deg), sep={:.2}'",
+            solved_ra, solved_dec, wcs_ra, wcs_dec, sep_arcmin,
+        );
+
+        // ── 5. Assertions ──
+        let mut test_passed = true;
+
+        if rmse_dist_arcsec >= rmse_raw_arcsec {
+            println!(
+                "  *** FAIL: distortion-corrected RMSE ({:.1}\") >= raw RMSE ({:.1}\") ***",
+                rmse_dist_arcsec, rmse_raw_arcsec,
+            );
+            test_passed = false;
+        }
+
+        if sep_arcmin >= 1.0 {
+            println!(
+                "  *** FAIL: center pixel separation {:.2}' exceeds 1' ***",
+                sep_arcmin,
+            );
+            test_passed = false;
+        }
+
+        if test_passed {
+            println!("  PASS");
+        } else {
+            failed += 1;
+        }
+    }
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    assert_eq!(failed, 0, "{} TESS distortion tests failed", failed);
+}
+
+/// Test multi-image camera calibration with 3 TESS images from the SAME CCD.
+///
+/// All 3 images are Camera 1, CCD 1 from sectors 1, 2, 3 — same optics,
+/// different sky pointings (~27 deg apart in ecliptic longitude). This is the
+/// correct setup for multi-image calibration: shared distortion, varied attitude.
+///
+/// 1. Solve all 3 images individually (raw, no distortion).
+/// 2. Call `calibrate_camera` with all solve results (triggers multi-image path).
+/// 3. Re-solve each image with the fitted camera model.
+/// 4. Verify: re-solve succeeds and center pixel accuracy < 5 arcmin.
+#[test]
+fn test_tess_multi_image_calibration() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("debug")
+        .try_init();
+
+    test_data::ensure_test_file("data/hip2.dat");
+
+    // Same CCD (Camera 1, CCD 1) across 10 sectors — different pointings, same optics
+    let same_ccd_images = [
+        (
+            "data/tess_same_ccd/sector01_cam1_ccd1.fits",
+            "Sector 1, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector02_cam1_ccd1.fits",
+            "Sector 2, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector03_cam1_ccd1.fits",
+            "Sector 3, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector04_cam1_ccd1.fits",
+            "Sector 4, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector05_cam1_ccd1.fits",
+            "Sector 5, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector06_cam1_ccd1.fits",
+            "Sector 6, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector14_cam1_ccd1.fits",
+            "Sector 14, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector15_cam1_ccd1.fits",
+            "Sector 15, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector16_cam1_ccd1.fits",
+            "Sector 16, Cam1 CCD1",
+        ),
+        (
+            "data/tess_same_ccd/sector17_cam1_ccd1.fits",
+            "Sector 17, Cam1 CCD1",
+        ),
+    ];
+
+    // Verify all files exist (downloaded by data/download_same_ccd_tess_images.sh)
+    for (path, desc) in &same_ccd_images {
+        assert!(
+            std::path::Path::new(path).exists(),
+            "Missing test image: {} ({})\nRun: ./data/download_same_ccd_tess_images.sh",
+            path,
+            desc,
+        );
+    }
+
+    let db = build_tess_database();
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    println!("MULTI-IMAGE CALIBRATION TEST (same CCD, different sectors)");
+
+    // ── 1. Solve all images individually ──
+    let extract_config = CentroidExtractionConfig {
+        sigma_threshold: 150.0,
+        min_pixels: 3,
+        max_pixels: 10000,
+        max_centroids: None,
+        sigma_clip_iterations: 5,
+        sigma_clip_factor: 3.0,
+        use_8_connectivity: true,
+        local_bg_block_size: Some(32),
+        max_elongation: Some(100.0),
+    };
+
+    struct ImageSolve {
+        result: tetra3::SolveResult,
+        centroids: Vec<tetra3::Centroid>,
+        sci_width: u32,
+        sci_height: u32,
+        image_hdu_headers: HashMap<String, FitsValue>,
+        description: &'static str,
+        good_solve: bool,
+    }
+
+    let mut solves: Vec<ImageSolve> = Vec::new();
+    let mut n_solved = 0;
+
+    for &(fits_path, description) in &same_ccd_images {
+        println!("\n  Solving: {} ({})", fits_path, description);
+
+        let hdus = read_fits_hdus(fits_path);
+        assert!(hdus.len() >= 2, "Expected at least 2 HDUs in {}", fits_path);
+        let image_hdu = &hdus[1];
+
+        let naxis1 = match image_hdu.headers.get("NAXIS1") {
+            Some(FitsValue::Int(n)) => *n as u32,
+            _ => panic!("Missing NAXIS1 in {}", fits_path),
+        };
+        let naxis2 = match image_hdu.headers.get("NAXIS2") {
+            Some(FitsValue::Int(n)) => *n as u32,
+            _ => panic!("Missing NAXIS2 in {}", fits_path),
+        };
+
+        let pixels = read_f32_image(fits_path, image_hdu);
+        let (trimmed_pixels, sci_width, sci_height) =
+            trim_tess_science_region(&pixels, naxis1, naxis2);
+
+        let clean_pixels: Vec<f32> = trimmed_pixels
+            .iter()
+            .map(|&v| {
+                if v.is_nan() || v.is_infinite() {
+                    0.0
+                } else {
+                    v
+                }
+            })
+            .collect();
+
+        let extraction = tetra3::extract_centroids_from_raw(
+            &clean_pixels,
+            sci_width,
+            sci_height,
+            &extract_config,
+        )
+        .expect("Centroid extraction failed");
+
+        println!(
+            "    Image: {} x {}, {} centroids",
+            sci_width,
+            sci_height,
+            extraction.centroids.len()
+        );
+
+        let per_image_cfg = SolveConfig {
+            fov_estimate_rad: (12.0_f32).to_radians(),
+            image_width: sci_width,
+            image_height: sci_height,
+            fov_max_error_rad: Some((2.0_f32).to_radians()),
+            match_radius: 0.01,
+            match_threshold: 1e-5,
+            solve_timeout_ms: Some(60_000),
+            refine_iterations: 2,
+            ..Default::default()
+        };
+
+        let result = db.solve_from_centroids(&extraction.centroids, &per_image_cfg);
+        println!("    Status: {:?}", result.status);
+
+        let good_solve = if result.status == SolveStatus::MatchFound {
+            if let Some(rmse) = result.rmse_rad {
+                let rmse_arcsec = rmse.to_degrees() as f64 * 3600.0;
+                println!(
+                    "    RMSE: {:.1}\", {} matches",
+                    rmse_arcsec,
+                    result.num_matches.unwrap_or(0)
+                );
+                // Filter out clearly bogus solves (RMSE > 1000" means wrong solution)
+                rmse_arcsec < 1000.0
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if good_solve {
+            n_solved += 1;
+        } else if result.status == SolveStatus::MatchFound {
+            println!("    *** Rejecting: RMSE too high (bogus solve) ***");
+        }
+
+        solves.push(ImageSolve {
+            result,
+            centroids: extraction.centroids,
+            sci_width,
+            sci_height,
+            image_hdu_headers: image_hdu.headers.clone(),
+            description,
+            good_solve,
+        });
+    }
+
+    // Need at least 2 good solves for multi-image path
+    assert!(
+        n_solved >= 2,
+        "Need at least 2 good solved images for multi-image calibration, got {}",
+        n_solved,
+    );
+
+    // ── 2. Multi-image calibration ──
+    let solve_refs: Vec<&tetra3::SolveResult> = solves.iter().map(|s| &s.result).collect();
+    let centroid_refs: Vec<&[tetra3::Centroid]> =
+        solves.iter().map(|s| s.centroids.as_slice()).collect();
+
+    // All TESS CCDs are the same size
+    let cal_solve = solves
+        .iter()
+        .find(|s| s.result.status == SolveStatus::MatchFound)
+        .unwrap();
+    let cal_width = cal_solve.sci_width;
+    let cal_height = cal_solve.sci_height;
+
+    println!(
+        "\n  Running multi-image calibration (order 4, {} solved images)...",
+        n_solved
+    );
+    let cal_result = tetra3::calibrate_camera(
+        &solve_refs,
+        &centroid_refs,
+        &db,
+        cal_width,
+        cal_height,
+        &CalibrateConfig {
+            polynomial_order: 4,
+            ..CalibrateConfig::default()
+        },
+    );
+
+    println!(
+        "  Calibration result: RMSE {:.3} -> {:.3} px, {} inliers, {} outliers",
+        cal_result.rmse_before_px,
+        cal_result.rmse_after_px,
+        cal_result.n_inliers,
+        cal_result.n_outliers,
+    );
+
+    // ── 3. Re-solve each image with the fitted camera model ──
+    println!("\n  Re-solving with multi-image camera model:");
+    let mut failed = 0;
+
+    for solve in &solves {
+        if !solve.good_solve {
+            println!(
+                "    {}: skipped (raw solve failed or bogus)",
+                solve.description
+            );
+            continue;
+        }
+
+        let dist_cfg = SolveConfig {
+            fov_estimate_rad: (12.0_f32).to_radians(),
+            image_width: solve.sci_width,
+            image_height: solve.sci_height,
+            fov_max_error_rad: Some((2.0_f32).to_radians()),
+            match_radius: 0.01,
+            match_threshold: 1e-5,
+            solve_timeout_ms: Some(60_000),
+            refine_iterations: 2,
+            camera_model: cal_result.camera_model.clone(),
+            ..Default::default()
+        };
+
+        let result_dist = db.solve_from_centroids(&solve.centroids, &dist_cfg);
+
+        if result_dist.status == SolveStatus::MatchFound {
+            let rmse_raw = solve.result.rmse_rad.unwrap().to_degrees() as f64 * 3600.0;
+            let rmse_dist = result_dist.rmse_rad.unwrap().to_degrees() as f64 * 3600.0;
+
+            // Compare against FITS WCS if headers are available
+            let hdu_for_wcs = FitsHdu {
+                headers: solve.image_hdu_headers.clone(),
+                data_offset: 0,
+                data_len: 0,
+            };
+            let has_wcs = get_f64(&hdu_for_wcs, "CRPIX1").is_some();
+
+            if has_wcs {
+                let (solved_ra, solved_dec) = result_dist
+                    .pixel_to_world(0.0, 0.0)
+                    .expect("pixel_to_world failed");
+
+                let center_x_ff = 44.0 + solve.sci_width as f64 / 2.0;
+                let center_y_ff = solve.sci_height as f64 / 2.0;
+                let (wcs_ra, wcs_dec) =
+                    pixel_to_radec(&hdu_for_wcs, center_x_ff, center_y_ff);
+
+                let sep_arcmin = angular_separation(
+                    &radec_to_uvec(solved_ra, solved_dec),
+                    &radec_to_uvec(wcs_ra, wcs_dec),
+                )
+                .to_degrees()
+                    * 60.0;
+
+                println!(
+                    "    {}: RMSE {:.1}\" -> {:.1}\", center sep={:.2}'",
+                    solve.description, rmse_raw, rmse_dist, sep_arcmin,
+                );
+
+                if sep_arcmin >= 5.0 {
+                    println!(
+                        "      *** FAIL: center separation {:.2}' exceeds 5' ***",
+                        sep_arcmin
+                    );
+                    failed += 1;
+                }
+            } else {
+                println!(
+                    "    {}: RMSE {:.1}\" -> {:.1}\" (no FITS WCS for comparison)",
+                    solve.description, rmse_raw, rmse_dist,
+                );
+            }
+        } else {
+            println!("    {}: *** FAIL: re-solve failed ***", solve.description);
+            failed += 1;
+        }
+    }
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    println!(
+        "MULTI-IMAGE CALIBRATION: {} inliers, RMSE_after={:.3} px",
+        cal_result.n_inliers, cal_result.rmse_after_px
+    );
+    assert_eq!(failed, 0, "{} multi-image calibration tests failed", failed);
 }

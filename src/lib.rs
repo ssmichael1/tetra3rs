@@ -21,6 +21,18 @@
 //! - **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
 //! - **Zero-copy deserialization** — databases serialize with [rkyv](https://docs.rs/rkyv)
 //!   for instant loading
+//! - **Centroid extraction** — detect stars from images with local background subtraction,
+//!   connected-component labeling, and quadratic sub-pixel peak refinement (`image` feature)
+//! - **Camera model** — unified [`CameraModel`] struct (focal length, optical center, parity,
+//!   distortion) used throughout the solve and calibration pipeline
+//! - **Distortion calibration** — fit SIP polynomial or radial distortion models from one or
+//!   more solved images via [`calibrate_camera`]
+//! - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and
+//!   [`SolveResult::pixel_to_world`] / [`SolveResult::world_to_pixel`] methods
+//! - **Stellar aberration** — optional correction for the ~20″ apparent shift in star
+//!   positions caused by the observer's barycentric velocity; set
+//!   [`SolveConfig::observer_velocity_km_s`] (use [`earth_barycentric_velocity`] for
+//!   ground-based / Earth-orbiting observers)
 //!
 //! ## Example
 //!
@@ -63,6 +75,30 @@
 //! }
 //! ```
 //!
+//! ## Stellar aberration
+//!
+//! Stellar aberration shifts apparent star positions by up to ~20″ due to the
+//! observer's barycentric velocity (~30 km/s for Earth). The pattern-matching step
+//! is unaffected (inter-star angular separations are invariant to first order in
+//! v/c), but the final attitude quaternion is biased by ~20″ unless corrected.
+//!
+//! Pass the observer's barycentric velocity (ICRS, km/s) via
+//! [`SolveConfig::observer_velocity_km_s`]. The solver applies a first-order
+//! correction to all catalog vectors before matching and refinement.
+//!
+//! For Earth-based or Earth-orbiting observers, [`earth_barycentric_velocity`]
+//! provides an approximate velocity from a circular-orbit model:
+//!
+//! ```no_run
+//! use tetra3::{earth_barycentric_velocity, SolveConfig};
+//!
+//! let v = earth_barycentric_velocity(9321.0); // days since J2000.0
+//! let config = SolveConfig {
+//!     observer_velocity_km_s: Some(v),
+//!     ..SolveConfig::new((10.0_f32).to_radians(), 1024, 1024)
+//! };
+//! ```
+//!
 //! ## Algorithm overview
 //!
 //! 1. **Pattern generation** — select combinations of 4 bright centroids; compute 6 pairwise
@@ -73,7 +109,10 @@
 //!    catalog (ICRS) to camera frame
 //! 4. **Verification** — project nearby catalog stars into the camera frame, count matches,
 //!    and accept only if the false-positive probability (binomial CDF) is below threshold
-//! 5. **Refinement** — re-estimate the rotation using all matched star pairs
+//! 5. **Refinement** — re-estimate the rotation using all matched star pairs via iterative
+//!    SVD passes
+//! 6. **WCS fit** — constrained 3-DOF tangent-plane refinement (rotation angle θ + CRVAL
+//!    offset) with sigma-clipping, producing FITS-standard WCS output
 //!
 //! ## Credits
 //!
@@ -90,25 +129,34 @@
 //! [Claude Code](https://claude.ai/claude-code) (Anthropic).
 //!
 
+pub mod aberration;
 /// Raw star catalogs; currently Tycho-2 & Hipparcos
 pub(crate) mod catalogs;
+pub mod camera_model;
 mod centroid;
 #[cfg(feature = "image")]
 pub mod centroid_extraction;
+pub mod distortion;
 pub mod solver;
 pub mod star;
 pub mod starcatalog;
 
+pub use camera_model::CameraModel;
 pub use centroid::*;
 #[cfg(feature = "image")]
 pub use centroid_extraction::{
     extract_centroids, extract_centroids_from_image, extract_centroids_from_raw,
     CentroidExtractionConfig, CentroidExtractionResult,
 };
+pub use distortion::{
+    calibrate_camera, CalibrateConfig, CalibrateResult, Distortion, PolynomialDistortion,
+    RadialDistortion,
+};
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,
     SolverDatabase,
 };
+pub use aberration::earth_barycentric_velocity;
 pub use star::*;
 pub use starcatalog::*;
 

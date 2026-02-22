@@ -7,9 +7,141 @@ exposed to Python via PyO3.
 
 from __future__ import annotations
 
+import datetime
 import numpy as np
 import numpy.typing as npt
 from typing import Optional, Union
+
+class CameraModel:
+    """Camera intrinsics model: focal length, optical center, parity, and distortion.
+
+    Encapsulates the mapping between pixel coordinates and tangent-plane coordinates.
+
+    Example::
+
+        cam = tetra3rs.CameraModel.from_fov(fov_deg=10.0, image_width=2048, image_height=1536)
+        xi, eta = cam.pixel_to_tanplane(100.0, 200.0)
+    """
+
+    def __init__(
+        self,
+        focal_length_px: float,
+        image_width: int,
+        image_height: int,
+        crpix: Optional[list[float]] = None,
+        parity_flip: bool = False,
+        distortion: Optional[Union["RadialDistortion", "PolynomialDistortion"]] = None,
+    ) -> None:
+        """Create a camera model with explicit parameters.
+
+        Args:
+            focal_length_px: Focal length in pixels.
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+            crpix: Optical center offset from image center [x, y]. Default [0, 0].
+            parity_flip: Whether x-axis is flipped. Default False.
+            distortion: A RadialDistortion or PolynomialDistortion. Default None.
+        """
+        ...
+
+    @staticmethod
+    def from_fov(fov_deg: float, image_width: int, image_height: int) -> "CameraModel":
+        """Create a camera model from a horizontal field of view and image dimensions.
+
+        Args:
+            fov_deg: Horizontal field of view in degrees.
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+
+        Returns:
+            CameraModel with no distortion, crpix=[0,0], parity_flip=False.
+        """
+        ...
+
+    @property
+    def focal_length_px(self) -> float:
+        """Focal length in pixels."""
+        ...
+
+    @property
+    def image_width(self) -> int:
+        """Image width in pixels."""
+        ...
+
+    @property
+    def image_height(self) -> int:
+        """Image height in pixels."""
+        ...
+
+    @property
+    def crpix(self) -> list[float]:
+        """Optical center offset from image center [x, y] in pixels."""
+        ...
+
+    @property
+    def parity_flip(self) -> bool:
+        """Whether the image x-axis is flipped."""
+        ...
+
+    @property
+    def distortion(self) -> Optional[Union["RadialDistortion", "PolynomialDistortion"]]:
+        """The distortion model, or None if no distortion."""
+        ...
+
+    @property
+    def fov_deg(self) -> float:
+        """Horizontal field of view in degrees."""
+        ...
+
+    def pixel_scale(self) -> float:
+        """Pixel scale in radians per pixel."""
+        ...
+
+    def pixel_to_tanplane(self, px: float, py: float) -> tuple[float, float]:
+        """Convert pixel coordinates to tangent-plane coordinates (xi, eta) in radians."""
+        ...
+
+    def tanplane_to_pixel(self, xi: float, eta: float) -> tuple[float, float]:
+        """Convert tangent-plane coordinates to pixel coordinates."""
+        ...
+
+
+class CalibrateResult:
+    """Result of camera calibration.
+
+    Returned by ``SolverDatabase.calibrate_camera``.
+    """
+
+    @property
+    def camera_model(self) -> CameraModel:
+        """The fitted CameraModel (focal length, crpix, distortion)."""
+        ...
+
+    @property
+    def rmse_before_px(self) -> float:
+        """RMS residual in pixels before calibration."""
+        ...
+
+    @property
+    def rmse_after_px(self) -> float:
+        """RMS residual in pixels after calibration."""
+        ...
+
+    @property
+    def n_inliers(self) -> int:
+        """Number of inlier star matches used in the fit."""
+        ...
+
+    @property
+    def n_outliers(self) -> int:
+        """Number of outlier star matches rejected by sigma clipping."""
+        ...
+
+    @property
+    def iterations(self) -> int:
+        """Number of sigma-clip iterations performed."""
+        ...
+
 
 class SolveResult:
     """Result of a successful plate-solve.
@@ -97,6 +229,102 @@ class SolveResult:
         """
         ...
 
+    @property
+    def distortion(self) -> Optional[Union["RadialDistortion", "PolynomialDistortion"]]:
+        """The distortion model used during solving, if any.
+
+        Returns a ``RadialDistortion`` or ``PolynomialDistortion`` instance,
+        or ``None`` if no distortion was applied.
+        """
+        ...
+
+    @property
+    def cd_matrix(self) -> Optional[npt.NDArray[np.float64]]:
+        """WCS CD matrix as a 2x2 numpy array (tangent-plane radians per pixel).
+
+        Maps pixel offsets from CRPIX to gnomonic tangent-plane coordinates
+        at CRVAL. ``None`` if the solve failed.
+        """
+        ...
+
+    @property
+    def crval_ra_deg(self) -> Optional[float]:
+        """WCS reference point RA in degrees.
+
+        The tangent point of the gnomonic (TAN) projection, close to the boresight.
+        """
+        ...
+
+    @property
+    def crval_dec_deg(self) -> Optional[float]:
+        """WCS reference point Dec in degrees."""
+        ...
+
+    @property
+    def crpix(self) -> npt.NDArray[np.float32]:
+        """Optical center offset from the geometric image center, in pixels [x, y]."""
+        ...
+
+    from typing import overload
+
+    @overload
+    def pixel_to_world(self, x: float, y: float) -> Optional[tuple[float, float]]: ...
+    @overload
+    def pixel_to_world(
+        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+
+    def pixel_to_world(
+        self,
+        x: Union[float, npt.NDArray[np.float64]],
+        y: Union[float, npt.NDArray[np.float64]],
+    ) -> Union[Optional[tuple[float, float]], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]]:
+        """Convert centered pixel coordinates to world coordinates (RA, Dec in degrees).
+
+        Pixel coordinates use the same convention as solver centroids:
+        origin at the image center, +X right, +Y down.
+
+        Args:
+            x: X pixel coordinate(s). Scalar or 1D numpy array.
+            y: Y pixel coordinate(s). Scalar or 1D numpy array.
+
+        Returns:
+            (ra_deg, dec_deg): Tuple of RA and Dec in degrees.
+                Scalars if input is scalar, numpy arrays if input is array.
+                Array elements are NaN where the transform is undefined.
+                Returns None for scalar input if the point is degenerate.
+        """
+        ...
+
+    @overload
+    def world_to_pixel(self, ra_deg: float, dec_deg: float) -> Optional[tuple[float, float]]: ...
+    @overload
+    def world_to_pixel(
+        self, ra_deg: npt.NDArray[np.float64], dec_deg: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+
+    def world_to_pixel(
+        self,
+        ra_deg: Union[float, npt.NDArray[np.float64]],
+        dec_deg: Union[float, npt.NDArray[np.float64]],
+    ) -> Union[Optional[tuple[float, float]], tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]]:
+        """Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.
+
+        Returns pixel coordinates in the same convention as solver centroids:
+        origin at the image center, +X right, +Y down.
+
+        Args:
+            ra_deg: Right ascension in degrees. Scalar or 1D numpy array.
+            dec_deg: Declination in degrees. Scalar or 1D numpy array.
+
+        Returns:
+            (x, y): Tuple of pixel coordinates.
+                Scalars if input is scalar, numpy arrays if input is array.
+                Array elements are NaN for points behind the camera.
+                Returns None for scalar input if the point is behind the camera.
+        """
+        ...
+
 class CatalogStar:
     """A star from the solver catalog.
 
@@ -123,23 +351,46 @@ class CatalogStar:
         """Visual magnitude."""
         ...
 
-class ExtractionResult(TypedDict):
-    """Result dictionary returned by extract_centroids."""
+class ExtractionResult:
+    """Result of centroid extraction from an image.
 
-    centroids: list[Centroid]
-    """List of detected centroids, sorted by brightness (brightest first)."""
-    image_width: int
-    """Width of the input image in pixels."""
-    image_height: int
-    """Height of the input image in pixels."""
-    background_mean: float
-    """Estimated background mean."""
-    background_sigma: float
-    """Estimated background standard deviation."""
-    threshold: float
-    """Detection threshold used."""
-    num_blobs_raw: int
-    """Number of raw blobs before filtering."""
+    Returned by ``extract_centroids``.
+    """
+
+    @property
+    def centroids(self) -> list[Centroid]:
+        """List of detected centroids, sorted by brightness (brightest first)."""
+        ...
+
+    @property
+    def image_width(self) -> int:
+        """Width of the input image in pixels."""
+        ...
+
+    @property
+    def image_height(self) -> int:
+        """Height of the input image in pixels."""
+        ...
+
+    @property
+    def background_mean(self) -> float:
+        """Estimated background mean."""
+        ...
+
+    @property
+    def background_sigma(self) -> float:
+        """Estimated background standard deviation."""
+        ...
+
+    @property
+    def threshold(self) -> float:
+        """Detection threshold used."""
+        ...
+
+    @property
+    def num_blobs_raw(self) -> int:
+        """Number of raw blobs before filtering."""
+        ...
 
 class Centroid:
     """A detected star centroid with position, brightness, and shape.
@@ -147,6 +398,16 @@ class Centroid:
     Returned by ``extract_centroids``. Centroids use pixel coordinates
     with the origin at the image center, +X right, +Y down.
     """
+
+    def __init__(self, x: float, y: float, brightness: Optional[float] = None) -> None:
+        """Create a new Centroid.
+
+        Args:
+            x: X position in pixels (origin at image center, +X right).
+            y: Y position in pixels (origin at image center, +Y down).
+            brightness: Integrated intensity above background (optional).
+        """
+        ...
 
     @property
     def x(self) -> float:
@@ -169,6 +430,29 @@ class Centroid:
 
         The eigenvalues give the squared semi-axes of the intensity profile,
         and the eigenvectors give the orientation.
+        """
+        ...
+
+    def with_offset(self, dx: float, dy: float) -> Centroid:
+        """Return a new Centroid with position shifted by (dx, dy).
+
+        Preserves brightness and covariance.
+        """
+        ...
+
+    def undistort(self, distortion: RadialDistortion) -> Centroid:
+        """Remove lens distortion from this centroid's position (distorted → ideal).
+
+        Returns a new Centroid at the corrected position.
+        Brightness and covariance are preserved.
+        """
+        ...
+
+    def distort(self, distortion: RadialDistortion) -> Centroid:
+        """Apply lens distortion to this centroid's position (ideal → distorted).
+
+        Returns a new Centroid at the distorted position.
+        Brightness and covariance are preserved.
         """
         ...
 
@@ -253,6 +537,9 @@ class SolverDatabase:
         match_threshold: float = 1e-5,
         solve_timeout_ms: Optional[int] = 5000,
         match_max_error: Optional[float] = None,
+        refine_iterations: int = 2,
+        camera_model: Optional[CameraModel] = None,
+        observer_velocity_km_s: Optional[list[float]] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -275,6 +562,16 @@ class SolverDatabase:
             match_threshold: False-positive probability threshold.
             solve_timeout_ms: Timeout in milliseconds. None = no timeout.
             match_max_error: Maximum edge-ratio error. None = use database value.
+            refine_iterations: Number of iterative SVD refinement passes.
+                Each pass re-projects catalog stars and re-matches centroids
+                using the refined rotation. Default 2.
+            camera_model: A CameraModel specifying optical center, distortion,
+                and parity. None = simple pinhole model with no distortion.
+            observer_velocity_km_s: Observer's barycentric velocity as
+                [vx, vy, vz] in km/s (ICRS/GCRF frame). When set, catalog
+                positions are aberration-corrected to apparent positions,
+                removing the ~20" bias from Earth's orbital velocity.
+                None = no correction (default).
 
         Returns:
             A SolveResult on success, or None if no match was found.
@@ -344,6 +641,280 @@ class SolverDatabase:
         """
         ...
 
+    def calibrate_camera(
+        self,
+        solve_results: Union[SolveResult, list[SolveResult]],
+        centroids: Union[
+            list[Centroid],
+            npt.NDArray[np.float64],
+            list[Union[list[Centroid], npt.NDArray[np.float64]]],
+        ],
+        image_width: Optional[int] = None,
+        image_height: Optional[int] = None,
+        image_shape: Optional[tuple[int, int]] = None,
+        order: int = 4,
+        max_iterations: int = 10,
+        sigma_clip: float = 3.0,
+        convergence_threshold_px: float = 0.01,
+    ) -> CalibrateResult:
+        """Calibrate a camera model from one or more plate-solve results.
+
+        Fits a global CameraModel (focal length, optical center, polynomial distortion)
+        by alternating per-image constrained WCS refinement with a global linear
+        least-squares fit. Distortion terms start at order 2 (SIP convention).
+
+        Args:
+            solve_results: A SolveResult or list of SolveResult objects.
+            centroids: Matching centroids (list of Centroid lists, or single list).
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+            image_shape: Image shape as (height, width) tuple (numpy convention).
+                Can be used instead of image_width/image_height.
+            order: Polynomial distortion order (2-6). Default 4.
+            max_iterations: Maximum outer iterations. Default 10.
+            sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
+            convergence_threshold_px: Stop when RMSE change < this (pixels).
+                Default 0.01.
+
+        Returns:
+            CalibrateResult with camera_model, rmse_before_px, rmse_after_px,
+            n_inliers, n_outliers, and iterations.
+        """
+        ...
+
+    def fit_radial_distortion(
+        self,
+        solve_results: Union[SolveResult, list[SolveResult]],
+        centroids: Union[
+            list[Centroid],
+            npt.NDArray[np.float64],
+            list[Union[list[Centroid], npt.NDArray[np.float64]]],
+        ],
+        image_width: int,
+        sigma_clip: float = 3.0,
+        max_iterations: int = 20,
+        stage2_threshold_px: Optional[float] = 5.0,
+    ) -> DistortionFitResult:
+        """Fit a radial distortion model (k1, k2, k3) from solve results.
+
+        Args:
+            solve_results: A SolveResult or list of SolveResult objects.
+            centroids: Matching centroids.
+            image_width: Image width in pixels.
+            sigma_clip: Sigma threshold for outlier rejection.
+            max_iterations: Maximum sigma-clip iterations.
+            stage2_threshold_px: Loose pixel threshold for second-stage
+                recovery. None to disable.
+
+        Returns:
+            DistortionFitResult with the fitted radial model and statistics.
+        """
+        ...
+
+    def fit_polynomial_distortion(
+        self,
+        solve_results: Union[SolveResult, list[SolveResult]],
+        centroids: Union[
+            list[Centroid],
+            npt.NDArray[np.float64],
+            list[Union[list[Centroid], npt.NDArray[np.float64]]],
+        ],
+        image_width: int,
+        order: int = 4,
+        sigma_clip: float = 3.0,
+        max_iterations: int = 20,
+        stage2_threshold_px: Optional[float] = 5.0,
+    ) -> DistortionFitResult:
+        """Fit a polynomial (SIP-like) distortion model from solve results.
+
+        This model captures arbitrary 2D distortion including radial, tangential,
+        and cross-terms — suitable for wide-field cameras like TESS where the
+        optical center is offset from the CCD center.
+
+        Args:
+            solve_results: A SolveResult or list of SolveResult objects.
+            centroids: Matching centroids.
+            image_width: Image width in pixels.
+            order: Polynomial order (2-6). Default 4.
+            sigma_clip: Sigma threshold for outlier rejection.
+            max_iterations: Maximum sigma-clip iterations.
+            stage2_threshold_px: Loose pixel threshold for second-stage
+                recovery. None to disable.
+
+        Returns:
+            DistortionFitResult with the fitted polynomial model and statistics.
+        """
+        ...
+
+class RadialDistortion:
+    """Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+
+    Coordinates are in pixels relative to the optical center (image center).
+
+    Example::
+
+        d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+        x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
+    """
+
+    def __init__(
+        self,
+        k1: float = 0.0,
+        k2: float = 0.0,
+        k3: float = 0.0,
+    ) -> None: ...
+    @property
+    def k1(self) -> float:
+        """First radial coefficient."""
+        ...
+
+    @property
+    def k2(self) -> float:
+        """Second radial coefficient."""
+        ...
+
+    @property
+    def k3(self) -> float:
+        """Third radial coefficient."""
+        ...
+
+    def distort(self, x: float, y: float) -> tuple[float, float]:
+        """Forward distortion: ideal → distorted."""
+        ...
+
+    def undistort(self, x: float, y: float) -> tuple[float, float]:
+        """Inverse distortion: distorted → ideal."""
+        ...
+
+class PolynomialDistortion:
+    """SIP-like polynomial distortion model with independent x,y correction terms.
+
+    Forward:  x_d = x + Σ A_pq · (x/s)^p · (y/s)^q   (0 ≤ p+q ≤ order)
+    Inverse:  x_i = x_d + Σ AP_pq · (x_d/s)^p · (y_d/s)^q
+
+    Where s = scale = image_width/2.
+
+    Includes all polynomial terms from order 0:
+      - (p+q = 0): constant offset — optical center shift
+      - (p+q = 1): linear terms — residual scale & rotation
+      - (p+q ≥ 2): higher-order distortion
+
+    Total coefficients per axis: (order+1)(order+2)/2.
+
+    Typically fitted from solve results via
+    ``SolverDatabase.fit_polynomial_distortion()``, or constructed directly
+    from coefficient arrays (e.g. extracted from a FITS WCS SIP model).
+    """
+
+    def __init__(
+        self,
+        order: int,
+        scale: float,
+        a_coeffs: list[float],
+        b_coeffs: list[float],
+        ap_coeffs: list[float],
+        bp_coeffs: list[float],
+    ) -> None:
+        """Create a polynomial distortion model from coefficient arrays.
+
+        Each coefficient array must have exactly (order+1)(order+2)/2 elements,
+        covering all terms from p+q=0 (constant offset) through p+q=order.
+
+        Args:
+            order: Polynomial order (2–6 typical).
+            scale: Normalization scale (typically image_width / 2).
+            a_coeffs: Forward A coefficients (x correction, ideal → distorted).
+            b_coeffs: Forward B coefficients (y correction, ideal → distorted).
+            ap_coeffs: Inverse AP coefficients (x correction, distorted → ideal).
+            bp_coeffs: Inverse BP coefficients (y correction, distorted → ideal).
+        """
+        ...
+
+    @property
+    def order(self) -> int:
+        """Polynomial order."""
+        ...
+
+    @property
+    def scale(self) -> float:
+        """Normalization scale (typically image_width / 2)."""
+        ...
+
+    @property
+    def num_coeffs(self) -> int:
+        """Number of polynomial coefficients per axis."""
+        ...
+
+    @property
+    def a_coeffs(self) -> npt.NDArray[np.float64]:
+        """Forward A coefficients (x correction, ideal → distorted)."""
+        ...
+
+    @property
+    def b_coeffs(self) -> npt.NDArray[np.float64]:
+        """Forward B coefficients (y correction, ideal → distorted)."""
+        ...
+
+    @property
+    def ap_coeffs(self) -> npt.NDArray[np.float64]:
+        """Inverse AP coefficients (x correction, distorted → ideal)."""
+        ...
+
+    @property
+    def bp_coeffs(self) -> npt.NDArray[np.float64]:
+        """Inverse BP coefficients (y correction, distorted → ideal)."""
+        ...
+
+    def distort(self, x: float, y: float) -> tuple[float, float]:
+        """Forward distortion: ideal → distorted."""
+        ...
+
+    def undistort(self, x: float, y: float) -> tuple[float, float]:
+        """Inverse distortion: distorted → ideal."""
+        ...
+
+class DistortionFitResult:
+    """Result of a distortion fitting procedure.
+
+    Returned by ``SolverDatabase.fit_radial_distortion`` or
+    ``SolverDatabase.fit_polynomial_distortion``.
+    """
+
+    @property
+    def model(self) -> Optional[Union[RadialDistortion, PolynomialDistortion]]:
+        """The fitted distortion model."""
+        ...
+
+    @property
+    def rmse_before_px(self) -> float:
+        """RMS pixel residual before distortion correction."""
+        ...
+
+    @property
+    def rmse_after_px(self) -> float:
+        """RMS pixel residual after distortion correction."""
+        ...
+
+    @property
+    def n_inliers(self) -> int:
+        """Number of inlier matches in the final fit."""
+        ...
+
+    @property
+    def n_outliers(self) -> int:
+        """Number of rejected outliers."""
+        ...
+
+    @property
+    def iterations(self) -> int:
+        """Number of sigma-clip iterations performed."""
+        ...
+
+    @property
+    def inlier_mask(self) -> npt.NDArray[np.bool_]:
+        """Boolean inlier mask (True = inlier, False = outlier)."""
+        ...
+
 def extract_centroids(
     image: npt.NDArray,
     sigma_threshold: float = 5.0,
@@ -367,8 +938,63 @@ def extract_centroids(
         max_elongation: Maximum blob elongation ratio. None = disabled.
 
     Returns:
-        A dict with 'centroids' (list of Centroid objects sorted by brightness),
-        'image_width', 'image_height', 'background_mean',
-        'background_sigma', 'threshold', and 'num_blobs_raw'.
+        ExtractionResult with centroids and image statistics.
+    """
+    ...
+
+def undistort_centroids(
+    centroids: list[Centroid],
+    distortion: Union[RadialDistortion, PolynomialDistortion],
+) -> list[Centroid]:
+    """Apply distortion correction to a list of centroids (distorted → ideal).
+
+    Returns a new list with corrected positions; brightness and covariance are preserved.
+
+    Args:
+        centroids: List of Centroid objects.
+        distortion: A RadialDistortion model.
+
+    Returns:
+        A new list of Centroid objects with undistorted positions.
+    """
+    ...
+
+def distort_centroids(
+    centroids: list[Centroid],
+    distortion: Union[RadialDistortion, PolynomialDistortion],
+) -> list[Centroid]:
+    """Apply forward distortion to a list of centroids (ideal → distorted).
+
+    Returns a new list with distorted positions; brightness and covariance are preserved.
+
+    Args:
+        centroids: List of Centroid objects.
+        distortion: A RadialDistortion model.
+
+    Returns:
+        A new list of Centroid objects with distorted positions.
+    """
+    ...
+
+def earth_barycentric_velocity(dt: datetime.datetime) -> list[float]:
+    """Approximate Earth barycentric velocity in km/s (ICRS equatorial frame).
+
+    Uses a circular-orbit approximation. Accuracy ~0.5 km/s (~1.7%),
+    sufficient for stellar aberration correction (~20" effect, ~0.3" error).
+
+    Args:
+        dt: Observation time as a ``datetime.datetime`` (UTC).
+            The ~69 s offset between UTC and TT is negligible for this
+            approximation.
+
+    Returns:
+        [vx, vy, vz] in km/s, ICRS equatorial frame. Pass directly to
+        ``solve_from_centroids(observer_velocity_km_s=...)``.
+
+    Example::
+
+        from datetime import datetime
+        v = tetra3rs.earth_barycentric_velocity(datetime(2025, 7, 10))
+        result = db.solve_from_centroids(centroids, ..., observer_velocity_km_s=v)
     """
     ...
