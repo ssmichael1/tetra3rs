@@ -825,14 +825,9 @@ fn test_tess_multi_image_calibration() {
         ),
     ];
 
-    // Verify all files exist (downloaded by data/download_same_ccd_tess_images.sh)
-    for (path, desc) in &same_ccd_images {
-        assert!(
-            std::path::Path::new(path).exists(),
-            "Missing test image: {} ({})\nRun: ./data/download_same_ccd_tess_images.sh",
-            path,
-            desc,
-        );
+    // Download any missing files from GCS
+    for (path, _desc) in &same_ccd_images {
+        test_data::ensure_test_file(path);
     }
 
     let db = build_tess_database();
