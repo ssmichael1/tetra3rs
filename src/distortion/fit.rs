@@ -66,15 +66,15 @@ pub struct DistortionFitResult {
 // ── Data structures for internal use ────────────────────────────────────────
 
 /// A single matched observation: observed centroid pixel position + ideal (projected) position.
-struct MatchedPoint {
+pub(super) struct MatchedPoint {
     /// Observed centroid x (distorted), pixels from image center.
-    x_obs: f64,
+    pub x_obs: f64,
     /// Observed centroid y (distorted), pixels from image center.
-    y_obs: f64,
+    pub y_obs: f64,
     /// Ideal projected x (undistorted pinhole model), pixels from image center.
-    x_ideal: f64,
+    pub x_ideal: f64,
     /// Ideal projected y (undistorted pinhole model), pixels from image center.
-    y_ideal: f64,
+    pub y_ideal: f64,
 }
 
 // ── Radial distortion fitting ───────────────────────────────────────────────
@@ -237,6 +237,168 @@ pub fn fit_radial_distortion(
 // Polynomial (SIP-like) distortion fitting
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Result of a sigma-clipped polynomial fit (forward + inverse).
+pub(super) struct PolyFitResult {
+    pub a_coeffs: Vec<f64>,
+    pub b_coeffs: Vec<f64>,
+    pub ap_coeffs: Vec<f64>,
+    pub bp_coeffs: Vec<f64>,
+    pub mask: Vec<bool>,
+    pub iterations: u32,
+}
+
+/// Fit a polynomial distortion model with iterative sigma-clipping.
+///
+/// This is the core fitting loop extracted for reuse by multi-image calibration.
+/// It performs:
+/// 1. Initial forward polynomial LS fit.
+/// 2. Iterative MAD-based sigma-clipping.
+/// 3. Stage 2 outlier recovery (optional, controlled by `config.stage2_threshold_px`).
+/// 4. Inverse polynomial fit on the final inlier set.
+///
+/// `points` are matched observations, `order` is the polynomial order,
+/// `scale` is the normalization factor (typically image_width / 2).
+pub(super) fn fit_polynomial_sigma_clip(
+    points: &[MatchedPoint],
+    order: u32,
+    scale: f64,
+    config: &DistortionFitConfig,
+) -> PolyFitResult {
+    let n = points.len();
+    let ncoeffs = num_coeffs(order);
+    let pairs = term_pairs(order);
+
+    let mut mask = vec![true; n];
+    let mut iterations = 0u32;
+    let mut a_coeffs = vec![0.0; ncoeffs];
+    let mut b_coeffs = vec![0.0; ncoeffs];
+
+    // Initial fit
+    fit_poly_ls(points, &mask, &pairs, scale, &mut a_coeffs, &mut b_coeffs);
+
+    for iter in 0..config.max_iterations {
+        iterations = iter + 1;
+
+        // Compute residuals using current model
+        let residuals: Vec<f64> = points
+            .iter()
+            .map(|p| {
+                let u = p.x_ideal / scale;
+                let v = p.y_ideal / scale;
+                let dx_model: f64 = pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
+                    .sum();
+                let dy_model: f64 = pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
+                    .sum();
+                let rx = p.x_obs - p.x_ideal - dx_model * scale;
+                let ry = p.y_obs - p.y_ideal - dy_model * scale;
+                (rx * rx + ry * ry).sqrt()
+            })
+            .collect();
+
+        // MAD-based robust clipping
+        let inlier_resids: Vec<f64> = residuals
+            .iter()
+            .zip(&mask)
+            .filter(|(_, &m)| m)
+            .map(|(&r, _)| r)
+            .collect();
+
+        if inlier_resids.is_empty() {
+            break;
+        }
+
+        let median = percentile(&inlier_resids, 0.5);
+        let mut abs_devs: Vec<f64> = inlier_resids.iter().map(|&r| (r - median).abs()).collect();
+        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mad = percentile(&abs_devs, 0.5);
+        let sigma = mad * 1.4826;
+
+        if sigma < 1e-12 {
+            break;
+        }
+
+        let threshold = config.sigma_clip * sigma;
+        let new_mask: Vec<bool> = residuals.iter().map(|&r| r <= threshold).collect();
+
+        let changed = mask.iter().zip(&new_mask).any(|(&a, &b)| a != b);
+        mask = new_mask;
+
+        if !changed {
+            break;
+        }
+
+        let n_inliers = mask.iter().filter(|&&m| m).count();
+        if n_inliers < ncoeffs {
+            debug!(
+                "Too few inliers ({}) for polynomial fit after sigma-clip",
+                n_inliers
+            );
+            break;
+        }
+
+        fit_poly_ls(points, &mask, &pairs, scale, &mut a_coeffs, &mut b_coeffs);
+    }
+
+    // Stage 2: recover outliers below a threshold
+    if let Some(threshold_px) = config.stage2_threshold_px {
+        let residuals: Vec<f64> = points
+            .iter()
+            .map(|p| {
+                let u = p.x_ideal / scale;
+                let v = p.y_ideal / scale;
+                let dx_model: f64 = pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
+                    .sum();
+                let dy_model: f64 = pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
+                    .sum();
+                let rx = p.x_obs - p.x_ideal - dx_model * scale;
+                let ry = p.y_obs - p.y_ideal - dy_model * scale;
+                (rx * rx + ry * ry).sqrt()
+            })
+            .collect();
+
+        let mask_s2: Vec<bool> = residuals.iter().map(|&r| r <= threshold_px).collect();
+        let n_recovered = mask_s2
+            .iter()
+            .zip(&mask)
+            .filter(|(&s2, &s1)| s2 && !s1)
+            .count();
+
+        if n_recovered > 0 {
+            mask = mask_s2;
+            let n_inliers = mask.iter().filter(|&&m| m).count();
+            if n_inliers >= ncoeffs {
+                fit_poly_ls(points, &mask, &pairs, scale, &mut a_coeffs, &mut b_coeffs);
+            }
+        }
+    }
+
+    // Fit the inverse polynomial (distorted → ideal) from the same data
+    let mut ap_coeffs = vec![0.0; ncoeffs];
+    let mut bp_coeffs = vec![0.0; ncoeffs];
+    fit_inverse_poly_ls(points, &mask, &pairs, scale, &mut ap_coeffs, &mut bp_coeffs);
+
+    PolyFitResult {
+        a_coeffs,
+        b_coeffs,
+        ap_coeffs,
+        bp_coeffs,
+        mask,
+        iterations,
+    }
+}
+
 /// Fit a polynomial (SIP-like) distortion model from plate-solve results.
 ///
 /// This model fits arbitrary 2D polynomial correction terms:
@@ -310,143 +472,18 @@ pub fn fit_polynomial_distortion(
         };
     }
 
-    // ── Stage 1: Iterative polynomial fit with sigma-clipping ──
-    let mut mask = vec![true; n];
-    let mut iterations = 0u32;
+    // Delegate to the reusable sigma-clip helper
+    let fit = fit_polynomial_sigma_clip(&points, order, scale, config);
 
-    let pairs = term_pairs(order);
-    let mut a_coeffs = vec![0.0; ncoeffs];
-    let mut b_coeffs = vec![0.0; ncoeffs];
-
-    // Initial fit
-    fit_poly_ls(&points, &mask, &pairs, scale, &mut a_coeffs, &mut b_coeffs);
-
-    for iter in 0..config.max_iterations {
-        iterations = iter + 1;
-
-        // Compute residuals using current model
-        let residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let u = p.x_ideal / scale;
-                let v = p.y_ideal / scale;
-                let dx_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let dy_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let rx = p.x_obs - p.x_ideal - dx_model * scale;
-                let ry = p.y_obs - p.y_ideal - dy_model * scale;
-                (rx * rx + ry * ry).sqrt()
-            })
-            .collect();
-
-        // MAD-based robust clipping
-        let inlier_resids: Vec<f64> = residuals
-            .iter()
-            .zip(&mask)
-            .filter(|(_, &m)| m)
-            .map(|(&r, _)| r)
-            .collect();
-
-        if inlier_resids.is_empty() {
-            break;
-        }
-
-        let median = percentile(&inlier_resids, 0.5);
-        let mut abs_devs: Vec<f64> = inlier_resids.iter().map(|&r| (r - median).abs()).collect();
-        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mad = percentile(&abs_devs, 0.5);
-        let sigma = mad * 1.4826;
-
-        if sigma < 1e-12 {
-            break;
-        }
-
-        let threshold = config.sigma_clip * sigma;
-        let new_mask: Vec<bool> = residuals.iter().map(|&r| r <= threshold).collect();
-
-        let changed = mask.iter().zip(&new_mask).any(|(&a, &b)| a != b);
-        mask = new_mask;
-
-        if !changed {
-            break;
-        }
-
-        let n_inliers = mask.iter().filter(|&&m| m).count();
-        if n_inliers < ncoeffs {
-            debug!(
-                "Too few inliers ({}) for polynomial fit after sigma-clip",
-                n_inliers
-            );
-            break;
-        }
-
-        fit_poly_ls(&points, &mask, &pairs, scale, &mut a_coeffs, &mut b_coeffs);
-    }
-
-    // ── Stage 2: recover outliers below a threshold ──
-    if let Some(threshold_px) = config.stage2_threshold_px {
-        let residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let u = p.x_ideal / scale;
-                let v = p.y_ideal / scale;
-                let dx_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let dy_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let rx = p.x_obs - p.x_ideal - dx_model * scale;
-                let ry = p.y_obs - p.y_ideal - dy_model * scale;
-                (rx * rx + ry * ry).sqrt()
-            })
-            .collect();
-
-        let mask_s2: Vec<bool> = residuals.iter().map(|&r| r <= threshold_px).collect();
-        let n_recovered = mask_s2
-            .iter()
-            .zip(&mask)
-            .filter(|(&s2, &s1)| s2 && !s1)
-            .count();
-
-        if n_recovered > 0 {
-            mask = mask_s2;
-            let n_inliers = mask.iter().filter(|&&m| m).count();
-            if n_inliers >= ncoeffs {
-                fit_poly_ls(&points, &mask, &pairs, scale, &mut a_coeffs, &mut b_coeffs);
-            }
-        }
-    }
-
-    // ── Fit the inverse polynomial (distorted → ideal) from the same data ──
-    let mut ap_coeffs = vec![0.0; ncoeffs];
-    let mut bp_coeffs = vec![0.0; ncoeffs];
-    fit_inverse_poly_ls(
-        &points,
-        &mask,
-        &pairs,
-        scale,
-        &mut ap_coeffs,
-        &mut bp_coeffs,
+    let model = PolynomialDistortion::new(
+        order, scale,
+        fit.a_coeffs, fit.b_coeffs, fit.ap_coeffs, fit.bp_coeffs,
     );
-
-    let model = PolynomialDistortion::new(order, scale, a_coeffs, b_coeffs, ap_coeffs, bp_coeffs);
     let dist = Distortion::Polynomial(model.clone());
     // Compute before/after RMSE on the SAME inlier set for a fair comparison
-    let rmse_before = compute_corrected_rmse(&points, &mask, &Distortion::None);
-    let rmse_after = compute_corrected_rmse(&points, &mask, &dist);
-    let n_inliers = mask.iter().filter(|&&m| m).count();
+    let rmse_before = compute_corrected_rmse(&points, &fit.mask, &Distortion::None);
+    let rmse_after = compute_corrected_rmse(&points, &fit.mask, &dist);
+    let n_inliers = fit.mask.iter().filter(|&&m| m).count();
 
     debug!(
         "Polynomial (order {}) fit: {} coefficients/axis, inliers={}/{}, RMSE {:.3} → {:.3} px",
@@ -459,15 +496,15 @@ pub fn fit_polynomial_distortion(
         rmse_after_px: rmse_after,
         n_inliers,
         n_outliers: n - n_inliers,
-        iterations,
-        inlier_mask: mask,
+        iterations: fit.iterations,
+        inlier_mask: fit.mask,
     }
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 /// Build a HashMap from catalog_id → index into star_vectors.
-fn build_id_lookup(database: &SolverDatabase) -> HashMap<u64, usize> {
+pub(super) fn build_id_lookup(database: &SolverDatabase) -> HashMap<u64, usize> {
     database
         .star_catalog_ids
         .iter()
@@ -612,7 +649,7 @@ fn compute_rmse_px(points: &[MatchedPoint]) -> f64 {
 }
 
 /// Compute RMS pixel residual after applying distortion correction to inliers.
-fn compute_corrected_rmse(points: &[MatchedPoint], mask: &[bool], distortion: &Distortion) -> f64 {
+pub(super) fn compute_corrected_rmse(points: &[MatchedPoint], mask: &[bool], distortion: &Distortion) -> f64 {
     let mut sum_sq = 0.0;
     let mut count = 0;
 
@@ -635,7 +672,7 @@ fn compute_corrected_rmse(points: &[MatchedPoint], mask: &[bool], distortion: &D
 }
 
 /// Compute the percentile of a sorted slice. `p` is in [0, 1].
-fn percentile(sorted: &[f64], p: f64) -> f64 {
+pub(super) fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -649,7 +686,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 ///
 /// Model: x_obs = x_ideal + Σ A_pq · u^p · v^q   (u = x_ideal/scale, v = y_ideal/scale, 0 ≤ p+q ≤ order)
 /// Stacks x and y equations, solves each axis independently.
-fn fit_poly_ls(
+pub(super) fn fit_poly_ls(
     points: &[MatchedPoint],
     mask: &[bool],
     pairs: &[(u32, u32)],
@@ -702,7 +739,7 @@ fn fit_poly_ls(
 /// Fit the inverse polynomial (distorted → ideal) by least-squares.
 ///
 /// Model: x_ideal = x_obs + Σ AP_pq · u_d^p · v_d^q   (u_d = x_obs/scale, v_d = y_obs/scale)
-fn fit_inverse_poly_ls(
+pub(super) fn fit_inverse_poly_ls(
     points: &[MatchedPoint],
     mask: &[bool],
     pairs: &[(u32, u32)],

@@ -210,6 +210,8 @@ impl Default for SolveConfig {
             refine_iterations: 2,
             camera_model: CameraModel {
                 focal_length_px: 1.0,
+                image_width: 0,
+                image_height: 0,
                 crpix: [0.0, 0.0],
                 parity_flip: false,
                 distortion: Distortion::None,
@@ -225,7 +227,7 @@ impl SolveConfig {
             fov_estimate_rad,
             image_width,
             image_height,
-            camera_model: CameraModel::from_fov(fov_estimate_rad as f64, image_width),
+            camera_model: CameraModel::from_fov(fov_estimate_rad as f64, image_width, image_height),
             ..Default::default()
         }
     }

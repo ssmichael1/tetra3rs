@@ -9,7 +9,138 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from typing import Optional, TypedDict, Union
+from typing import Optional, Union
+
+class CameraModel:
+    """Camera intrinsics model: focal length, optical center, parity, and distortion.
+
+    Encapsulates the mapping between pixel coordinates and tangent-plane coordinates.
+
+    Example::
+
+        cam = tetra3rs.CameraModel.from_fov(fov_deg=10.0, image_width=2048, image_height=1536)
+        xi, eta = cam.pixel_to_tanplane(100.0, 200.0)
+    """
+
+    def __init__(
+        self,
+        focal_length_px: float,
+        image_width: int,
+        image_height: int,
+        crpix: Optional[list[float]] = None,
+        parity_flip: bool = False,
+        distortion: Optional[Union["RadialDistortion", "PolynomialDistortion"]] = None,
+    ) -> None:
+        """Create a camera model with explicit parameters.
+
+        Args:
+            focal_length_px: Focal length in pixels.
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+            crpix: Optical center offset from image center [x, y]. Default [0, 0].
+            parity_flip: Whether x-axis is flipped. Default False.
+            distortion: A RadialDistortion or PolynomialDistortion. Default None.
+        """
+        ...
+
+    @staticmethod
+    def from_fov(fov_deg: float, image_width: int, image_height: int) -> "CameraModel":
+        """Create a camera model from a horizontal field of view and image dimensions.
+
+        Args:
+            fov_deg: Horizontal field of view in degrees.
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+
+        Returns:
+            CameraModel with no distortion, crpix=[0,0], parity_flip=False.
+        """
+        ...
+
+    @property
+    def focal_length_px(self) -> float:
+        """Focal length in pixels."""
+        ...
+
+    @property
+    def image_width(self) -> int:
+        """Image width in pixels."""
+        ...
+
+    @property
+    def image_height(self) -> int:
+        """Image height in pixels."""
+        ...
+
+    @property
+    def crpix(self) -> list[float]:
+        """Optical center offset from image center [x, y] in pixels."""
+        ...
+
+    @property
+    def parity_flip(self) -> bool:
+        """Whether the image x-axis is flipped."""
+        ...
+
+    @property
+    def distortion(self) -> Optional[Union["RadialDistortion", "PolynomialDistortion"]]:
+        """The distortion model, or None if no distortion."""
+        ...
+
+    @property
+    def fov_deg(self) -> float:
+        """Horizontal field of view in degrees."""
+        ...
+
+    def pixel_scale(self) -> float:
+        """Pixel scale in radians per pixel."""
+        ...
+
+    def pixel_to_tanplane(self, px: float, py: float) -> tuple[float, float]:
+        """Convert pixel coordinates to tangent-plane coordinates (xi, eta) in radians."""
+        ...
+
+    def tanplane_to_pixel(self, xi: float, eta: float) -> tuple[float, float]:
+        """Convert tangent-plane coordinates to pixel coordinates."""
+        ...
+
+
+class CalibrateResult:
+    """Result of camera calibration.
+
+    Returned by ``SolverDatabase.calibrate_camera``.
+    """
+
+    @property
+    def camera_model(self) -> CameraModel:
+        """The fitted CameraModel (focal length, crpix, distortion)."""
+        ...
+
+    @property
+    def rmse_before_px(self) -> float:
+        """RMS residual in pixels before calibration."""
+        ...
+
+    @property
+    def rmse_after_px(self) -> float:
+        """RMS residual in pixels after calibration."""
+        ...
+
+    @property
+    def n_inliers(self) -> int:
+        """Number of inlier star matches used in the fit."""
+        ...
+
+    @property
+    def n_outliers(self) -> int:
+        """Number of outlier star matches rejected by sigma clipping."""
+        ...
+
+    @property
+    def iterations(self) -> int:
+        """Number of sigma-clip iterations performed."""
+        ...
+
 
 class SolveResult:
     """Result of a successful plate-solve.
@@ -219,23 +350,46 @@ class CatalogStar:
         """Visual magnitude."""
         ...
 
-class ExtractionResult(TypedDict):
-    """Result dictionary returned by extract_centroids."""
+class ExtractionResult:
+    """Result of centroid extraction from an image.
 
-    centroids: list[Centroid]
-    """List of detected centroids, sorted by brightness (brightest first)."""
-    image_width: int
-    """Width of the input image in pixels."""
-    image_height: int
-    """Height of the input image in pixels."""
-    background_mean: float
-    """Estimated background mean."""
-    background_sigma: float
-    """Estimated background standard deviation."""
-    threshold: float
-    """Detection threshold used."""
-    num_blobs_raw: int
-    """Number of raw blobs before filtering."""
+    Returned by ``extract_centroids``.
+    """
+
+    @property
+    def centroids(self) -> list[Centroid]:
+        """List of detected centroids, sorted by brightness (brightest first)."""
+        ...
+
+    @property
+    def image_width(self) -> int:
+        """Width of the input image in pixels."""
+        ...
+
+    @property
+    def image_height(self) -> int:
+        """Height of the input image in pixels."""
+        ...
+
+    @property
+    def background_mean(self) -> float:
+        """Estimated background mean."""
+        ...
+
+    @property
+    def background_sigma(self) -> float:
+        """Estimated background standard deviation."""
+        ...
+
+    @property
+    def threshold(self) -> float:
+        """Detection threshold used."""
+        ...
+
+    @property
+    def num_blobs_raw(self) -> int:
+        """Number of raw blobs before filtering."""
+        ...
 
 class Centroid:
     """A detected star centroid with position, brightness, and shape.
@@ -383,8 +537,7 @@ class SolverDatabase:
         solve_timeout_ms: Optional[int] = 5000,
         match_max_error: Optional[float] = None,
         refine_iterations: int = 2,
-        distortion: Optional[Union[RadialDistortion, PolynomialDistortion]] = None,
-        crpix: Optional[list[float]] = None,
+        camera_model: Optional[CameraModel] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -410,11 +563,8 @@ class SolverDatabase:
             refine_iterations: Number of iterative SVD refinement passes.
                 Each pass re-projects catalog stars and re-matches centroids
                 using the refined rotation. Default 2.
-            distortion: Lens distortion model to apply to centroids before solving.
-                When provided, observed centroid pixel coordinates are undistorted
-                before being converted to unit vectors.
-            crpix: Optical center offset from image center as [x, y] in pixels.
-                None defaults to [0, 0] (optical center = image center).
+            camera_model: A CameraModel specifying optical center, distortion,
+                and parity. None = simple pinhole model with no distortion.
 
         Returns:
             A SolveResult on success, or None if no match was found.
@@ -481,6 +631,47 @@ class SolverDatabase:
 
         Returns:
             List of CatalogStar objects within the cone, sorted by brightness.
+        """
+        ...
+
+    def calibrate_camera(
+        self,
+        solve_results: Union[SolveResult, list[SolveResult]],
+        centroids: Union[
+            list[Centroid],
+            npt.NDArray[np.float64],
+            list[Union[list[Centroid], npt.NDArray[np.float64]]],
+        ],
+        image_width: Optional[int] = None,
+        image_height: Optional[int] = None,
+        image_shape: Optional[tuple[int, int]] = None,
+        order: int = 4,
+        max_iterations: int = 10,
+        sigma_clip: float = 3.0,
+        convergence_threshold_px: float = 0.01,
+    ) -> CalibrateResult:
+        """Calibrate a camera model from one or more plate-solve results.
+
+        Fits a global CameraModel (focal length, optical center, polynomial distortion)
+        by alternating per-image constrained WCS refinement with a global linear
+        least-squares fit. Distortion terms start at order 2 (SIP convention).
+
+        Args:
+            solve_results: A SolveResult or list of SolveResult objects.
+            centroids: Matching centroids (list of Centroid lists, or single list).
+            image_width: Image width in pixels.
+            image_height: Image height in pixels.
+            image_shape: Image shape as (height, width) tuple (numpy convention).
+                Can be used instead of image_width/image_height.
+            order: Polynomial distortion order (2-6). Default 4.
+            max_iterations: Maximum outer iterations. Default 10.
+            sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
+            convergence_threshold_px: Stop when RMSE change < this (pixels).
+                Default 0.01.
+
+        Returns:
+            CalibrateResult with camera_model, rmse_before_px, rmse_after_px,
+            n_inliers, n_outliers, and iterations.
         """
         ...
 
@@ -740,9 +931,7 @@ def extract_centroids(
         max_elongation: Maximum blob elongation ratio. None = disabled.
 
     Returns:
-        A dict with 'centroids' (list of Centroid objects sorted by brightness),
-        'image_width', 'image_height', 'background_mean',
-        'background_sigma', 'threshold', and 'num_blobs_raw'.
+        ExtractionResult with centroids and image statistics.
     """
     ...
 
