@@ -194,6 +194,15 @@ pub struct SolveConfig {
     /// If not explicitly set, uses a simple pinhole model with no distortion,
     /// crpix=[0,0], and no parity flip.
     pub camera_model: CameraModel,
+    /// Observer's barycentric velocity in km/s (ICRS/GCRF Cartesian).
+    ///
+    /// When set, catalog star positions are aberration-corrected to apparent
+    /// positions before matching and refinement, removing the ~20" systematic
+    /// bias from Earth's orbital velocity.
+    ///
+    /// For ground-based or Earth-orbiting observers, this is dominated by
+    /// Earth's orbital velocity (~30 km/s). Default: `None` (no correction).
+    pub observer_velocity_km_s: Option<[f64; 3]>,
 }
 
 impl Default for SolveConfig {
@@ -216,6 +225,7 @@ impl Default for SolveConfig {
                 parity_flip: false,
                 distortion: Distortion::None,
             },
+            observer_velocity_km_s: None,
         }
     }
 }

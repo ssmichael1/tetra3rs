@@ -23,6 +23,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit SIP polynomial or radial distortion models from one or more solved images via `calibrate_camera`
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
+- **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's orbital velocity
 
 ## Installation
 
@@ -116,6 +117,45 @@ Some imaging systems produce mirror-reflected images (e.g. FITS files with `CDEL
 
 The `SolveResult` includes a `parity_flip` flag (`bool` / `True`/`False` in Python) indicating whether this correction was applied. This is critical for pixel↔sky coordinate conversions: when `parity_flip` is `True`, the mapping between pixel x-coordinates and camera-frame x must include a sign flip.
 
+### Stellar aberration correction
+
+Stellar aberration shifts apparent star positions by up to ~20" due to the observer's barycentric velocity (~30 km/s for Earth). The pattern-matching step is unaffected (inter-star angular separations are invariant to first order in v/c), but the final attitude quaternion is biased by ~20" unless corrected.
+
+To correct for aberration, pass the observer's barycentric velocity (ICRS, km/s) via `SolveConfig::observer_velocity_km_s`. The solver applies a first-order correction (s' = s + β − s(s·β)) to all catalog star vectors before matching and refinement, producing an unbiased attitude.
+
+The convenience function `earth_barycentric_velocity()` provides an approximate Earth velocity using a circular-orbit model (~0.5 km/s accuracy, sufficient for the ~20" effect):
+
+**Rust:**
+
+```rust
+use tetra3::{earth_barycentric_velocity, SolveConfig};
+
+// days since J2000.0 (2000 Jan 1 12:00 TT)
+let v = earth_barycentric_velocity(9321.0);
+
+let config = SolveConfig {
+    observer_velocity_km_s: Some(v),
+    ..SolveConfig::new((10.0_f32).to_radians(), 1024, 1024)
+};
+```
+
+**Python:**
+
+```python
+from datetime import datetime
+import tetra3rs
+
+v = tetra3rs.earth_barycentric_velocity(datetime(2025, 7, 10))
+result = db.solve_from_centroids(
+    centroids,
+    fov_estimate_deg=10.0,
+    image_shape=img.shape,
+    observer_velocity_km_s=v,
+)
+```
+
+For spacecraft in non-Earth orbits, compute the barycentric velocity from your ephemeris and pass it directly.
+
 ## Catalog support
 
 | Catalog | File | Notes |
@@ -158,7 +198,6 @@ cargo test --test tess_solve_test --features image -- --nocapture
 ## Roadmap (not in order)
 
 - **Tracking mode** — accept an initial attitude guess to restrict the search to nearby catalog stars, improving speed and robustness for sequential frames (e.g. star trackers solution on previous frame)
-- **Stellar aberration** — correct for the apparent shift in star positions caused by the observer's velocity (up to ~20" for Earth-orbiting spacecraft)
 - **Gaia catalog support** — complete the Gaia bright star catalog import (`--features gaia`)
 - **Tycho-2 catalog support** — import the Tycho-2 catalog (~2.5 million stars, fills the gap between Hipparcos and Gaia)
 

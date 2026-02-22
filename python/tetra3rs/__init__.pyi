@@ -7,6 +7,7 @@ exposed to Python via PyO3.
 
 from __future__ import annotations
 
+import datetime
 import numpy as np
 import numpy.typing as npt
 from typing import Optional, Union
@@ -538,6 +539,7 @@ class SolverDatabase:
         match_max_error: Optional[float] = None,
         refine_iterations: int = 2,
         camera_model: Optional[CameraModel] = None,
+        observer_velocity_km_s: Optional[list[float]] = None,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -565,6 +567,11 @@ class SolverDatabase:
                 using the refined rotation. Default 2.
             camera_model: A CameraModel specifying optical center, distortion,
                 and parity. None = simple pinhole model with no distortion.
+            observer_velocity_km_s: Observer's barycentric velocity as
+                [vx, vy, vz] in km/s (ICRS/GCRF frame). When set, catalog
+                positions are aberration-corrected to apparent positions,
+                removing the ~20" bias from Earth's orbital velocity.
+                None = no correction (default).
 
         Returns:
             A SolveResult on success, or None if no match was found.
@@ -966,5 +973,28 @@ def distort_centroids(
 
     Returns:
         A new list of Centroid objects with distorted positions.
+    """
+    ...
+
+def earth_barycentric_velocity(dt: datetime.datetime) -> list[float]:
+    """Approximate Earth barycentric velocity in km/s (ICRS equatorial frame).
+
+    Uses a circular-orbit approximation. Accuracy ~0.5 km/s (~1.7%),
+    sufficient for stellar aberration correction (~20" effect, ~0.3" error).
+
+    Args:
+        dt: Observation time as a ``datetime.datetime`` (UTC).
+            The ~69 s offset between UTC and TT is negligible for this
+            approximation.
+
+    Returns:
+        [vx, vy, vz] in km/s, ICRS equatorial frame. Pass directly to
+        ``solve_from_centroids(observer_velocity_km_s=...)``.
+
+    Example::
+
+        from datetime import datetime
+        v = tetra3rs.earth_barycentric_velocity(datetime(2025, 7, 10))
+        result = db.solve_from_centroids(centroids, ..., observer_velocity_km_s=v)
     """
     ...
