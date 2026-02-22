@@ -21,12 +21,17 @@ use crate::distortion::Distortion;
 
 /// Camera intrinsics model.
 ///
-/// Encapsulates focal length, optical center offset, parity, and lens distortion
-/// into a single struct that maps between pixel and tangent-plane coordinates.
+/// Encapsulates focal length, sensor dimensions, optical center offset, parity,
+/// and lens distortion into a single struct that maps between pixel and
+/// tangent-plane coordinates.
 #[derive(Debug, Clone)]
 pub struct CameraModel {
     /// Focal length in pixels: `f = (width/2) / tan(fov/2)`.
     pub focal_length_px: f64,
+    /// Sensor width in pixels.
+    pub image_width: u32,
+    /// Sensor height in pixels.
+    pub image_height: u32,
     /// Optical center offset from the geometric image center, in pixels `[x, y]`.
     /// For most cameras this is `[0.0, 0.0]`.
     pub crpix: [f64; 2],
@@ -37,13 +42,15 @@ pub struct CameraModel {
 }
 
 impl CameraModel {
-    /// Create a camera model from a horizontal field of view and image width.
+    /// Create a camera model from a horizontal field of view and image dimensions.
     ///
     /// Sets crpix to `[0, 0]`, no parity flip, no distortion.
-    pub fn from_fov(fov_rad: f64, image_width: u32) -> Self {
+    pub fn from_fov(fov_rad: f64, image_width: u32, image_height: u32) -> Self {
         let f = (image_width as f64 / 2.0) / (fov_rad / 2.0).tan();
         Self {
             focal_length_px: f,
+            image_width,
+            image_height,
             crpix: [0.0, 0.0],
             parity_flip: false,
             distortion: Distortion::None,
@@ -57,9 +64,14 @@ impl CameraModel {
         1.0 / self.focal_length_px
     }
 
-    /// Derive the horizontal field of view in radians for a given image width.
-    pub fn fov_rad(&self, image_width: u32) -> f64 {
-        2.0 * ((image_width as f64 / 2.0) / self.focal_length_px).atan()
+    /// Horizontal field of view in degrees, using the stored `image_width`.
+    pub fn fov_deg(&self) -> f64 {
+        self.fov_rad().to_degrees()
+    }
+
+    /// Horizontal field of view in radians, using the stored `image_width`.
+    pub fn fov_rad(&self) -> f64 {
+        2.0 * ((self.image_width as f64 / 2.0) / self.focal_length_px).atan()
     }
 
     /// Convert pixel coordinates to tangent-plane coordinates.
@@ -109,10 +121,10 @@ mod tests {
         let fov_rad = fov_deg.to_radians();
         let width = 2048u32;
 
-        let cam = CameraModel::from_fov(fov_rad, width);
+        let cam = CameraModel::from_fov(fov_rad, width, 1536);
 
         // Recover FOV
-        let recovered_fov = cam.fov_rad(width);
+        let recovered_fov = cam.fov_rad();
         assert!(
             (recovered_fov - fov_rad).abs() < 1e-12,
             "FOV recovery: expected {:.6}, got {:.6}",
@@ -133,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_no_distortion() {
-        let cam = CameraModel::from_fov(10.0_f64.to_radians(), 1024);
+        let cam = CameraModel::from_fov(10.0_f64.to_radians(), 1024, 768);
 
         let test_points = [
             (0.0, 0.0),
@@ -160,6 +172,8 @@ mod tests {
     fn test_roundtrip_with_crpix() {
         let cam = CameraModel {
             focal_length_px: 5000.0,
+            image_width: 1024,
+            image_height: 768,
             crpix: [10.0, -5.0],
             parity_flip: false,
             distortion: Distortion::None,
@@ -194,12 +208,16 @@ mod tests {
     fn test_parity_flip() {
         let cam_normal = CameraModel {
             focal_length_px: 5000.0,
+            image_width: 1024,
+            image_height: 768,
             crpix: [0.0, 0.0],
             parity_flip: false,
             distortion: Distortion::None,
         };
         let cam_flipped = CameraModel {
             focal_length_px: 5000.0,
+            image_width: 1024,
+            image_height: 768,
             crpix: [0.0, 0.0],
             parity_flip: true,
             distortion: Distortion::None,
@@ -234,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_center_pixel_maps_to_origin() {
-        let cam = CameraModel::from_fov(15.0_f64.to_radians(), 2048);
+        let cam = CameraModel::from_fov(15.0_f64.to_radians(), 2048, 1536);
         let (xi, eta) = cam.pixel_to_tanplane(0.0, 0.0);
         assert!(xi.abs() < 1e-15 && eta.abs() < 1e-15);
     }
@@ -244,7 +262,7 @@ mod tests {
         // For a 10° FOV, 1000px wide camera:
         // A pixel at (500, 0) = right edge should map to xi ≈ tan(5°) ≈ 0.0875 rad
         let fov_rad = 10.0_f64.to_radians();
-        let cam = CameraModel::from_fov(fov_rad, 1000);
+        let cam = CameraModel::from_fov(fov_rad, 1000, 750);
 
         let (xi, _eta) = cam.pixel_to_tanplane(500.0, 0.0);
         let expected_xi = (5.0_f64).to_radians().tan();
