@@ -21,7 +21,7 @@ use crate::Centroid;
 use super::combinations::BreadthFirstCombinations;
 use super::pattern::{
     compute_edge_ratios, compute_pattern_key, compute_pattern_key_hash, compute_sorted_edge_angles,
-    get_table_indices, hash_to_index, NUM_EDGES, NUM_EDGE_RATIOS, PATTERN_SIZE,
+    hash_to_index, NUM_EDGES, NUM_EDGE_RATIOS, PATTERN_SIZE,
 };
 use super::wcs_refine;
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
@@ -260,9 +260,10 @@ impl SolverDatabase {
 
         // ── Main solve loop ──
         let mut status = SolveStatus::NoMatch;
+        let mut pattern_key_list: Vec<(u32, [u32; NUM_EDGE_RATIOS])> = Vec::new();
 
         for image_pattern_local in
-            BreadthFirstCombinations::new(&pattern_centroid_inds, PATTERN_SIZE)
+            BreadthFirstCombinations::<PATTERN_SIZE>::new(&pattern_centroid_inds)
         {
             // Check timeout
             if let Some(t) = timeout_ms {
@@ -301,25 +302,26 @@ impl SolverDatabase {
                 std::array::from_fn(|i| (ratio_max[i] * p_bins as f32).min(p_bins as f32) as u32);
 
             // Build list of candidate pattern keys, sorted by distance from image_key
-            let mut pattern_key_list: Vec<(u32, [u32; NUM_EDGE_RATIOS])> = Vec::new();
+            pattern_key_list.clear();
             enumerate_key_range(&key_min, &key_max, &image_key, &mut pattern_key_list);
             pattern_key_list.sort_unstable_by_key(|&(dist, _)| dist);
+
+            let table_len = self.pattern_catalog.len() as u64;
 
             // Try each candidate pattern key
             for &(_, ref pkey) in &pattern_key_list {
                 let pkey_hash = compute_pattern_key_hash(pkey, p_bins);
-                let hidx = hash_to_index(pkey_hash, self.pattern_catalog.len() as u64);
-
-                // Walk the hash chain
-                let table_indices = get_table_indices(hidx, &self.pattern_catalog);
-                if table_indices.is_empty() {
-                    continue;
-                }
+                let hidx = hash_to_index(pkey_hash, table_len);
 
                 // Pre-filter by 16-bit key hash
                 let key_hash16 = (pkey_hash & 0xFFFF) as u16;
 
-                for &tidx in &table_indices {
+                // Walk the hash chain inline (quadratic probing)
+                for c in 0u64.. {
+                    let tidx = ((hidx.wrapping_add(c.wrapping_mul(c))) % table_len) as usize;
+                    if self.pattern_catalog[tidx] == [0, 0, 0, 0] {
+                        break; // end of chain
+                    }
                     if self.pattern_key_hashes[tidx] != key_hash16 {
                         continue;
                     }
