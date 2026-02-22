@@ -10,6 +10,7 @@
 //!    c. Verify by projecting catalog stars and counting matches.
 //!    d. Accept if false-positive probability is below threshold.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
@@ -24,6 +25,25 @@ use super::pattern::{
 };
 use super::wcs_refine;
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
+
+/// Speed of light in km/s.
+const C_KM_S: f64 = 299_792.458;
+
+/// First-order stellar aberration: true ICRS unit vector → apparent.
+///
+/// `beta` = observer barycentric velocity / c (dimensionless, ICRS frame).
+/// Formula: s' = s + β - s(s·β), then renormalize.
+fn aberration_correct(sv: &[f32; 3], beta: &[f64; 3]) -> [f32; 3] {
+    let sx = sv[0] as f64;
+    let sy = sv[1] as f64;
+    let sz = sv[2] as f64;
+    let dot = sx * beta[0] + sy * beta[1] + sz * beta[2];
+    let ax = sx + beta[0] - sx * dot;
+    let ay = sy + beta[1] - sy * dot;
+    let az = sz + beta[2] - sz * dot;
+    let norm = (ax * ax + ay * ay + az * az).sqrt();
+    [(ax / norm) as f32, (ay / norm) as f32, (az / norm) as f32]
+}
 
 // ── Solve entry point ───────────────────────────────────────────────────────
 
@@ -50,6 +70,20 @@ impl SolverDatabase {
         config: &SolveConfig,
     ) -> SolveResult {
         let t0 = Instant::now();
+
+        // ── Aberration correction: build corrected catalog vectors if velocity is set ──
+        let star_vecs: Cow<[[f32; 3]]> = match config.observer_velocity_km_s {
+            Some(v) => {
+                let beta = [v[0] / C_KM_S, v[1] / C_KM_S, v[2] / C_KM_S];
+                Cow::Owned(
+                    self.star_vectors
+                        .iter()
+                        .map(|sv| aberration_correct(sv, &beta))
+                        .collect(),
+                )
+            }
+            None => Cow::Borrowed(&self.star_vectors),
+        };
 
         // ── Preprocess centroids: subtract CRPIX and undistort (pixel-space, FOV-independent) ──
         let cam = &config.camera_model;
@@ -106,7 +140,7 @@ impl SolverDatabase {
             }
 
             debug!("Trying FOV = {:.3}°", fov_try.to_degrees());
-            let result = self.solve_at_fov(working_centroids, config, fov_try, t0);
+            let result = self.solve_at_fov(working_centroids, config, fov_try, &star_vecs, t0);
             match result.status {
                 SolveStatus::MatchFound => return result,
                 SolveStatus::TooFew => return result,
@@ -123,6 +157,7 @@ impl SolverDatabase {
         centroids: &[Centroid],
         config: &SolveConfig,
         fov_estimate: f32,
+        star_vectors: &[[f32; 3]],
         t0: Instant,
     ) -> SolveResult {
         let pixel_scale = if config.image_width > 0 {
@@ -303,10 +338,10 @@ impl SolverDatabase {
                     // Full edge-ratio comparison
                     let cat_pat = self.pattern_catalog[tidx];
                     let cat_vecs: [[f32; 3]; 4] = [
-                        self.star_vectors[cat_pat[0] as usize],
-                        self.star_vectors[cat_pat[1] as usize],
-                        self.star_vectors[cat_pat[2] as usize],
-                        self.star_vectors[cat_pat[3] as usize],
+                        star_vectors[cat_pat[0] as usize],
+                        star_vectors[cat_pat[1] as usize],
+                        star_vectors[cat_pat[2] as usize],
+                        star_vectors[cat_pat[3] as usize],
                     ];
                     let cat_edges = compute_sorted_edge_angles(&cat_vecs);
                     let cat_largest_edge = cat_edges[NUM_EDGES - 1];
@@ -382,7 +417,7 @@ impl SolverDatabase {
                     // Project catalog stars to camera frame
                     let mut nearby_cam_positions: Vec<(usize, f32, f32)> = Vec::new();
                     for &cat_idx in &nearby_inds {
-                        let sv = &self.star_vectors[cat_idx];
+                        let sv = &star_vectors[cat_idx];
                         let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
                         let cam_v = rotation_matrix * icrs_v;
                         // Only keep stars in front of the camera (z > 0)
@@ -444,7 +479,7 @@ impl SolverDatabase {
                         &rotation_matrix,
                         &current_matches,
                         &centroids_px,
-                        &self.star_vectors,
+                        star_vectors,
                         &self.star_catalog,
                         ps_refine,
                         parity_flip,
@@ -485,7 +520,7 @@ impl SolverDatabase {
                         let norm = (ix * ix + iy * iy + iz * iz).sqrt();
                         let img_v = refined_rotation.transpose()
                             * Vector3::new(ix / norm, iy / norm, iz / norm);
-                        let sv = &self.star_vectors[cat_star_idx];
+                        let sv = &star_vectors[cat_star_idx];
                         let cat_v = Vector3::new(sv[0], sv[1], sv[2]);
                         let cross = img_v.cross(&cat_v);
                         let ang = cross.norm().atan2(img_v.dot(&cat_v));
@@ -770,4 +805,67 @@ fn binomial_cdf(k: u32, n: u32, p: f64) -> f64 {
     }
 
     cdf.min(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aberration_correct_shift_direction() {
+        // Star along +X, velocity 30 km/s along +Y
+        // Aberration should shift the apparent position toward +Y
+        let star = [1.0f32, 0.0, 0.0];
+        let beta = [0.0, 30.0 / C_KM_S, 0.0];
+        let apparent = aberration_correct(&star, &beta);
+
+        // Output should be normalized
+        let norm = (apparent[0] as f64 * apparent[0] as f64
+            + apparent[1] as f64 * apparent[1] as f64
+            + apparent[2] as f64 * apparent[2] as f64)
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "output not unit length: {norm}");
+
+        // Y component should be positive (shifted toward velocity direction)
+        assert!(apparent[1] > 0.0, "expected positive Y shift, got {}", apparent[1]);
+
+        // Shift magnitude should be ~v/c ≈ 1e-4 rad ≈ 20"
+        let shift_rad = (apparent[1] as f64).atan2(apparent[0] as f64);
+        let expected = 30.0 / C_KM_S; // ~1e-4 rad
+        assert!(
+            (shift_rad - expected).abs() < 1e-6,
+            "shift {shift_rad:.2e} rad, expected ~{expected:.2e} rad"
+        );
+    }
+
+    #[test]
+    fn test_aberration_correct_zero_velocity() {
+        // Zero velocity should return the original unit vector unchanged
+        let s = 1.0f32 / 3.0f32.sqrt();
+        let star = [s, s, s];
+        let beta = [0.0, 0.0, 0.0];
+        let apparent = aberration_correct(&star, &beta);
+        for i in 0..3 {
+            assert!(
+                (apparent[i] - star[i]).abs() < 1e-6,
+                "component {i} changed: {} -> {}",
+                star[i],
+                apparent[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_aberration_correct_parallel_velocity() {
+        // Velocity parallel to star direction should produce zero transverse shift
+        let star = [1.0f32, 0.0, 0.0];
+        let beta = [30.0 / C_KM_S, 0.0, 0.0];
+        let apparent = aberration_correct(&star, &beta);
+
+        // Y and Z should remain essentially zero
+        assert!(apparent[1].abs() < 1e-7, "Y not zero: {}", apparent[1]);
+        assert!(apparent[2].abs() < 1e-7, "Z not zero: {}", apparent[2]);
+        // X should still be ~1.0 (normalized)
+        assert!((apparent[0] - 1.0).abs() < 1e-6);
+    }
 }

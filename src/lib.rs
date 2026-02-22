@@ -29,6 +29,10 @@
 //!   more solved images via [`calibrate_camera`]
 //! - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and
 //!   [`SolveResult::pixel_to_world`] / [`SolveResult::world_to_pixel`] methods
+//! - **Stellar aberration** — optional correction for the ~20″ apparent shift in star
+//!   positions caused by the observer's barycentric velocity; set
+//!   [`SolveConfig::observer_velocity_km_s`] (use [`earth_barycentric_velocity`] for
+//!   ground-based / Earth-orbiting observers)
 //!
 //! ## Example
 //!
@@ -71,6 +75,30 @@
 //! }
 //! ```
 //!
+//! ## Stellar aberration
+//!
+//! Stellar aberration shifts apparent star positions by up to ~20″ due to the
+//! observer's barycentric velocity (~30 km/s for Earth). The pattern-matching step
+//! is unaffected (inter-star angular separations are invariant to first order in
+//! v/c), but the final attitude quaternion is biased by ~20″ unless corrected.
+//!
+//! Pass the observer's barycentric velocity (ICRS, km/s) via
+//! [`SolveConfig::observer_velocity_km_s`]. The solver applies a first-order
+//! correction to all catalog vectors before matching and refinement.
+//!
+//! For Earth-based or Earth-orbiting observers, [`earth_barycentric_velocity`]
+//! provides an approximate velocity from a circular-orbit model:
+//!
+//! ```no_run
+//! use tetra3::{earth_barycentric_velocity, SolveConfig};
+//!
+//! let v = earth_barycentric_velocity(9321.0); // days since J2000.0
+//! let config = SolveConfig {
+//!     observer_velocity_km_s: Some(v),
+//!     ..SolveConfig::new((10.0_f32).to_radians(), 1024, 1024)
+//! };
+//! ```
+//!
 //! ## Algorithm overview
 //!
 //! 1. **Pattern generation** — select combinations of 4 bright centroids; compute 6 pairwise
@@ -101,6 +129,7 @@
 //! [Claude Code](https://claude.ai/claude-code) (Anthropic).
 //!
 
+pub mod aberration;
 /// Raw star catalogs; currently Tycho-2 & Hipparcos
 pub(crate) mod catalogs;
 pub mod camera_model;
@@ -127,6 +156,7 @@ pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,
     SolverDatabase,
 };
+pub use aberration::earth_barycentric_velocity;
 pub use star::*;
 pub use starcatalog::*;
 

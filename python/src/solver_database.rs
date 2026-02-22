@@ -118,6 +118,10 @@ impl PySolverDatabase {
     ///     refine_iterations: Number of iterative SVD refinement passes. Default 2.
     ///     camera_model: A CameraModel specifying optical center, distortion, and parity.
     ///         None = simple pinhole model with no distortion.
+    ///     observer_velocity_km_s: Observer's barycentric velocity as [vx, vy, vz] in km/s
+    ///         (ICRS/GCRF frame). When set, catalog positions are aberration-corrected
+    ///         to apparent positions, removing ~20" bias from Earth's orbital velocity.
+    ///         None = no correction (default).
     ///
     /// Returns:
     ///     SolveResult on success, None if no match was found.
@@ -136,6 +140,7 @@ impl PySolverDatabase {
         match_max_error = None,
         refine_iterations = 2,
         camera_model = None,
+        observer_velocity_km_s = None,
     ))]
     fn solve_from_centroids<'py>(
         &self,
@@ -154,6 +159,7 @@ impl PySolverDatabase {
         match_max_error: Option<f32>,
         refine_iterations: u32,
         camera_model: Option<PyCameraModel>,
+        observer_velocity_km_s: Option<[f64; 3]>,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
         let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
@@ -251,6 +257,7 @@ impl PySolverDatabase {
             match_max_error,
             refine_iterations,
             camera_model: cam,
+            observer_velocity_km_s,
         };
 
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
