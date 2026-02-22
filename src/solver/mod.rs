@@ -21,6 +21,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::camera_model::CameraModel;
 use crate::distortion::Distortion;
+use crate::rkyv_nalgebra::AsQuatArray;
 use crate::{Quaternion, StarCatalog};
 
 // ── Pattern hash table entry ────────────────────────────────────────────────
@@ -72,7 +73,7 @@ impl PatternEntry {
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
 
 /// Outcome of a plate-solve attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum SolveStatus {
     /// A valid match was found.
     MatchFound,
@@ -292,11 +293,12 @@ impl SolveConfig {
 // ── Solve result ────────────────────────────────────────────────────────────
 
 /// Result of a plate-solve attempt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 pub struct SolveResult {
     /// Quaternion rotating ICRS vectors to camera-frame vectors.
     /// Camera frame: +X right, +Y down, +Z boresight.
     /// Usage: `camera_vec = qicrs2cam * icrs_vec`
+    #[rkyv(with = rkyv::with::Map<AsQuatArray>)]
     pub qicrs2cam: Option<Quaternion>,
     /// Estimated field of view (radians).
     pub fov_rad: Option<f32>,

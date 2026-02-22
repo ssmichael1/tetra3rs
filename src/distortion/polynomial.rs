@@ -32,7 +32,7 @@
 ///
 /// Forward: ideal → distorted. Inverse: distorted → ideal.
 /// Both directions are stored as explicit polynomials (no iterative inversion needed).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PolynomialDistortion {
     /// Polynomial order (2..=6 typically).
     pub order: u32,

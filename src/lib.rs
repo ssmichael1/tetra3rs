@@ -137,6 +137,7 @@ mod centroid;
 #[cfg(feature = "image")]
 pub mod centroid_extraction;
 pub mod distortion;
+pub mod rkyv_nalgebra;
 pub mod solver;
 pub mod star;
 pub mod starcatalog;
