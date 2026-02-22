@@ -34,12 +34,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data
-          key: test-data-v1
+          key: test-data-v2
 
       - name: Download test data
         if: steps.cache-test-data.outputs.cache-hit != 'true'
         run: |
-          mkdir -p data/skyview_10deg_test_images data/tess_test_images
+          mkdir -p data/skyview_10deg_test_images data/tess_test_images data/tess_same_ccd
           BASE=https://storage.googleapis.com/tetra3rs-testvecs
           curl --fail -o data/hip2.dat "$BASE/hip2.dat"
           for f in orion_region_10deg pleiades_region_10deg cygnus_region_10deg \
@@ -50,6 +50,9 @@ jobs:
           done
           for f in moderate_density_field sparse_field_north_ecliptic dense_galactic_plane; do
             curl --fail -o "data/tess_test_images/${f}.fits" "$BASE/tess_test_images/${f}.fits"
+          done
+          for s in 01 02 03 04 05 06 14 15 16 17; do
+            curl --fail -o "data/tess_same_ccd/sector${s}_cam1_ccd1.fits" "$BASE/tess_same_ccd/sector${s}_cam1_ccd1.fits"
           done
 
       - name: Build
