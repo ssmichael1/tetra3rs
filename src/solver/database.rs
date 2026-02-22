@@ -230,7 +230,7 @@ impl SolverDatabase {
 
                 // Generate 4-star combinations, brightest first
                 let mut patterns_this_field = 0u32;
-                for combo in BreadthFirstCombinations::new(&field_pattern_stars, PATTERN_SIZE) {
+                for combo in BreadthFirstCombinations::<PATTERN_SIZE>::new(&field_pattern_stars) {
                     let mut pat = [
                         combo[0] as u32,
                         combo[1] as u32,

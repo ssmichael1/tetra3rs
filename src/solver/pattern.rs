@@ -123,21 +123,6 @@ pub fn insert_pattern(
     unreachable!("hash table is full")
 }
 
-/// Walk the quadratic-probe chain from `hash_index`, collecting all non-empty
-/// slot indices until an empty slot is found.
-pub fn get_table_indices(hash_index: u64, table: &[[u32; PATTERN_SIZE]]) -> Vec<usize> {
-    let max_ind = table.len() as u64;
-    let mut found = Vec::new();
-    for c in 0u64.. {
-        let i = ((hash_index.wrapping_add(c.wrapping_mul(c))) % max_ind) as usize;
-        if table[i] == [0, 0, 0, 0] {
-            return found;
-        }
-        found.push(i);
-    }
-    unreachable!()
-}
-
 // ── Pattern centroid ordering ───────────────────────────────────────────────
 
 /// Sort a pattern's star indices by each star's Euclidean distance from the
