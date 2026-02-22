@@ -5,8 +5,9 @@
 //! 2. Estimating and subtracting the background (sigma-clipped median)
 //! 3. Thresholding to identify bright pixels
 //! 4. Labeling connected components (blobs)
-//! 5. Computing intensity-weighted centroids for each blob
-//! 6. Converting pixel positions to centered coordinates (origin at image center)
+//! 5. Computing intensity-weighted centroids for each blob, with:
+//!    - Per-blob local background from an annulus of non-blob pixels
+//!    - Quadratic peak refinement (2D fit to 3×3 around peak pixel)
 //!
 //! Requires the `image` feature to be enabled.
 //!
@@ -616,6 +617,16 @@ struct RawCentroid {
 }
 
 /// Compute intensity-weighted centroids for each labeled blob.
+///
+/// For each blob that passes size and elongation filters:
+/// 1. A local background is estimated from the median of non-blob pixels in a
+///    5-pixel annulus around the blob's bounding box.
+/// 2. Intensity-weighted moments are re-accumulated with the local background
+///    subtracted, yielding a center-of-mass (CoM) position.
+/// 3. A 2D quadratic is fit to the 3×3 neighborhood around the peak pixel to
+///    interpolate the sub-pixel intensity maximum. The quadratic position is
+///    used only when it agrees with the CoM (within 0.5 px); otherwise the CoM
+///    is kept as-is.
 ///
 /// When `max_elongation` is set in config, blobs with elongation ratio
 /// (major/minor axis) exceeding the threshold are rejected as non-stellar.

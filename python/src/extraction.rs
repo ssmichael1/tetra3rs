@@ -132,6 +132,11 @@ impl PyExtractionResult {
 
 /// Extract star centroids from a 2D image array.
 ///
+/// Detects stars by sigma-clipping background estimation, thresholding, connected-
+/// component labeling, and intensity-weighted centroiding. Each blob's background
+/// is refined using the median of nearby non-blob pixels (annulus), and a 2D
+/// quadratic fit to the 3×3 peak neighborhood provides sub-pixel precision.
+///
 /// Args:
 ///     image: 2D numpy array (height x width) of pixel values.
 ///         Supported dtypes: float64, float32, uint16, int16, uint8.
