@@ -1,3 +1,4 @@
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
@@ -13,7 +14,7 @@ use crate::distortion::{extract_distortion, PyPolynomialDistortion, PyRadialDist
 /// Example:
 ///     cam = tetra3rs.CameraModel.from_fov(fov_deg=10.0, image_width=2048)
 ///     xi, eta = cam.pixel_to_tanplane(100.0, 200.0)
-#[pyclass(name = "CameraModel", frozen, from_py_object)]
+#[pyclass(name = "CameraModel", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyCameraModel {
     pub(crate) inner: CameraModel,
@@ -152,6 +153,22 @@ impl PyCameraModel {
     ///     (px, py) in pixels from image center.
     fn tanplane_to_pixel(&self, xi: f64, eta: f64) -> (f64, f64) {
         self.inner.tanplane_to_pixel(xi, eta)
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let inner = &slf.borrow().inner;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner: CameraModel = rkyv::from_bytes::<CameraModel, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
     }
 
     fn __repr__(&self) -> String {

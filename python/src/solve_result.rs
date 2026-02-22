@@ -1,5 +1,6 @@
 use numpy::ndarray;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
@@ -11,7 +12,7 @@ use crate::camera_model::PyCameraModel;
 ///
 /// Returned by ``SolverDatabase.solve_from_centroids`` on a successful match.
 /// Contains the camera attitude, matched stars, and error statistics.
-#[pyclass(name = "SolveResult", frozen, from_py_object)]
+#[pyclass(name = "SolveResult", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PySolveResult {
     pub(crate) inner: SolveResult,
@@ -247,6 +248,22 @@ impl PySolveResult {
             .map(|cam| cam.crpix)
             .unwrap_or([0.0, 0.0]);
         PyArray1::from_vec(py, vec![crpix[0], crpix[1]])
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let inner = &slf.borrow().inner;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let result = rkyv::from_bytes::<SolveResult, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self::from_result(result))
     }
 
     fn __repr__(&self) -> String {

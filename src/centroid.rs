@@ -3,10 +3,11 @@
 //! Centroids are the output of the star extraction process and are used as input to the star matching process.
 //!
 
+use crate::rkyv_nalgebra::AsMatrix2Array;
 use crate::Matrix2;
 use crate::Vector3;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Centroid {
     /// Centroid position in pixels along columns (image x-axis).
     /// Origin is at the image center, so values can be positive or negative.
@@ -20,6 +21,7 @@ pub struct Centroid {
     /// The exact meaning is image-dependent.
     pub mass: Option<f32>,
     /// Optional covariance matrix representing the uncertainty in the centroid position.
+    #[rkyv(with = rkyv::with::Map<AsMatrix2Array>)]
     pub cov: Option<Matrix2>,
 }
 

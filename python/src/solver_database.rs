@@ -1,4 +1,5 @@
 use numpy::PyReadonlyArray2;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use tetra3::camera_model::CameraModel;
@@ -21,7 +22,7 @@ use crate::solve_result::PySolveResult;
 ///     db = tetra3rs.SolverDatabase.generate_from_hipparcos("data/hip2.dat")
 ///     db.save_to_file("my_db.bin")
 ///     db = tetra3rs.SolverDatabase.load_from_file("my_db.bin")
-#[pyclass(name = "SolverDatabase")]
+#[pyclass(name = "SolverDatabase", module = "tetra3rs")]
 pub(crate) struct PySolverDatabase {
     inner: SolverDatabase,
 }
@@ -290,6 +291,19 @@ impl PySolverDatabase {
     #[getter]
     fn min_fov_deg(&self) -> f32 {
         self.inner.props.min_fov_rad.to_degrees()
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let bytes = slf.borrow().inner.to_rkyv_bytes();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = rkyv::from_bytes::<SolverDatabase, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
     }
 
     fn __repr__(&self) -> String {

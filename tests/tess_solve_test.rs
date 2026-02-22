@@ -780,9 +780,7 @@ fn test_tess_distortion_fit_and_center_accuracy() {
 ///    - Center pixel RA/Dec within 10" of FITS WCS solution.
 #[test]
 fn test_tess_multi_image_calibration() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("debug")
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
 
     test_data::ensure_test_file("data/hip2.dat");
 
@@ -874,7 +872,13 @@ fn test_tess_multi_image_calibration() {
 
         let clean_pixels: Vec<f32> = trimmed_pixels
             .iter()
-            .map(|&v| if v.is_nan() || v.is_infinite() { 0.0 } else { v })
+            .map(|&v| {
+                if v.is_nan() || v.is_infinite() {
+                    0.0
+                } else {
+                    v
+                }
+            })
             .collect();
 
         let extraction = tetra3::extract_centroids_from_raw(
@@ -916,10 +920,30 @@ fn test_tess_multi_image_calibration() {
     }
 
     let pass_configs = [
-        PassConfig { match_radius: 0.01,  refine_iterations: 10, calibration_order: 3, fov_max_error_deg: 0.5 },
-        PassConfig { match_radius: 0.003, refine_iterations: 10, calibration_order: 5, fov_max_error_deg: 0.5 },
-        PassConfig { match_radius: 0.002, refine_iterations: 10, calibration_order: 6, fov_max_error_deg: 0.5 },
-        PassConfig { match_radius: 0.001, refine_iterations: 10, calibration_order: 6, fov_max_error_deg: 0.5 },
+        PassConfig {
+            match_radius: 0.01,
+            refine_iterations: 10,
+            calibration_order: 3,
+            fov_max_error_deg: 0.5,
+        },
+        PassConfig {
+            match_radius: 0.003,
+            refine_iterations: 10,
+            calibration_order: 5,
+            fov_max_error_deg: 0.5,
+        },
+        PassConfig {
+            match_radius: 0.002,
+            refine_iterations: 10,
+            calibration_order: 6,
+            fov_max_error_deg: 0.5,
+        },
+        PassConfig {
+            match_radius: 0.001,
+            refine_iterations: 10,
+            calibration_order: 6,
+            fov_max_error_deg: 0.5,
+        },
     ];
 
     let mut camera_model: Option<tetra3::CameraModel> = None;
@@ -1011,8 +1035,8 @@ fn test_tess_multi_image_calibration() {
     println!("\n  Final results:");
     let mut failed = 0;
     let n_images = images.len();
-    let arcsec_per_px = results[0].fov_rad.unwrap_or(0.0).to_degrees() as f64 * 3600.0
-        / sci_width as f64;
+    let arcsec_per_px =
+        results[0].fov_rad.unwrap_or(0.0).to_degrees() as f64 * 3600.0 / sci_width as f64;
 
     for (img, result) in images.iter().zip(results.iter()) {
         if result.status != SolveStatus::MatchFound {
@@ -1056,10 +1080,7 @@ fn test_tess_multi_image_calibration() {
         );
 
         if rmse_arcsec > 15.0 {
-            println!(
-                "      *** FAIL: RMSE {:.1}\" exceeds 15\" ***",
-                rmse_arcsec,
-            );
+            println!("      *** FAIL: RMSE {:.1}\" exceeds 15\" ***", rmse_arcsec,);
             failed += 1;
         }
         if sep_arcsec > 10.0 {
@@ -1080,5 +1101,9 @@ fn test_tess_multi_image_calibration() {
         "RESULT: {}/{} solved, {} failures",
         n_solved, n_images, failed,
     );
-    assert_eq!(failed, 0, "{} multi-image calibration checks failed", failed);
+    assert_eq!(
+        failed, 0,
+        "{} multi-image calibration checks failed",
+        failed
+    );
 }
