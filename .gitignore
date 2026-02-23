@@ -3,8 +3,8 @@
 **/*.rs.bk
 *.pdb
 
-# Cargo.lock (uncomment if this is a library)
-Cargo.lock
+# Cargo.lock — committed for reproducible Python sdist builds
+# Cargo.lock
 
 # Python build
 wheel/
@@ -49,6 +49,7 @@ flycheck*
 __pycache__/
 *.pyc
 *.egg-info/
+.pytest_cache/
 wheel/
 
 # Claude files
