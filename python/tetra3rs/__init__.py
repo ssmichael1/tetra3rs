@@ -1,3 +1,7 @@
+from importlib.metadata import version
+
+__version__ = version("tetra3rs")
+
 from .tetra3rs import *  # type: ignore  # noqa: F403
 from .tetra3rs import (
     CameraModel,
