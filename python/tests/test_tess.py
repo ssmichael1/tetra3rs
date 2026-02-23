@@ -7,7 +7,6 @@ and verifies final RMSE and WCS agreement.
 Requires hip2.dat and TESS same-CCD images (downloaded from GCS).
 """
 
-import numpy as np
 import pytest
 
 import tetra3rs
@@ -92,9 +91,7 @@ class TestTessMultiImageCalibration:
         # -- Verify final results --
         # All images should be solved
         n_solved = sum(1 for r in results if r is not None)
-        assert n_solved == len(sectors), (
-            f"Only {n_solved}/{len(sectors)} images solved"
-        )
+        assert n_solved == len(sectors), f"Only {n_solved}/{len(sectors)} images solved"
 
         # Check per-image quality
         arcsec_per_px = results[0].fov_deg * 3600 / sci_size
@@ -124,9 +121,5 @@ class TestTessMultiImageCalibration:
                 f'vs WCS={sep:.2f}"'
             )
 
-            assert rmse < 15.0, (
-                f'Sector {sector}: RMSE {rmse:.1f}" exceeds 15"'
-            )
-            assert sep < 10.0, (
-                f'Sector {sector}: WCS separation {sep:.1f}" exceeds 10"'
-            )
+            assert rmse < 15.0, f'Sector {sector}: RMSE {rmse:.1f}" exceeds 15"'
+            assert sep < 10.0, f'Sector {sector}: WCS separation {sep:.1f}" exceeds 10"'

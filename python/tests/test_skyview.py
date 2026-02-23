@@ -3,9 +3,6 @@
 Requires hip2.dat and SkyView test images (downloaded automatically from GCS).
 """
 
-import math
-
-import numpy as np
 import pytest
 
 import tetra3rs
@@ -26,9 +23,7 @@ class TestSkyViewSolve:
             "cassiopeia_10deg.fits",
         ],
     )
-    def test_solve_skyview_image(
-        self, skyview_db, skyview_image_paths, filename
-    ):
+    def test_solve_skyview_image(self, skyview_db, skyview_image_paths, filename):
         if filename not in skyview_image_paths:
             pytest.skip(f"{filename} not available")
 
@@ -86,72 +81,20 @@ class TestSkyViewSolve:
         assert solve.num_matches >= 4
 
         # Boresight should be within 30' of FITS WCS center
-        error_deg = angular_sep_deg(
-            solve.ra_deg, solve.dec_deg, crval_ra, crval_dec
-        )
+        error_deg = angular_sep_deg(solve.ra_deg, solve.dec_deg, crval_ra, crval_dec)
         error_arcmin = error_deg * 60.0
         assert error_arcmin < 30.0, (
             f"{filename}: boresight error {error_arcmin:.1f}' > 30'"
         )
 
-    def test_extract_and_solve_orion(self, skyview_db, skyview_image_paths):
-        """More detailed test on a single image: check pixel↔world conversion."""
-        filename = "orion_region_10deg.fits"
-        if filename not in skyview_image_paths:
-            pytest.skip(f"{filename} not available")
-
-        path = skyview_image_paths[filename]
-        image, headers = read_fits_image(path, hdu_index=0)
-        h, w = image.shape
-        cdelt1 = headers["CDELT1"]
-        cdelt2 = headers["CDELT2"]
-        fov_h_deg = abs(cdelt2) * w
-
-        ext = tetra3rs.extract_centroids(
-            image,
-            sigma_threshold=10.0,
-            min_pixels=3,
-            max_centroids=200,
-            local_bg_block_size=64,
-            max_elongation=3.0,
-        )
-
-        parity_x = -1.0 if cdelt1 < 0 else 1.0
-        parity_y = -1.0 if cdelt2 < 0 else 1.0
-        centroids = [
-            tetra3rs.Centroid(
-                x=c.x * parity_x,
-                y=c.y * parity_y,
-                brightness=c.brightness,
+        # Extra checks for Orion: pixel↔world conversion, FOV, match count
+        if filename == "orion_region_10deg.fits":
+            ra, dec = solve.pixel_to_world(0.0, 0.0)
+            center_err = angular_sep_deg(ra, dec, crval_ra, crval_dec)
+            assert center_err < 1.0, (
+                f"Center pixel RA/Dec error: {center_err:.3f}°"
             )
-            for c in ext.centroids
-        ]
-
-        solve = skyview_db.solve_from_centroids(
-            centroids,
-            fov_estimate_deg=fov_h_deg,
-            image_width=w,
-            image_height=h,
-            fov_max_error_deg=3.0,
-            solve_timeout_ms=60_000,
-        )
-        assert solve is not None
-
-        # Center pixel → world should be close to the FITS WCS center
-        ra, dec = solve.pixel_to_world(0.0, 0.0)
-        center_err = angular_sep_deg(
-            ra, dec, headers["CRVAL1"], headers["CRVAL2"]
-        )
-        assert center_err < 1.0, (
-            f"Center pixel RA/Dec error: {center_err:.3f}°"
-        )
-
-        # Solved FOV should be close to the FITS FOV
-        assert solve.fov_deg is not None
-        assert abs(solve.fov_deg - fov_h_deg) < 1.0
-
-        # Matched star count should be substantial
-        assert solve.num_matches >= 10
-
-        # RMSE should be reasonable
-        assert solve.rmse_arcsec < 60.0
+            assert solve.fov_deg is not None
+            assert abs(solve.fov_deg - fov_h_deg) < 1.0
+            assert solve.num_matches >= 10
+            assert solve.rmse_arcsec < 60.0
