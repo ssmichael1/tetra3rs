@@ -16,6 +16,7 @@ wheel/
 *.tiff
 *.png
 *.ipynb
+!docs/tutorials/*.ipynb
 
 # IDE / Editor
 .vscode/
@@ -64,3 +65,6 @@ data
 # Build directory for python
 wheel
 build
+
+# MkDocs build output
+site/
