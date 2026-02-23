@@ -927,6 +927,12 @@ fn test_tess_multi_image_calibration() {
             fov_max_error_deg: 0.5,
         },
         PassConfig {
+            match_radius: 0.005,
+            refine_iterations: 10,
+            calibration_order: 4,
+            fov_max_error_deg: 0.5,
+        },
+        PassConfig {
             match_radius: 0.003,
             refine_iterations: 10,
             calibration_order: 5,
@@ -934,12 +940,6 @@ fn test_tess_multi_image_calibration() {
         },
         PassConfig {
             match_radius: 0.002,
-            refine_iterations: 10,
-            calibration_order: 6,
-            fov_max_error_deg: 0.5,
-        },
-        PassConfig {
-            match_radius: 0.001,
             refine_iterations: 10,
             calibration_order: 6,
             fov_max_error_deg: 0.5,
