@@ -12,7 +12,8 @@
 //! the stars against a catalog and returns the camera's pointing direction as a
 //! quaternion — no prior attitude estimate required.
 //!
-//! **[User guide and tutorials](https://ssmichael1.github.io/tetra3rs/)**
+//! **Documentation:** For tutorials, concept guides, and Python API reference, see the
+//! [tetra3rs documentation](https://ssmichael1.github.io/tetra3rs/).
 //!
 //! ## Features
 //!
