@@ -12,7 +12,7 @@
 /// ```
 ///
 /// Undistortion (inverse) is computed via Newton-Raphson iteration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct RadialDistortion {
     /// First radial coefficient (barrel < 0, pincushion > 0).
     pub k1: f64,

@@ -1,4 +1,5 @@
 use numpy::PyArray1;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use tetra3::distortion::polynomial::num_coeffs as poly_num_coeffs;
@@ -24,7 +25,7 @@ pub(crate) fn extract_distortion(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Disto
 /// Example:
 ///     d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
 ///     x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
-#[pyclass(name = "RadialDistortion", frozen, from_py_object)]
+#[pyclass(name = "RadialDistortion", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyRadialDistortion {
     pub(crate) inner: RadialDistortion,
@@ -71,6 +72,22 @@ impl PyRadialDistortion {
         self.inner.undistort(x, y)
     }
 
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let inner = &slf.borrow().inner;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = rkyv::from_bytes::<RadialDistortion, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e})",
@@ -90,7 +107,7 @@ impl PyRadialDistortion {
 /// for cameras where the optical center is offset from the CCD center (e.g. TESS).
 ///
 /// Typically fitted from solve results via ``SolverDatabase.fit_polynomial_distortion()``.
-#[pyclass(name = "PolynomialDistortion", frozen, from_py_object)]
+#[pyclass(name = "PolynomialDistortion", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyPolynomialDistortion {
     pub(crate) inner: PolynomialDistortion,
@@ -182,6 +199,22 @@ impl PyPolynomialDistortion {
     /// Inverse distortion: distorted → ideal (pixel coords, relative to image center).
     fn undistort(&self, x: f64, y: f64) -> (f64, f64) {
         self.inner.undistort(x, y)
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let inner = &slf.borrow().inner;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = rkyv::from_bytes::<PolynomialDistortion, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
     }
 
     fn __repr__(&self) -> String {

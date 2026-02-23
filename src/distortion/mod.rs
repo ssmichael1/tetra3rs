@@ -35,7 +35,7 @@ pub use radial::RadialDistortion;
 /// An enum-based distortion model that supports radial and polynomial
 /// distortion correction. All coordinates are in pixels relative to
 /// the optical center (typically the image center).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum Distortion {
     /// No distortion correction.
     None,

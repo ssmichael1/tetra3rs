@@ -50,7 +50,7 @@ impl Default for CalibrateConfig {
 }
 
 /// Result of camera calibration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CalibrateResult {
     /// The fitted camera model (focal length, crpix, distortion).
     pub camera_model: CameraModel,

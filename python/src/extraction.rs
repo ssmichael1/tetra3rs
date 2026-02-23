@@ -1,9 +1,22 @@
 use numpy::PyReadonlyArray2;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use tetra3::centroid_extraction::CentroidExtractionConfig;
 
 use crate::centroid::PyCentroid;
+
+/// Serializable mirror of PyExtractionResult for pickle support.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct ExtractionResultSer {
+    centroids: Vec<tetra3::Centroid>,
+    image_width: u32,
+    image_height: u32,
+    background_mean: f64,
+    background_sigma: f64,
+    threshold: f64,
+    num_blobs_raw: u64,
+}
 
 /// Convert a 2D numpy array of any supported dtype to Vec<f32>.
 ///
@@ -61,7 +74,7 @@ fn image_to_f32(image: &Bound<'_, pyo3::PyAny>) -> PyResult<(Vec<f32>, u32, u32)
 }
 
 /// Result of centroid extraction from an image.
-#[pyclass(name = "ExtractionResult", frozen)]
+#[pyclass(name = "ExtractionResult", module = "tetra3rs", frozen)]
 pub(crate) struct PyExtractionResult {
     centroids: Vec<PyCentroid>,
     image_width: u32,
@@ -114,6 +127,46 @@ impl PyExtractionResult {
     #[getter]
     fn num_blobs_raw(&self) -> usize {
         self.num_blobs_raw
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let b = slf.borrow();
+        let ser = ExtractionResultSer {
+            centroids: b.centroids.iter().map(|c| c.inner.clone()).collect(),
+            image_width: b.image_width,
+            image_height: b.image_height,
+            background_mean: b.background_mean,
+            background_sigma: b.background_sigma,
+            threshold: b.threshold,
+            num_blobs_raw: b.num_blobs_raw as u64,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ser)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let ser = rkyv::from_bytes::<ExtractionResultSer, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let centroids = ser
+            .centroids
+            .into_iter()
+            .map(|cs| PyCentroid {
+                inner: cs.into(),
+            })
+            .collect();
+        Ok(Self {
+            centroids,
+            image_width: ser.image_width,
+            image_height: ser.image_height,
+            background_mean: ser.background_mean,
+            background_sigma: ser.background_sigma,
+            threshold: ser.threshold,
+            num_blobs_raw: ser.num_blobs_raw as usize,
+        })
     }
 
     fn __repr__(&self) -> String {
