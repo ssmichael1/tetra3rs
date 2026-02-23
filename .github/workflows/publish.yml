@@ -47,7 +47,7 @@ jobs:
           done
 
       - name: Install Python package
-        run: pip install .[test]
+        run: pip install -e .[test]
 
       - name: Run Python tests
         run: pytest python/tests/ -v
