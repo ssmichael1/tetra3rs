@@ -129,11 +129,18 @@ The `SolveResult` includes a `parity_flip` flag (`bool` / `True`/`False` in Pyth
 
 ### Stellar aberration correction
 
-Stellar aberration shifts apparent star positions by up to ~20" due to the observer's barycentric velocity (~30 km/s for Earth). The pattern-matching step is unaffected (inter-star angular separations are invariant to first order in v/c), but the final attitude quaternion is biased by ~20" unless corrected.
+Stellar aberration is the apparent displacement of star positions caused by the finite speed of light combined with the observer's velocity — analogous to how rain appears to fall at an angle when you're moving. For Earth-based observers, this shifts apparent star positions by up to ~20" (v/c ≈ 10⁻⁴ rad). Without correction, the solved attitude is biased by up to ~20".
 
 To correct for aberration, pass the observer's barycentric velocity (ICRS, km/s) via `SolveConfig::observer_velocity_km_s`. The solver applies a first-order correction (s' = s + β − s(s·β)) to all catalog star vectors before matching and refinement, producing an unbiased attitude.
 
 The convenience function `earth_barycentric_velocity()` provides an approximate Earth velocity using a circular-orbit model (~0.5 km/s accuracy, sufficient for the ~20" effect):
+
+> [!NOTE]
+> Enabling aberration correction shifts the entire solved pointing by up to ~20", not just the within-field residuals. This is the physically correct result — without it, the reported attitude is biased by the observer's velocity. Most plate solvers (e.g. [astrometry.net](https://astrometry.net/)) do not account for aberration, so comparing results may show a systematic offset of up to ~20" when this correction is enabled.
+
+
+> [!NOTE]
+> For near-Earth observers, stellar aberration is dominated by Earth's orbital velocity around the Sun (~30 km/s). The surface velocity due to Earth's rotation (~0.46 km/s at the equator) and LEO orbital velocity (~7.5 km/s) are small by comparison and can usually be neglected.
 
 **Rust:**
 
@@ -163,8 +170,6 @@ result = db.solve_from_centroids(
     observer_velocity_km_s=v,
 )
 ```
-
-For spacecraft in non-Earth orbits, compute the barycentric velocity from your ephemeris and pass it directly.
 
 ## Catalog support
 
