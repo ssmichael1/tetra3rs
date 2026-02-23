@@ -1,6 +1,7 @@
 # tetra3rs
 
 [![Crates.io](https://img.shields.io/crates/v/tetra3)](https://crates.io/crates/tetra3)
+[![PyPI](https://img.shields.io/pypi/v/tetra3rs)](https://pypi.org/project/tetra3rs/)
 [![docs.rs](https://img.shields.io/docsrs/tetra3)](https://docs.rs/tetra3)
 [![License](https://img.shields.io/crates/l/tetra3)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
