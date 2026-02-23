@@ -81,6 +81,7 @@ nav:
       - Quick Start: getting-started/quickstart.md
   - Concepts:
       - Algorithm Overview: concepts/algorithm.md
+      - Centroid Extraction: concepts/centroid-extraction.md
       - Coordinate Conventions: concepts/coordinates.md
       - Camera Model: concepts/camera-model.md
       - WCS Output: concepts/wcs.md
