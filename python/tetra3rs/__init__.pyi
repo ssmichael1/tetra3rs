@@ -7,6 +7,9 @@ exposed to Python via PyO3.
 
 from __future__ import annotations
 
+__version__: str
+__git_hash__: str
+
 import datetime
 import numpy as np
 import numpy.typing as npt
