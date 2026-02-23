@@ -7,9 +7,11 @@
 
 A fast, robust lost-in-space star plate solver written in Rust.
 
+Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required. The goal is to make this fast and robust enough for use in embedded systems such as star trackers on satellites.
+
+> [!IMPORTANT]
 > **Status: Alpha** — The core solver is based on well-vetted algorithms but has only been tested against a limited set of images. The API is not yet stable and may change between releases.  Having said that, I've made it work on both low-SNR images taken with a camera in my backyard and with high-star-density images from more-complex telescopes.
 
-Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required. The goal is to make this fast and robust enough for use in embedded systems such as star trackers on satellites.
 
 ## Features
 
@@ -56,14 +58,15 @@ This builds and installs the `tetra3rs` Python module into your current environm
 
 ### Obtaining the Hipparcos catalog
 
-Download `hip2.dat` from the [Hipparcos, the New Reduction (I/311)](http://cdsarc.u-strasbg.fr/ftp/I/311/) and place it at `data/hip2.dat`:
+Download `hip2.dat` from the [Hipparcos, the New Reduction (I/311)](http://cdsarc.u-strasbg.fr/ftp/I/311/) and place it at `data/hip2.dat`. 
 
 ```sh
 mkdir -p data
 curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
 gunzip data/hip2.dat.gz
 ```
-
+> [!NOTE]
+> The Hipparcos catalog is also downloaded automatically when running the integration tests (`cargo test --features image`).
 
 
 ### Example
@@ -200,7 +203,7 @@ The test suite includes:
 
 - **3-image basic solve** — solves each image and verifies the boresight is within 30' of the FITS WCS solution.
 - **3-image distortion fit** — fits a 4th-order polynomial distortion model from each solved image, re-solves, and verifies the center pixel RA/Dec is within 1' of the FITS WCS solution.
-- **10-image multi-image calibration** — solves 10 images from the same CCD (Camera 1, CCD 1) across different sectors with 4 tiered solve+calibrate passes (progressively tighter match radius and higher polynomial order). After calibration, all 10 images achieve RMSE <15" and center pixel agreement with FITS WCS <10".
+- **10-image multi-image calibration** — solves 10 images from the same CCD (Camera 1, CCD 1) across different sectors with 4 tiered solve+calibrate passes (progressively tighter match radius and higher polynomial order). After calibration, all 10 images achieve RMSE < 9" and center pixel agreement with FITS WCS < 3".
 
 ```sh
 cargo test --test tess_solve_test --features image -- --nocapture
