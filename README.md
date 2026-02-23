@@ -45,7 +45,7 @@ pip install maturin
 maturin develop --release
 ```
 
-This builds and installs the `tetra3rs` Python module into your current environment.
+This builds and installs the `tetra3rs` Python module into your current environment. All Python objects (`SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`) support `pickle` serialization via zero-copy [rkyv](https://github.com/rkyv/rkyv).
 
 ## Quick start
 
@@ -187,9 +187,13 @@ cargo test --test skyview_solve_test --features image -- --nocapture
 
 ### TESS integration test
 
-Solves 3 Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
+Solves Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
 
-The solved boresight is compared against the true boresight computed from the full WCS (CRPIX, SIP, CD matrix, TAN deprojection) at the center of the science region. Passing a `CameraModel` with a fitted `PolynomialDistortion` (via `calibrate_camera`) significantly reduces residuals on distorted wide-field optics like TESS.
+The test suite includes:
+
+- **3-image basic solve** — solves each image and verifies the boresight is within 30' of the FITS WCS solution.
+- **3-image distortion fit** — fits a 4th-order polynomial distortion model from each solved image, re-solves, and verifies the center pixel RA/Dec is within 1' of the FITS WCS solution.
+- **10-image multi-image calibration** — solves 10 images from the same CCD (Camera 1, CCD 1) across different sectors with 4 tiered solve+calibrate passes (progressively tighter match radius and higher polynomial order). After calibration, all 10 images achieve RMSE <15" and center pixel agreement with FITS WCS <10".
 
 ```sh
 cargo test --test tess_solve_test --features image -- --nocapture

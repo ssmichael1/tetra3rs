@@ -33,6 +33,9 @@
 //!   positions caused by the observer's barycentric velocity; set
 //!   [`SolveConfig::observer_velocity_km_s`] (use [`earth_barycentric_velocity`] for
 //!   ground-based / Earth-orbiting observers)
+//! - **Tested on real spacecraft imagery** — successfully solves NASA TESS Full Frame
+//!   Images (~12° FOV, significant optical distortion). Multi-image calibration across
+//!   10 TESS sectors achieves RMSE <15″ and <10″ agreement with FITS WCS solutions
 //!
 //! ## Example
 //!
