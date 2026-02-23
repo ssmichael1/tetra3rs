@@ -74,7 +74,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - uses: pypa/cibuildwheel@v3
+      - uses: pypa/cibuildwheel@v3.3
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
 
