@@ -15,6 +15,7 @@ from .tetra3rs import (
     SolverDatabase,
     earth_barycentric_velocity,
     extract_centroids,
+    __git_hash__,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "SolverDatabase",
     "earth_barycentric_velocity",
     "extract_centroids",
+    "__git_hash__",
 ]
