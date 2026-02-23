@@ -56,9 +56,9 @@ class TestTessMultiImageCalibration:
         pass_configs = [
             # (match_radius, refine_iterations, cal_order, fov_error_deg)
             (0.01, 10, 3, 0.5),
+            (0.005, 10, 4, 0.5),
             (0.003, 10, 5, 0.5),
             (0.002, 10, 6, 0.5),
-            (0.001, 10, 6, 0.5),
         ]
 
         camera_model = None
