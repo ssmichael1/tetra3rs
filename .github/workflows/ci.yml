@@ -34,7 +34,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data
-          key: test-data-v2
+          key: test-data-v3
 
       - name: Download test data
         if: steps.cache-test-data.outputs.cache-hit != 'true'
@@ -51,7 +51,7 @@ jobs:
           for f in moderate_density_field sparse_field_north_ecliptic dense_galactic_plane; do
             curl --fail -o "data/tess_test_images/${f}.fits" "$BASE/tess_test_images/${f}.fits"
           done
-          for s in 01 02 03 04 05 06 14 15 16 17; do
+          for s in 01 02 03 04 05 06 13 14 15 17; do
             curl --fail -o "data/tess_same_ccd/sector${s}_cam1_ccd1.fits" "$BASE/tess_same_ccd/sector${s}_cam1_ccd1.fits"
           done
 
@@ -66,3 +66,14 @@ jobs:
 
       - name: Run TESS integration test
         run: cargo test --test tess_solve_test --features image -- --nocapture
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python package
+        run: pip install .[test]
+
+      - name: Run Python tests
+        run: pytest python/tests/ -v

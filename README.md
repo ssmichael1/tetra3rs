@@ -39,15 +39,17 @@ cargo add tetra3
 
 ### Python
 
-Python bindings are available via [PyO3](https://pyo3.rs/) in the `python/` directory. The package is not yet on PyPI; install from source using [maturin](https://www.maturin.rs/):
+Binary wheels are available on [PyPI](https://pypi.org/project/tetra3rs/) for Linux (x86_64, ARM64), macOS (ARM64), and Windows (x86_64):
 
 ```sh
-cd python
-pip install maturin
-maturin develop --release
+pip install tetra3rs
 ```
 
-This builds and installs the `tetra3rs` Python module into your current environment.
+To build from source (requires a Rust toolchain):
+
+```sh
+pip install .
+```
 
 
 
@@ -222,9 +224,9 @@ cargo test --test tess_solve_test --features image -- --nocapture
 
 ## Credits
 
-This project is a Rust implementation of the **tetra3** / **cedar-solve** algorithm.
+This project is based upon the **tetra3** / **cedar-solve** algorithms.
 
-- **[cedar-solve](https://github.com/smroid/cedar-solve)** — Steven Rosenthal's Python plate solver, which this implementation closely follows (excellent work!)
+- **[cedar-solve](https://github.com/smroid/cedar-solve)** — Steven Rosenthal's Python plate solver, which this implementation closely follows for the star quad generation and matching.  (excellent work!)
 - **[tetra3](https://github.com/esa/tetra3)** — the original Python implementation by Gustav Pettersson at ESA
 - **Paper**: G. Pettersson, "Tetra3: a fast and robust star identification algorithm," ESA GNC Conference, 2023
 
