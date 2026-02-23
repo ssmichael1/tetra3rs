@@ -43,6 +43,7 @@ tetra3rs = ["py.typed", "*.pyi"]
 target = "tetra3rs/tetra3rs"
 path = "python/Cargo.toml"
 binding = "PyO3"
+debug = false
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

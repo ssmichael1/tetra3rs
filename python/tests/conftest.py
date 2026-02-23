@@ -250,8 +250,11 @@ def hip2_path():
 
 @pytest.fixture(scope="session")
 def skyview_db(hip2_path):
-    """Generate a database suitable for 10deg SkyView images."""
-    return tetra3rs.SolverDatabase.generate_from_hipparcos(
+    """Load (or generate and cache) a database suitable for 10deg SkyView images."""
+    cache_path = os.path.join(DATA_DIR, "test_skyview_db.rkyv")
+    if os.path.exists(cache_path):
+        return tetra3rs.SolverDatabase.load_from_file(cache_path)
+    db = tetra3rs.SolverDatabase.generate_from_hipparcos(
         hip2_path,
         max_fov_deg=15.0,
         star_max_magnitude=7.0,
@@ -261,6 +264,9 @@ def skyview_db(hip2_path):
         epoch_proper_motion_year=2000.0,
         catalog_nside=8,
     )
+    os.makedirs(DATA_DIR, exist_ok=True)
+    db.save_to_file(cache_path)
+    return db
 
 
 SKYVIEW_IMAGES = [
@@ -295,8 +301,11 @@ TESS_SECTORS = [1, 2, 3, 4, 5, 6, 13, 14, 15, 17]
 
 @pytest.fixture(scope="session")
 def tess_db(hip2_path):
-    """Generate a database suitable for TESS ~12deg FOV images."""
-    return tetra3rs.SolverDatabase.generate_from_hipparcos(
+    """Load (or generate and cache) a database suitable for TESS ~12deg FOV images."""
+    cache_path = os.path.join(DATA_DIR, "test_tess_db.rkyv")
+    if os.path.exists(cache_path):
+        return tetra3rs.SolverDatabase.load_from_file(cache_path)
+    db = tetra3rs.SolverDatabase.generate_from_hipparcos(
         hip2_path,
         max_fov_deg=14.0,
         pattern_max_error=0.005,
@@ -305,6 +314,9 @@ def tess_db(hip2_path):
         verification_stars_per_fov=3000,
         epoch_proper_motion_year=2018.0,
     )
+    os.makedirs(DATA_DIR, exist_ok=True)
+    db.save_to_file(cache_path)
+    return db
 
 
 @pytest.fixture(scope="session")

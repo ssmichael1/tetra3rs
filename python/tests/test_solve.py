@@ -19,36 +19,27 @@ from .conftest import angular_sep_deg, project_stars_tan
 
 
 class TestDatabaseGeneration:
-    def test_generate_and_properties(self, hip2_path):
-        db = tetra3rs.SolverDatabase.generate_from_hipparcos(
-            hip2_path, max_fov_deg=15.0, star_max_magnitude=7.0
-        )
-        assert db.num_stars > 1000
-        assert db.num_patterns > 10_000
-        assert abs(db.max_fov_deg - 15.0) < 0.1
+    def test_generate_and_properties(self, skyview_db):
+        assert skyview_db.num_stars > 1000
+        assert skyview_db.num_patterns > 10_000
+        assert abs(skyview_db.max_fov_deg - 15.0) < 0.1
 
-    def test_save_load_roundtrip(self, hip2_path):
-        db = tetra3rs.SolverDatabase.generate_from_hipparcos(
-            hip2_path, max_fov_deg=10.0, star_max_magnitude=6.0
-        )
+    def test_save_load_roundtrip(self, skyview_db):
         with tempfile.NamedTemporaryFile(suffix=".rkyv", delete=False) as f:
             path = f.name
         try:
-            db.save_to_file(path)
+            skyview_db.save_to_file(path)
             db2 = tetra3rs.SolverDatabase.load_from_file(path)
-            assert db2.num_stars == db.num_stars
-            assert db2.num_patterns == db.num_patterns
+            assert db2.num_stars == skyview_db.num_stars
+            assert db2.num_patterns == skyview_db.num_patterns
         finally:
             os.unlink(path)
 
-    def test_pickle_roundtrip(self, hip2_path):
-        db = tetra3rs.SolverDatabase.generate_from_hipparcos(
-            hip2_path, max_fov_deg=10.0, star_max_magnitude=6.0
-        )
-        data = pickle.dumps(db)
+    def test_pickle_roundtrip(self, skyview_db):
+        data = pickle.dumps(skyview_db)
         db2 = pickle.loads(data)
-        assert db2.num_stars == db.num_stars
-        assert db2.num_patterns == db.num_patterns
+        assert db2.num_stars == skyview_db.num_stars
+        assert db2.num_patterns == skyview_db.num_patterns
 
 
 # ---------------------------------------------------------------------------
