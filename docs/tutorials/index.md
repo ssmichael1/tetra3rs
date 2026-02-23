@@ -3,7 +3,7 @@
 Interactive Jupyter notebooks demonstrating tetra3rs workflows.
 
 !!! note
-    These notebooks use pre-saved outputs and do not require running. The data files (TESS FITS images, Hipparcos catalog) are not included in the repository — see [Installation](../getting-started/installation.md) for how to obtain them if you want to run the notebooks yourself.
+    These notebooks are executed during the documentation build using real TESS FITS images and the Hipparcos catalog. To run them locally, download the test data — see [Installation](../getting-started/installation.md).
 
 ## Available Tutorials
 

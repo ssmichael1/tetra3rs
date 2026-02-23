@@ -1,0 +1,61 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache test data
+        id: cache-test-data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: test-data-v3
+
+      - name: Download test data
+        if: steps.cache-test-data.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/tess_same_ccd
+          BASE=https://storage.googleapis.com/tetra3rs-testvecs
+          curl --fail -o data/hip2.dat "$BASE/hip2.dat"
+          for s in 01 02 03 04 05 06 13 14 15 17; do
+            curl --fail -o "data/tess_same_ccd/sector${s}_cam1_ccd1.fits" \
+              "$BASE/tess_same_ccd/sector${s}_cam1_ccd1.fits"
+          done
+
+      - name: Install tetra3rs
+        run: pip install -e .[test]
+
+      - name: Install docs dependencies
+        run: pip install -r docs/requirements.txt
+
+      - name: Build and deploy docs
+        run: mkdocs gh-deploy --force
