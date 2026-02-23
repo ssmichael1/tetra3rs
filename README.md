@@ -23,7 +23,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit SIP polynomial or radial distortion models from one or more solved images via `calibrate_camera`
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
-- **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's orbital velocity
+- **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's barycentric velocity
 
 ## Installation
 
@@ -47,6 +47,9 @@ maturin develop --release
 
 This builds and installs the `tetra3rs` Python module into your current environment.
 
+[!NOTE]
+All Python objects (`SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`) support `pickle` serialization via zero-copy [rkyv](https://github.com/rkyv/rkyv).
+
 ## Quick start
 
 ### Obtaining the Hipparcos catalog
@@ -58,6 +61,8 @@ mkdir -p data
 curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
 gunzip data/hip2.dat.gz
 ```
+
+
 
 ### Example
 
@@ -187,9 +192,13 @@ cargo test --test skyview_solve_test --features image -- --nocapture
 
 ### TESS integration test
 
-Solves 3 Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
+Solves Full Frame Images (~12° FOV) from NASA's [TESS](https://tess.mit.edu/) (Transiting Exoplanet Survey Satellite), a space telescope that images large swaths of sky to detect exoplanets via stellar transits. TESS images have significant optical distortion and use CD-matrix WCS with SIP polynomial corrections. The science region is trimmed from the raw 2136×2078 frame to 2048×2048 before centroid extraction.
 
-The solved boresight is compared against the true boresight computed from the full WCS (CRPIX, SIP, CD matrix, TAN deprojection) at the center of the science region. Passing a `CameraModel` with a fitted `PolynomialDistortion` (via `calibrate_camera`) significantly reduces residuals on distorted wide-field optics like TESS.
+The test suite includes:
+
+- **3-image basic solve** — solves each image and verifies the boresight is within 30' of the FITS WCS solution.
+- **3-image distortion fit** — fits a 4th-order polynomial distortion model from each solved image, re-solves, and verifies the center pixel RA/Dec is within 1' of the FITS WCS solution.
+- **10-image multi-image calibration** — solves 10 images from the same CCD (Camera 1, CCD 1) across different sectors with 4 tiered solve+calibrate passes (progressively tighter match radius and higher polynomial order). After calibration, all 10 images achieve RMSE <15" and center pixel agreement with FITS WCS <10".
 
 ```sh
 cargo test --test tess_solve_test --features image -- --nocapture

@@ -8,7 +8,7 @@ use tetra3::Star;
 ///     ra_deg: Right ascension in degrees [0, 360).
 ///     dec_deg: Declination in degrees [-90, 90].
 ///     magnitude: Visual magnitude.
-#[pyclass(name = "CatalogStar", frozen, from_py_object)]
+#[pyclass(name = "CatalogStar", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyCatalogStar {
     pub(crate) inner: Star,

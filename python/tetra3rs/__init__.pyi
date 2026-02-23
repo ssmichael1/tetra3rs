@@ -16,12 +16,17 @@ class CameraModel:
     """Camera intrinsics model: focal length, optical center, parity, and distortion.
 
     Encapsulates the mapping between pixel coordinates and tangent-plane coordinates.
+    Supports ``pickle`` serialization.
 
     Example::
 
         cam = tetra3rs.CameraModel.from_fov(fov_deg=10.0, image_width=2048, image_height=1536)
         xi, eta = cam.pixel_to_tanplane(100.0, 200.0)
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "CameraModel": ...
 
     def __init__(
         self,
@@ -110,7 +115,12 @@ class CalibrateResult:
     """Result of camera calibration.
 
     Returned by ``SolverDatabase.calibrate_camera``.
+    Supports ``pickle`` serialization.
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "CalibrateResult": ...
 
     @property
     def camera_model(self) -> CameraModel:
@@ -148,7 +158,12 @@ class SolveResult:
 
     Returned by ``SolverDatabase.solve_from_centroids`` on a successful match.
     Contains the camera attitude, matched stars, and error statistics.
+    Supports ``pickle`` serialization.
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "SolveResult": ...
 
     @property
     def rotation_matrix_icrs_to_camera(self) -> npt.NDArray[np.float64]:
@@ -355,7 +370,12 @@ class ExtractionResult:
     """Result of centroid extraction from an image.
 
     Returned by ``extract_centroids``.
+    Supports ``pickle`` serialization.
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "ExtractionResult": ...
 
     @property
     def centroids(self) -> list[Centroid]:
@@ -397,7 +417,12 @@ class Centroid:
 
     Returned by ``extract_centroids``. Centroids use pixel coordinates
     with the origin at the image center, +X right, +Y down.
+    Supports ``pickle`` serialization.
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "Centroid": ...
 
     def __init__(self, x: float, y: float, brightness: Optional[float] = None) -> None:
         """Create a new Centroid.
@@ -460,6 +485,7 @@ class SolverDatabase:
     """A star pattern database for plate solving.
 
     Generate from the Hipparcos catalog, or load a previously saved database.
+    Supports ``pickle`` serialization.
 
     Example::
 
@@ -467,6 +493,10 @@ class SolverDatabase:
         db.save_to_file("my_db.bin")
         db = tetra3rs.SolverDatabase.load_from_file("my_db.bin")
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "SolverDatabase": ...
 
     @staticmethod
     def generate_from_hipparcos(
@@ -750,12 +780,17 @@ class RadialDistortion:
     """Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
 
     Coordinates are in pixels relative to the optical center (image center).
+    Supports ``pickle`` serialization.
 
     Example::
 
         d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
         x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "RadialDistortion": ...
 
     def __init__(
         self,
@@ -804,7 +839,12 @@ class PolynomialDistortion:
     Typically fitted from solve results via
     ``SolverDatabase.fit_polynomial_distortion()``, or constructed directly
     from coefficient arrays (e.g. extracted from a FITS WCS SIP model).
+    Supports ``pickle`` serialization.
     """
+
+    def __reduce__(self) -> tuple: ...
+    @staticmethod
+    def _from_pickle_bytes(data: bytes) -> "PolynomialDistortion": ...
 
     def __init__(
         self,

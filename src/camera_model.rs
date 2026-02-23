@@ -24,7 +24,7 @@ use crate::distortion::Distortion;
 /// Encapsulates focal length, sensor dimensions, optical center offset, parity,
 /// and lens distortion into a single struct that maps between pixel and
 /// tangent-plane coordinates.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CameraModel {
     /// Focal length in pixels: `f = (width/2) / tan(fov/2)`.
     pub focal_length_px: f64,

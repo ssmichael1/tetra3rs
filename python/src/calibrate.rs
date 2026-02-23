@@ -1,4 +1,7 @@
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+
+use tetra3::CalibrateResult;
 
 use crate::camera_model::PyCameraModel;
 
@@ -13,7 +16,7 @@ use crate::camera_model::PyCameraModel;
 ///     n_inliers: Number of inlier star matches used in the fit.
 ///     n_outliers: Number of outlier star matches rejected by sigma clipping.
 ///     iterations: Number of sigma-clip iterations performed.
-#[pyclass(name = "CalibrateResult", frozen)]
+#[pyclass(name = "CalibrateResult", module = "tetra3rs", frozen)]
 pub(crate) struct PyCalibrateResult {
     pub(crate) camera_model: PyCameraModel,
     pub(crate) rmse_before_px: f64,
@@ -59,6 +62,39 @@ impl PyCalibrateResult {
     #[getter]
     fn iterations(&self) -> u32 {
         self.iterations
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let b = slf.borrow();
+        let ser = CalibrateResult {
+            camera_model: b.camera_model.inner.clone(),
+            rmse_before_px: b.rmse_before_px,
+            rmse_after_px: b.rmse_after_px,
+            n_inliers: b.n_inliers,
+            n_outliers: b.n_outliers,
+            iterations: b.iterations,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ser)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let ser = rkyv::from_bytes::<CalibrateResult, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self {
+            camera_model: PyCameraModel {
+                inner: ser.camera_model,
+            },
+            rmse_before_px: ser.rmse_before_px,
+            rmse_after_px: ser.rmse_after_px,
+            n_inliers: ser.n_inliers,
+            n_outliers: ser.n_outliers,
+            iterations: ser.iterations,
+        })
     }
 
     fn __repr__(&self) -> String {

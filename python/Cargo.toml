@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 tetra3 = { path = "..", features = ["image"] }
 pyo3 = { version = "0.28.1", features = ["extension-module", "anyhow"] }
 numpy = "0.28.0"
+rkyv = { version = "0.8", features = ["bytecheck"] }
+nalgebra = "0.34.1"
 
 [build-dependencies]
 pyo3-build-config = "0.28.1"

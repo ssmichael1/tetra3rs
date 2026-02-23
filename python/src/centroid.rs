@@ -1,5 +1,6 @@
 use numpy::ndarray;
 use numpy::PyArray2;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::distortion::extract_distortion;
@@ -11,7 +12,7 @@ use crate::distortion::extract_distortion;
 ///     y: Y position in pixels (origin at image center, +Y down).
 ///     brightness: Integrated intensity above background.
 ///     cov: 2x2 intensity-weighted covariance matrix [[σxx, σxy], [σxy, σyy]] in pixels².
-#[pyclass(name = "Centroid", frozen, from_py_object)]
+#[pyclass(name = "Centroid", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyCentroid {
     pub(crate) inner: tetra3::Centroid,
@@ -138,6 +139,22 @@ impl PyCentroid {
                 cov: self.inner.cov,
             },
         })
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
+        let inner = &slf.borrow().inner;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            .to_vec();
+        let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
+        Ok((from_bytes.unbind(), (bytes,)))
+    }
+
+    #[staticmethod]
+    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+        let inner = rkyv::from_bytes::<tetra3::Centroid, rkyv::rancor::Error>(data)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
     }
 
     fn __repr__(&self) -> String {
