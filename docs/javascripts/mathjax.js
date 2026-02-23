@@ -10,3 +10,11 @@ window.MathJax = {
     processHtmlClass: "arithmatex",
   },
 };
+
+// Re-typeset MathJax after MkDocs Material instant navigation
+document$.subscribe(function () {
+  MathJax.startup.output.clearCache();
+  MathJax.typesetClear();
+  MathJax.texReset();
+  MathJax.typesetPromise();
+});
