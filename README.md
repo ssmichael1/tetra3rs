@@ -23,7 +23,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit SIP polynomial or radial distortion models from one or more solved images via `calibrate_camera`
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
-- **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's orbital velocity
+- **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's barycentric velocity
 
 ## Installation
 
@@ -45,7 +45,10 @@ pip install maturin
 maturin develop --release
 ```
 
-This builds and installs the `tetra3rs` Python module into your current environment. All Python objects (`SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`) support `pickle` serialization via zero-copy [rkyv](https://github.com/rkyv/rkyv).
+This builds and installs the `tetra3rs` Python module into your current environment.
+
+[!NOTE]
+All Python objects (`SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`) support `pickle` serialization via zero-copy [rkyv](https://github.com/rkyv/rkyv).
 
 ## Quick start
 
@@ -58,6 +61,8 @@ mkdir -p data
 curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
 gunzip data/hip2.dat.gz
 ```
+
+
 
 ### Example
 
