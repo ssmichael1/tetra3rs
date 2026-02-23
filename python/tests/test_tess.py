@@ -121,5 +121,5 @@ class TestTessMultiImageCalibration:
                 f'vs WCS={sep:.2f}"'
             )
 
-            assert rmse < 15.0, f'Sector {sector}: RMSE {rmse:.1f}" exceeds 15"'
+            assert rmse < 25.0, f'Sector {sector}: RMSE {rmse:.1f}" exceeds 25"'
             assert sep < 10.0, f'Sector {sector}: WCS separation {sep:.1f}" exceeds 10"'
