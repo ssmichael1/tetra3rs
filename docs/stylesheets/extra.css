@@ -1,3 +1,8 @@
+/* Widen the main content area */
+.md-grid {
+    max-width: 1440px;
+}
+
 /* Constrain notebook cell outputs to the content width */
 .jp-OutputArea-output,
 .jp-RenderedHTMLCommon,
