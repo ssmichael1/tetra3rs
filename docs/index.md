@@ -28,25 +28,13 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 
 ## Quick Links
 
-<div class="grid cards" markdown>
-
--   :material-download: **[Installation](getting-started/installation.md)**
-
-    Install from PyPI or build from source
-
--   :material-rocket-launch: **[Quick Start](getting-started/quickstart.md)**
-
-    Get solving in minutes
-
--   :material-book-open: **[Concepts](concepts/algorithm.md)**
-
-    Understand the algorithm and coordinate conventions
-
--   :material-api: **[API Reference](api/index.md)**
-
-    Full Python API documentation
-
-</div>
+| | |
+|---|---|
+| **[Installation](getting-started/installation.md)** | Install from PyPI or build from source |
+| **[Quick Start](getting-started/quickstart.md)** | Get solving in minutes |
+| **[Concepts](concepts/algorithm.md)** | Understand the algorithm and coordinate conventions |
+| **[API Reference](api/index.md)** | Full Python API documentation |
+| **[Tutorials](tutorials/index.md)** | Interactive Jupyter notebook examples |
 
 ## Credits
 
