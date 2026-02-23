@@ -1,11 +1,5 @@
-shared-version = true
-pre-release-commit-message = "release v{{version}}"
-tag-name = "v{{version}}"
-tag-message = "v{{version}}"
-
-# Keep pyproject.toml version in sync with Cargo.toml
 [[pre-release-replacements]]
 file = "pyproject.toml"
-search = '^version = "[^"]*"'
+search = 'version = "[0-9]+\.[0-9]+\.[0-9]+"'
 replace = 'version = "{{version}}"'
-min = 1
+exactly = 1
