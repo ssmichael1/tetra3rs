@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/tetra3)](https://crates.io/crates/tetra3)
 [![PyPI](https://img.shields.io/pypi/v/tetra3rs)](https://pypi.org/project/tetra3rs/)
 [![docs.rs](https://img.shields.io/docsrs/tetra3)](https://docs.rs/tetra3)
-[![Docs](https://img.shields.io/badge/docs-guide-blue)](https://tetra3.dev/)
+[![Docs](https://img.shields.io/badge/docs-guide-blue)](https://tetra3rs.dev/)
 [![License](https://img.shields.io/crates/l/tetra3)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
@@ -11,7 +11,7 @@ A fast, robust lost-in-space star plate solver written in Rust.
 
 Given a set of star centroids extracted from a camera image, tetra3rs identifies the stars against a catalog and returns the camera's pointing direction as a quaternion — no prior attitude estimate required. The goal is to make this fast and robust enough for use in embedded systems such as star trackers on satellites.
 
-**Documentation:** For tutorials, concept guides, and Python API reference, see the [tetra3rs documentation](https://tetra3.dev/). For Rust API docs, see [docs.rs](https://docs.rs/tetra3).
+**Documentation:** For tutorials, concept guides, and Python API reference, see the [tetra3rs documentation](https://tetra3rs.dev/). For Rust API docs, see [docs.rs](https://docs.rs/tetra3).
 
 > [!IMPORTANT]
 > **Status: Alpha** — The core solver is based on well-vetted algorithms but has only been tested against a limited set of images. The API is not yet stable and may change between releases.  Having said that, I've made it work on both low-SNR images taken with a camera in my backyard and with high-star-density images from more-complex telescopes.
