@@ -1,6 +1,6 @@
 site_name: tetra3rs
 site_description: Fast, robust lost-in-space star plate solver written in Rust
-site_url: https://ssmichael1.github.io/tetra3rs/
+site_url: https://tetra3.dev/
 repo_url: https://github.com/ssmichael1/tetra3rs
 repo_name: ssmichael1/tetra3rs
 
