@@ -32,9 +32,13 @@ To enable centroid extraction from images, add the `image` feature:
 cargo add tetra3 --features image
 ```
 
-## Obtaining the Hipparcos Catalog
+## Hipparcos Catalog
 
-tetra3rs generates its pattern database from the Hipparcos catalog. Download `hip2.dat`:
+tetra3rs generates its pattern database from the Hipparcos catalog.
+
+**Python:** The catalog is bundled automatically via the [`hipparcos-catalog`](https://pypi.org/project/hipparcos-catalog/) dependency — no manual download needed.
+
+**Rust:** Download `hip2.dat` for use with the Rust API:
 
 ```sh
 mkdir -p data
@@ -43,4 +47,4 @@ gunzip data/hip2.dat.gz
 ```
 
 !!! note
-    The Hipparcos catalog is also downloaded automatically when running the integration tests (`cargo test --features image`).
+    The Hipparcos catalog is also downloaded automatically when running the Rust integration tests (`cargo test --features image`).

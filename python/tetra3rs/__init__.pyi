@@ -492,7 +492,7 @@ class SolverDatabase:
 
     Example::
 
-        db = tetra3rs.SolverDatabase.generate_from_hipparcos("data/hip2.dat")
+        db = tetra3rs.SolverDatabase.generate_from_hipparcos()
         db.save_to_file("my_db.bin")
         db = tetra3rs.SolverDatabase.load_from_file("my_db.bin")
     """
@@ -503,7 +503,7 @@ class SolverDatabase:
 
     @staticmethod
     def generate_from_hipparcos(
-        catalog_path: str,
+        catalog_path: Optional[str] = None,
         max_fov_deg: float = 30.0,
         min_fov_deg: Optional[float] = None,
         star_max_magnitude: Optional[float] = None,
@@ -518,7 +518,8 @@ class SolverDatabase:
         """Generate a database from the Hipparcos catalog file.
 
         Args:
-            catalog_path: Path to the hip2.dat file.
+            catalog_path: Path to the hip2.dat file. If None, uses the bundled
+                catalog from the ``hipparcos-catalog`` package.
             max_fov_deg: Maximum field of view in degrees.
             min_fov_deg: Minimum field of view in degrees.
                 None means same as max_fov_deg (single-scale).

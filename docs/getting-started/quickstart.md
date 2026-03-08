@@ -7,9 +7,8 @@
 ```python
 import tetra3rs
 
-# Generate from the Hipparcos catalog
+# Generate from the Hipparcos catalog (bundled automatically)
 db = tetra3rs.SolverDatabase.generate_from_hipparcos(
-    "data/hip2.dat",
     max_fov_deg=20.0,
     epoch_proper_motion_year=2025.0,
 )

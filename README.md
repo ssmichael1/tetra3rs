@@ -62,9 +62,11 @@ pip install .
 
 ## Quick start
 
-### Obtaining the Hipparcos catalog
+### Hipparcos catalog
 
-Download `hip2.dat` from the [Hipparcos, the New Reduction (I/311)](http://cdsarc.u-strasbg.fr/ftp/I/311/) and place it at `data/hip2.dat`. 
+**Python:** The Hipparcos catalog is bundled automatically via the [`hipparcos-catalog`](https://pypi.org/project/hipparcos-catalog/) dependency — no manual download needed.
+
+**Rust:** Download `hip2.dat` from the [Hipparcos, the New Reduction (I/311)](http://cdsarc.u-strasbg.fr/ftp/I/311/):
 
 ```sh
 mkdir -p data
@@ -72,8 +74,7 @@ curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
 gunzip data/hip2.dat.gz
 ```
 > [!NOTE]
-> The Hipparcos catalog is also downloaded automatically when running the integration tests (`cargo test --features image`).
-
+> The Hipparcos catalog is also downloaded automatically when running the Rust integration tests (`cargo test --features image`).
 
 ### Example
 

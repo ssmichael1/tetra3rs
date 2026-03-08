@@ -19,7 +19,7 @@ use crate::solve_result::PySolveResult;
 /// Generate from the Hipparcos catalog, or load a previously saved database.
 ///
 /// Example:
-///     db = tetra3rs.SolverDatabase.generate_from_hipparcos("data/hip2.dat")
+///     db = tetra3rs.SolverDatabase.generate_from_hipparcos()
 ///     db.save_to_file("my_db.bin")
 ///     db = tetra3rs.SolverDatabase.load_from_file("my_db.bin")
 #[pyclass(name = "SolverDatabase", module = "tetra3rs")]
@@ -32,7 +32,8 @@ impl PySolverDatabase {
     /// Generate a database from the Hipparcos catalog file.
     ///
     /// Args:
-    ///     catalog_path: Path to the hip2.dat file.
+    ///     catalog_path: Path to the hip2.dat file. If None, uses the bundled
+    ///         catalog from the ``hipparcos-catalog`` package.
     ///     max_fov_deg: Maximum field of view in degrees. Default 30.
     ///     min_fov_deg: Minimum field of view in degrees. None = same as max (single-scale).
     ///     star_max_magnitude: Faintest star to include. None = auto.
@@ -40,7 +41,7 @@ impl PySolverDatabase {
     ///     epoch_proper_motion_year: Year for proper motion propagation. Default 2025.
     #[staticmethod]
     #[pyo3(signature = (
-        catalog_path,
+        catalog_path = None,
         max_fov_deg = 30.0,
         min_fov_deg = None,
         star_max_magnitude = None,
@@ -53,7 +54,8 @@ impl PySolverDatabase {
         catalog_nside = 16,
     ))]
     fn generate_from_hipparcos(
-        catalog_path: &str,
+        py: Python<'_>,
+        catalog_path: Option<&str>,
         max_fov_deg: f32,
         min_fov_deg: Option<f32>,
         star_max_magnitude: Option<f32>,
@@ -65,6 +67,17 @@ impl PySolverDatabase {
         epoch_proper_motion_year: Option<f64>,
         catalog_nside: u32,
     ) -> PyResult<Self> {
+        // Resolve catalog path: use provided path, or fall back to hipparcos_catalog package
+        let resolved_path: String = match catalog_path {
+            Some(p) => p.to_string(),
+            None => {
+                let module = py.import("hipparcos_catalog")?;
+                let path_obj = module.call_method0("catalog_path")?;
+                path_obj.str()?.to_string()
+            }
+        };
+        let catalog_path = resolved_path.as_str();
+
         let config = GenerateDatabaseConfig {
             max_fov_deg,
             min_fov_deg,
@@ -77,7 +90,7 @@ impl PySolverDatabase {
             epoch_proper_motion_year,
             catalog_nside,
         };
-        let db = SolverDatabase::generate_from_hipparcos(catalog_path, &config)
+        let db = SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PySolverDatabase { inner: db })
     }

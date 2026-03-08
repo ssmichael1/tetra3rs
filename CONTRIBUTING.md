@@ -6,12 +6,13 @@ Contributions are welcome! Whether it's bug reports, feature requests, documenta
 
 1. Fork the repository and clone your fork
 2. Install Rust (stable toolchain)
-3. Download the Hipparcos catalog:
+3. Download the Hipparcos catalog (needed for Rust integration tests):
    ```sh
    mkdir -p data
    curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
    gunzip data/hip2.dat.gz
    ```
+   > For Python, the catalog is bundled automatically via the `hipparcos-catalog` package.
 4. Run the tests:
    ```sh
    cargo test                          # unit tests
