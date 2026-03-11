@@ -21,7 +21,7 @@
 //!    f. Re-associate: project catalog stars to pixel space, match to centroids.
 //!    g. Converge when updates vanish, no outliers rejected, and match set is stable.
 
-use nalgebra::{Matrix3, Vector3};
+use numeris::{Matrix3, Vector3};
 use tracing::debug;
 
 use crate::starcatalog::StarCatalog;
@@ -346,19 +346,19 @@ pub fn wcs_refine(
 
     // Extract initial theta from rotation matrix
     // Camera +X direction in ICRS = first row of R
-    let cam_x_icrs = nalgebra::Vector3::<f64>::new(
+    let cam_x_icrs = Vector3::<f64>::from_array([
         initial_rotation[(0, 0)] as f64,
         initial_rotation[(0, 1)] as f64,
         initial_rotation[(0, 2)] as f64,
-    );
+    ]);
 
     // Tangent-plane basis vectors at CRVAL
     let sin_a = crval_ra.sin();
     let cos_a = crval_ra.cos();
     let sin_d = crval_dec.sin();
     let cos_d = crval_dec.cos();
-    let e_xi = nalgebra::Vector3::<f64>::new(-sin_a, cos_a, 0.0);
-    let e_eta = nalgebra::Vector3::<f64>::new(-sin_d * cos_a, -sin_d * sin_a, cos_d);
+    let e_xi = Vector3::<f64>::from_array([-sin_a, cos_a, 0.0]);
+    let e_eta = Vector3::<f64>::from_array([-sin_d * cos_a, -sin_d * sin_a, cos_d]);
 
     // theta = angle of camera X in the tangent plane
     let xi_comp = cam_x_icrs.dot(&e_xi);
@@ -544,11 +544,11 @@ pub fn wcs_refine(
             };
 
             // Query catalog stars near boresight
-            let boresight = Vector3::new(
+            let boresight = Vector3::from_array([
                 crval_dec.cos() * crval_ra.cos(),
                 crval_dec.cos() * crval_ra.sin(),
                 crval_dec.sin(),
-            );
+            ]);
             let max_cent_dist_px = centroids_px
                 .iter()
                 .map(|(x, y)| (x * x + y * y).sqrt())
@@ -556,7 +556,7 @@ pub fn wcs_refine(
             let search_radius =
                 (ps * max_cent_dist_px * 1.5).max(match_radius_rad as f64 * 2.0);
             let nearby_indices = star_catalog.query_indices_from_uvec(
-                Vector3::new(boresight.x as f32, boresight.y as f32, boresight.z as f32),
+                Vector3::from_array([boresight[0] as f32, boresight[1] as f32, boresight[2] as f32]),
                 search_radius as f32,
             );
 
@@ -781,9 +781,9 @@ pub fn wcs_to_rotation(
     let cos_d = crval_dec.cos();
 
     // Tangent-plane basis vectors in ICRS
-    let e_xi = Vector3::new(-sin_a, cos_a, 0.0);
-    let e_eta = Vector3::new(-sin_d * cos_a, -sin_d * sin_a, cos_d);
-    let boresight = Vector3::new(cos_d * cos_a, cos_d * sin_a, sin_d);
+    let e_xi = Vector3::from_array([-sin_a, cos_a, 0.0]);
+    let e_eta = Vector3::from_array([-sin_d * cos_a, -sin_d * sin_a, cos_d]);
+    let boresight = Vector3::from_array([cos_d * cos_a, cos_d * sin_a, sin_d]);
 
     // Camera axes in ICRS (unnormalized)
     // Camera +X pixel direction → (CD11, CD21) in tangent-plane
@@ -796,17 +796,11 @@ pub fn wcs_to_rotation(
 
     // Build rotation matrix: rows are camera axes expressed in ICRS
     // R maps ICRS → camera: camera_vec = R * icrs_vec
-    let rot = Matrix3::new(
-        cam_x_icrs.x as f32,
-        cam_x_icrs.y as f32,
-        cam_x_icrs.z as f32,
-        cam_y_icrs.x as f32,
-        cam_y_icrs.y as f32,
-        cam_y_icrs.z as f32,
-        boresight.x as f32,
-        boresight.y as f32,
-        boresight.z as f32,
-    );
+    let rot = Matrix3::new([
+        [cam_x_icrs[0] as f32, cam_x_icrs[1] as f32, cam_x_icrs[2] as f32],
+        [cam_y_icrs[0] as f32, cam_y_icrs[1] as f32, cam_y_icrs[2] as f32],
+        [boresight[0] as f32, boresight[1] as f32, boresight[2] as f32],
+    ]);
 
     // FOV from pixel scale in X direction
     let ps_x = cam_x_icrs_raw.norm(); // radians per pixel
@@ -976,8 +970,8 @@ mod tests {
         assert!(!parity);
         assert!((fov.to_degrees() - 10.0).abs() < 0.01, "FOV: {}", fov.to_degrees());
 
-        let bore_cam = rot * Vector3::new(0.0_f32, 1.0, 0.0);
-        assert!(bore_cam.z > 0.99, "boresight z = {}", bore_cam.z);
+        let bore_cam = rot.vecmul(&Vector3::from_array([0.0_f32, 1.0, 0.0]));
+        assert!(bore_cam[2] > 0.99, "boresight z = {}", bore_cam[2]);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 use std::borrow::Cow;
 use std::time::Instant;
 
-use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
+use numeris::{Matrix3, Quaternion, Vector3};
 use tracing::debug;
 
 use crate::Centroid;
@@ -380,7 +380,7 @@ impl SolverDatabase {
                     // a lazily-created x-flipped copy for verification matching.
                     let parity_flip;
                     let working_vectors: &[[f32; 3]];
-                    if rotation_matrix.determinant() < 0.0 {
+                    if rotation_matrix.det() < 0.0 {
                         // Wrong parity (e.g. FITS image with CDELT1 < 0).
                         parity_flip = true;
                         // Recompute rotation with flipped image pattern vectors
@@ -389,7 +389,7 @@ impl SolverDatabase {
                             [-orig[0], orig[1], orig[2]]
                         });
                         rotation_matrix = find_rotation_matrix(&matched_img_flip, &matched_cat);
-                        if rotation_matrix.determinant() < 0.0 {
+                        if rotation_matrix.det() < 0.0 {
                             continue; // still a reflection — skip
                         }
                         // Lazily create flipped centroid vectors for matching
@@ -412,7 +412,7 @@ impl SolverDatabase {
 
                     // Find catalog stars within the diagonal FOV
                     let image_center_icrs =
-                        rotation_matrix.transpose() * Vector3::new(0.0, 0.0, 1.0);
+                        rotation_matrix.transpose().vecmul(&Vector3::from_array([0.0, 0.0, 1.0]));
                     let nearby_inds = self
                         .star_catalog
                         .query_indices_from_uvec(image_center_icrs, fov_diagonal / 2.0);
@@ -421,12 +421,12 @@ impl SolverDatabase {
                     let mut nearby_cam_positions: Vec<(usize, f32, f32)> = Vec::new();
                     for &cat_idx in &nearby_inds {
                         let sv = &star_vectors[cat_idx];
-                        let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
-                        let cam_v = rotation_matrix * icrs_v;
+                        let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
+                        let cam_v = rotation_matrix.vecmul(&icrs_v);
                         // Only keep stars in front of the camera (z > 0)
-                        if cam_v.z > 0.0 {
-                            let cx = cam_v.x / cam_v.z; // radians from boresight
-                            let cy = cam_v.y / cam_v.z;
+                        if cam_v[2] > 0.0 {
+                            let cx = cam_v[0] / cam_v[2]; // radians from boresight
+                            let cy = cam_v[1] / cam_v[2];
                             nearby_cam_positions.push((cat_idx, cx, cy));
                         }
                     }
@@ -522,9 +522,9 @@ impl SolverDatabase {
                         let iz = 1.0f32;
                         let norm = (ix * ix + iy * iy + iz * iz).sqrt();
                         let img_v = refined_rotation.transpose()
-                            * Vector3::new(ix / norm, iy / norm, iz / norm);
+                            .vecmul(&Vector3::from_array([ix / norm, iy / norm, iz / norm]));
                         let sv = &star_vectors[cat_star_idx];
-                        let cat_v = Vector3::new(sv[0], sv[1], sv[2]);
+                        let cat_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
                         let cross = img_v.cross(&cat_v);
                         let ang = cross.norm().atan2(img_v.dot(&cat_v));
                         angular_residuals.push(ang);
@@ -547,8 +547,7 @@ impl SolverDatabase {
                     let max_err = angular_residuals.last().copied().unwrap_or(0.0);
 
                     // Convert rotation to quaternion
-                    let rot3 = Rotation3::from_matrix_unchecked(refined_rotation);
-                    let quat = UnitQuaternion::from_rotation_matrix(&rot3);
+                    let quat = Quaternion::from_rotation_matrix(&refined_rotation);
 
                     // Build result camera model with refined focal length and detected parity
                     let mut result_cam = config.camera_model.clone();
@@ -704,25 +703,25 @@ fn find_rotation_matrix<const N: usize>(
     image_vectors: &[[f32; 3]; N],
     catalog_vectors: &[[f32; 3]; N],
 ) -> Matrix3<f32> {
-    let mut h = nalgebra::Matrix3::<f64>::zeros();
+    let mut h = numeris::Matrix3::<f64>::zeros();
     for i in 0..N {
-        let img = nalgebra::Vector3::<f64>::new(
+        let img = numeris::Vector3::<f64>::from_array([
             image_vectors[i][0] as f64,
             image_vectors[i][1] as f64,
             image_vectors[i][2] as f64,
-        );
-        let cat = nalgebra::Vector3::<f64>::new(
+        ]);
+        let cat = numeris::Vector3::<f64>::from_array([
             catalog_vectors[i][0] as f64,
             catalog_vectors[i][1] as f64,
             catalog_vectors[i][2] as f64,
-        );
-        h += img * cat.transpose();
+        ]);
+        h = h + img.outer(&cat);
     }
 
-    let svd = h.svd(true, true);
-    let u = svd.u.unwrap();
-    let v_t = svd.v_t.unwrap();
-    let r64 = u * v_t;
+    let svd = h.svd().expect("SVD failed");
+    let u = svd.u();
+    let v_t = svd.vt();
+    let r64 = *u * *v_t;
     r64.cast::<f32>()
 }
 

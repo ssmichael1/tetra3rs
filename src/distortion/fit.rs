@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use nalgebra::{DMatrix, DVector, Matrix3};
+use numeris::{DynMatrix, DynVector, Matrix3};
 use tracing::debug;
 
 use crate::centroid::Centroid;
@@ -540,7 +540,7 @@ fn gather_matched_points(
         };
 
         let pixel_scale = fov_rad / image_width as f32;
-        let rot: Matrix3<f32> = *quat.to_rotation_matrix().matrix();
+        let rot: Matrix3<f32> = quat.to_rotation_matrix();
 
         let parity_sign: f64 = if sr.parity_flip { -1.0 } else { 1.0 };
 
@@ -556,16 +556,16 @@ fn gather_matched_points(
             };
 
             let sv = &database.star_vectors[star_idx];
-            let icrs_v = nalgebra::Vector3::new(sv[0], sv[1], sv[2]);
-            let cam_v = rot * icrs_v;
+            let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
+            let cam_v = rot.vecmul(&icrs_v);
 
-            if cam_v.z <= 0.0 {
+            if cam_v[2] <= 0.0 {
                 continue;
             }
 
             // Project to pixel coordinates
-            let x_ideal = parity_sign * (cam_v.x as f64) / (cam_v.z as f64) / (pixel_scale as f64);
-            let y_ideal = (cam_v.y as f64) / (cam_v.z as f64) / (pixel_scale as f64);
+            let x_ideal = parity_sign * (cam_v[0] as f64) / (cam_v[2] as f64) / (pixel_scale as f64);
+            let y_ideal = (cam_v[1] as f64) / (cam_v[2] as f64) / (pixel_scale as f64);
 
             let x_obs = cents[cent_idx].x as f64;
             let y_obs = cents[cent_idx].y as f64;
@@ -597,8 +597,8 @@ fn fit_radial_ls(points: &[MatchedPoint], mask: &[bool]) -> (f64, f64, f64) {
 
     // Each point contributes 2 rows (x and y equations)
     let nrows = inlier_count * 2;
-    let mut a_mat = DMatrix::<f64>::zeros(nrows, 3);
-    let mut b_vec = DVector::<f64>::zeros(nrows);
+    let mut a_mat = DynMatrix::<f64>::zeros(nrows, 3, 0.0);
+    let mut b_vec = DynVector::<f64>::zeros(nrows, 0.0);
 
     let mut row = 0;
     for (i, p) in points.iter().enumerate() {
@@ -624,10 +624,9 @@ fn fit_radial_ls(points: &[MatchedPoint], mask: &[bool]) -> (f64, f64, f64) {
         row += 1;
     }
 
-    let svd = a_mat.svd(true, true);
-    let coeffs = svd
-        .solve(&b_vec, 1e-12)
-        .unwrap_or_else(|_| DVector::zeros(3));
+    let coeffs = a_mat
+        .solve_qr(&b_vec)
+        .unwrap_or_else(|_| DynVector::zeros(3, 0.0));
 
     (coeffs[0], coeffs[1], coeffs[2])
 }
@@ -701,9 +700,9 @@ pub(super) fn fit_poly_ls(
     }
 
     // Fit x-axis: (x_obs - x_ideal) = Σ A_pq * u^p * v^q * scale
-    let mut a_mat = DMatrix::<f64>::zeros(n_inliers, ncoeffs);
-    let mut bx_vec = DVector::<f64>::zeros(n_inliers);
-    let mut by_vec = DVector::<f64>::zeros(n_inliers);
+    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs, 0.0);
+    let mut bx_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
+    let mut by_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
 
     let mut row = 0;
     for (i, p) in points.iter().enumerate() {
@@ -721,15 +720,13 @@ pub(super) fn fit_poly_ls(
         row += 1;
     }
 
-    let svd = a_mat.svd(true, true);
-
-    if let Ok(cx) = svd.solve(&bx_vec, 1e-12) {
+    if let Ok(cx) = a_mat.solve_qr(&bx_vec) {
         for j in 0..ncoeffs {
             a_coeffs[j] = cx[j];
         }
     }
 
-    if let Ok(cy) = svd.solve(&by_vec, 1e-12) {
+    if let Ok(cy) = a_mat.solve_qr(&by_vec) {
         for j in 0..ncoeffs {
             b_coeffs[j] = cy[j];
         }
@@ -753,9 +750,9 @@ pub(super) fn fit_inverse_poly_ls(
         return;
     }
 
-    let mut a_mat = DMatrix::<f64>::zeros(n_inliers, ncoeffs);
-    let mut bx_vec = DVector::<f64>::zeros(n_inliers);
-    let mut by_vec = DVector::<f64>::zeros(n_inliers);
+    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs, 0.0);
+    let mut bx_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
+    let mut by_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
 
     let mut row = 0;
     for (i, p) in points.iter().enumerate() {
@@ -773,15 +770,13 @@ pub(super) fn fit_inverse_poly_ls(
         row += 1;
     }
 
-    let svd = a_mat.svd(true, true);
-
-    if let Ok(cx) = svd.solve(&bx_vec, 1e-12) {
+    if let Ok(cx) = a_mat.solve_qr(&bx_vec) {
         for j in 0..ncoeffs {
             ap_coeffs[j] = cx[j];
         }
     }
 
-    if let Ok(cy) = svd.solve(&by_vec, 1e-12) {
+    if let Ok(cy) = a_mat.solve_qr(&by_vec) {
         for j in 0..ncoeffs {
             bp_coeffs[j] = cy[j];
         }

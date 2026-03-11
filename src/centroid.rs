@@ -3,7 +3,7 @@
 //! Centroids are the output of the star extraction process and are used as input to the star matching process.
 //!
 
-use crate::rkyv_nalgebra::AsMatrix2Array;
+use crate::rkyv_numeris::AsMatrix2Array;
 use crate::Matrix2;
 use crate::Vector3;
 
@@ -37,6 +37,6 @@ impl Centroid {
         // For small angles: uvec ≈ (x, y, 1) normalized
         let z = 1.0;
         let norm = (x * x + y * y + z * z).sqrt();
-        Vector3::new(x / norm, y / norm, z / norm)
+        Vector3::from_array([x / norm, y / norm, z / norm])
     }
 }

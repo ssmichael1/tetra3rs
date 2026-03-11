@@ -10,7 +10,7 @@
 //! For multiple images, uses alternating per-image attitude refinement (via WCS refine)
 //! and global polynomial fitting, which correctly handles different per-image pointings.
 
-use nalgebra::Matrix3;
+use numeris::Matrix3;
 use tracing::debug;
 
 use crate::camera_model::CameraModel;
@@ -282,7 +282,7 @@ fn multi_image_calibrate(
             Some(f) => f,
             None => continue,
         };
-        let rot: Matrix3<f32> = *quat.to_rotation_matrix().matrix();
+        let rot: Matrix3<f32> = quat.to_rotation_matrix();
         image_data.push(ImageData {
             sr_idx: idx,
             rotation: rot,
@@ -406,16 +406,16 @@ fn multi_image_calibrate(
 
             for &(cent_idx, cat_idx) in &ref_img.matches {
                 let sv = &database.star_vectors[cat_idx];
-                let icrs_v = nalgebra::Vector3::new(sv[0], sv[1], sv[2]);
-                let cam_v = rot * icrs_v;
+                let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
+                let cam_v = rot.vecmul(&icrs_v);
 
-                if cam_v.z <= 0.0 {
+                if cam_v[2] <= 0.0 {
                     continue;
                 }
 
                 // Ideal position using global pixel scale (consistent across all images)
-                let x_ideal = parity_sign * (cam_v.x as f64) / (cam_v.z as f64) / global_pixel_scale;
-                let y_ideal = (cam_v.y as f64) / (cam_v.z as f64) / global_pixel_scale;
+                let x_ideal = parity_sign * (cam_v[0] as f64) / (cam_v[2] as f64) / global_pixel_scale;
+                let y_ideal = (cam_v[1] as f64) / (cam_v[2] as f64) / global_pixel_scale;
 
                 // Observed position: raw centroid (no undistortion applied)
                 let x_obs = cents[cent_idx].x as f64;

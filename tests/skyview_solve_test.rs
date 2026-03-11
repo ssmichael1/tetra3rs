@@ -6,7 +6,7 @@
 
 mod test_data;
 
-use nalgebra::{Rotation3, UnitQuaternion, Vector3};
+use numeris::{Quaternion, Vector3};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -165,43 +165,44 @@ fn read_f32_image(path: &str, hdu: &FitsHdu) -> Vec<f32> {
 fn radec_to_uvec(ra_deg: f64, dec_deg: f64) -> Vector3<f32> {
     let ra = ra_deg.to_radians();
     let dec = dec_deg.to_radians();
-    Vector3::new(
+    Vector3::from_array([
         (dec.cos() * ra.cos()) as f32,
         (dec.cos() * ra.sin()) as f32,
         dec.sin() as f32,
-    )
+    ])
 }
 
 fn uvec_to_radec(v: &Vector3<f32>) -> (f64, f64) {
-    let dec = (v.z as f64).asin();
-    let ra = (v.y as f64).atan2(v.x as f64);
+    let dec = (v[2] as f64).asin();
+    let ra = (v[1] as f64).atan2(v[0] as f64);
     let ra_deg = ra.to_degrees();
     let ra_deg = if ra_deg < 0.0 { ra_deg + 360.0 } else { ra_deg };
     (ra_deg, dec.to_degrees())
 }
 
 fn angular_separation(a: &Vector3<f32>, b: &Vector3<f32>) -> f32 {
-    let cross = a.cross(b).norm();
+    let cross = a.cross(b);
+    let cross_norm = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
     let dot = a.dot(b);
-    cross.atan2(dot)
+    cross_norm.atan2(dot)
 }
 
 /// Build attitude quaternion from CDELT-based WCS (TAN projection, no rotation).
 ///
 /// CDELT1 < 0 (RA increases left/east), CDELT2 > 0 (Dec increases up/north).
 /// No CROTA2, no CD matrix — axes are aligned with RA/Dec.
-fn wcs_to_quaternion_cdelt(hdu: &FitsHdu) -> UnitQuaternion<f32> {
+fn wcs_to_quaternion_cdelt(hdu: &FitsHdu) -> Quaternion<f32> {
     let crval1 = get_f64(hdu, "CRVAL1").unwrap();
     let crval2 = get_f64(hdu, "CRVAL2").unwrap();
 
     let ra0 = crval1.to_radians();
     let dec0 = crval2.to_radians();
 
-    let boresight = Vector3::new(
+    let boresight = Vector3::from_array([
         (dec0.cos() * ra0.cos()) as f32,
         (dec0.cos() * ra0.sin()) as f32,
         dec0.sin() as f32,
-    );
+    ]);
 
     let sin_ra = ra0.sin() as f32;
     let cos_ra = ra0.cos() as f32;
@@ -217,26 +218,20 @@ fn wcs_to_quaternion_cdelt(hdu: &FitsHdu) -> UnitQuaternion<f32> {
     // After parity correction (negating centroid x for CDELT1 < 0), the
     // extracted centroids use +X = East, +Y = North, +Z = boresight.
     // This quaternion must match that convention.
-    let e_east = Vector3::new(-sin_ra, cos_ra, 0.0).normalize();
-    let e_north = Vector3::new(-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec).normalize();
+    let e_east = Vector3::from_array([-sin_ra, cos_ra, 0.0]).normalize();
+    let e_north = Vector3::from_array([-sin_dec * cos_ra, -sin_dec * sin_ra, cos_dec]).normalize();
 
     let cam_x_icrs = e_east;
     let cam_y_icrs = e_north;
     let cam_z_icrs = boresight.normalize();
 
-    let rot = nalgebra::Matrix3::new(
-        cam_x_icrs.x,
-        cam_x_icrs.y,
-        cam_x_icrs.z,
-        cam_y_icrs.x,
-        cam_y_icrs.y,
-        cam_y_icrs.z,
-        cam_z_icrs.x,
-        cam_z_icrs.y,
-        cam_z_icrs.z,
-    );
+    let rot = numeris::Matrix3::new([
+        [cam_x_icrs[0], cam_x_icrs[1], cam_x_icrs[2]],
+        [cam_y_icrs[0], cam_y_icrs[1], cam_y_icrs[2]],
+        [cam_z_icrs[0], cam_z_icrs[1], cam_z_icrs[2]],
+    ]);
 
-    UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot))
+    Quaternion::from_rotation_matrix(&rot)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -459,7 +454,7 @@ fn test_skyview_fits_solve() {
 
         // ── Validate centroids by projecting catalog stars using known WCS ──
         let wcs_q = wcs_to_quaternion_cdelt(image_hdu);
-        let wcs_boresight_uvec = wcs_q.inverse() * Vector3::new(0.0, 0.0, 1.0);
+        let wcs_boresight_uvec = wcs_q.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
         let (wcs_ra, wcs_dec) = uvec_to_radec(&wcs_boresight_uvec);
         println!(
             "  WCS quaternion boresight: RA={:.4}°, Dec={:.4}°",
@@ -475,11 +470,11 @@ fn test_skyview_fits_solve() {
         let mut catalog_centroids: Vec<(f32, f32, f32)> = Vec::new(); // (x_px, y_px, mag)
         for &idx in &nearby_indices {
             let sv = &db.star_vectors[idx];
-            let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
+            let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
             let cam_v = wcs_q * icrs_v;
-            if cam_v.z > 0.01 {
-                let cx_rad = cam_v.x / cam_v.z;
-                let cy_rad = cam_v.y / cam_v.z;
+            if cam_v[2] > 0.01 {
+                let cx_rad = cam_v[0] / cam_v[2];
+                let cy_rad = cam_v[1] / cam_v[2];
                 let half_fov_h = (fov_h_deg as f32 / 2.0).to_radians();
                 let half_fov_v = (fov_v_deg as f32 / 2.0).to_radians();
                 if cx_rad.abs() < half_fov_h && cy_rad.abs() < half_fov_v {
@@ -562,7 +557,7 @@ fn test_skyview_fits_solve() {
         );
         if ref_result.status == SolveStatus::MatchFound {
             let ref_q = ref_result.qicrs2cam.unwrap();
-            let ref_boresight = ref_q.inverse() * Vector3::new(0.0, 0.0, 1.0);
+            let ref_boresight = ref_q.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
             let ref_err = angular_separation(&ref_boresight, &true_boresight);
             println!(
                 "  Reference boresight error: {:.1}\"",
@@ -578,7 +573,7 @@ fn test_skyview_fits_solve() {
 
         if result.status == SolveStatus::MatchFound {
             let solved_q = result.qicrs2cam.unwrap();
-            let solved_boresight = solved_q.inverse() * Vector3::new(0.0, 0.0, 1.0);
+            let solved_boresight = solved_q.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
             let (solved_ra, solved_dec) = uvec_to_radec(&solved_boresight);
             let error_rad = angular_separation(&solved_boresight, &true_boresight);
             let error_arcmin = error_rad.to_degrees() * 60.0;

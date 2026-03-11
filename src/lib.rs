@@ -143,7 +143,7 @@ mod centroid;
 #[cfg(feature = "image")]
 pub mod centroid_extraction;
 pub mod distortion;
-pub mod rkyv_nalgebra;
+pub mod rkyv_numeris;
 pub mod solver;
 pub mod star;
 pub mod starcatalog;
@@ -171,6 +171,6 @@ pub use starcatalog::*;
 // Note: 32-bit floats are sufficient for most of the math
 // We switch to 64-bit for the SVD used in the final solver step,
 // as 32-bit floats have shown to be insufficiently accurate for that step.
-pub type Quaternion = nalgebra::UnitQuaternion<f32>;
-pub type Vector3 = nalgebra::Vector3<f32>;
-pub type Matrix2 = nalgebra::Matrix2<f32>;
+pub type Quaternion = numeris::Quaternion<f32>;
+pub type Vector3 = numeris::Vector3<f32>;
+pub type Matrix2 = numeris::Matrix2<f32>;

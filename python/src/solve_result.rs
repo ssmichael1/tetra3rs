@@ -31,8 +31,7 @@ impl PySolveResult {
             .qicrs2cam
             .as_ref()
             .expect("MatchFound must have quaternion");
-        let rot = q.to_rotation_matrix();
-        let m = rot.matrix();
+        let m = q.to_rotation_matrix();
         let rot_elements = [
             m[(0, 0)] as f64,
             m[(0, 1)] as f64,

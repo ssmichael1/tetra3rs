@@ -21,7 +21,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::camera_model::CameraModel;
 use crate::distortion::Distortion;
-use crate::rkyv_nalgebra::AsQuatArray;
+use crate::rkyv_numeris::AsQuatArray;
 use crate::{Quaternion, StarCatalog};
 
 // ── Pattern hash table entry ────────────────────────────────────────────────
@@ -426,8 +426,7 @@ impl SolveResult {
             let cy = yr / norm;
             let cz = 1.0 / norm;
 
-            let rot = q.to_rotation_matrix();
-            let m = rot.matrix();
+            let m = q.to_rotation_matrix();
             let ix = m[(0, 0)] as f64 * cx + m[(1, 0)] as f64 * cy + m[(2, 0)] as f64 * cz;
             let iy = m[(0, 1)] as f64 * cx + m[(1, 1)] as f64 * cy + m[(2, 1)] as f64 * cz;
             let iz = m[(0, 2)] as f64 * cx + m[(1, 2)] as f64 * cy + m[(2, 2)] as f64 * cz;
@@ -488,8 +487,7 @@ impl SolveResult {
             let iy = ra.sin() * cos_dec;
             let iz = dec.sin();
 
-            let rot = q.to_rotation_matrix();
-            let m = rot.matrix();
+            let m = q.to_rotation_matrix();
             let cx = m[(0, 0)] as f64 * ix + m[(0, 1)] as f64 * iy + m[(0, 2)] as f64 * iz;
             let cy = m[(1, 0)] as f64 * ix + m[(1, 1)] as f64 * iy + m[(1, 2)] as f64 * iz;
             let cz = m[(2, 0)] as f64 * ix + m[(2, 1)] as f64 * iy + m[(2, 2)] as f64 * iz;

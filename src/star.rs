@@ -13,13 +13,13 @@ pub struct Star {
 
 impl Star {
     /// Unit vector pointing to the star's position on the celestial sphere.
-    pub fn uvec(&self) -> nalgebra::Vector3<f32> {
+    pub fn uvec(&self) -> numeris::Vector3<f32> {
         let ra = self.ra_rad;
         let dec = self.dec_rad;
         // fast cosine, sine at once:
         let (rasin, racos) = ra.sin_cos();
         let (decsin, deccos) = dec.sin_cos();
-        nalgebra::Vector3::new(deccos * racos, deccos * rasin, decsin)
+        numeris::Vector3::from_array([deccos * racos, deccos * rasin, decsin])
     }
 }
 

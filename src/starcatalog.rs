@@ -14,7 +14,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use nalgebra::Vector3;
+use numeris::Vector3;
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::Star;
@@ -124,7 +124,7 @@ impl StarCatalog {
         let z_step = 2.0 / self.n_lat as f32;
         let lon_step = TAU / self.n_lon as f32;
 
-        let z_center = dir.z.clamp(-1.0, 1.0);
+        let z_center = dir[2].clamp(-1.0, 1.0);
         let z_min = (z_center - radius.sin()).max(-1.0);
         let z_max = (z_center + radius.sin()).min(1.0);
 
@@ -137,7 +137,7 @@ impl StarCatalog {
             let mut lon_half_span = (radius / cos_dec).min(PI);
             lon_half_span += lon_step;
 
-            let mut phi = dir.y.atan2(dir.x);
+            let mut phi = dir[1].atan2(dir[0]);
             if phi < 0.0 {
                 phi += TAU;
             }
@@ -263,7 +263,7 @@ fn wrap_angle(theta_rad: f32) -> f32 {
 fn radec_to_uvec(ra_rad: f32, dec_rad: f32) -> Vector3<f32> {
     let (sin_ra, cos_ra) = ra_rad.sin_cos();
     let (sin_dec, cos_dec) = dec_rad.sin_cos();
-    Vector3::new(cos_dec * cos_ra, cos_dec * sin_ra, sin_dec)
+    Vector3::from_array([cos_dec * cos_ra, cos_dec * sin_ra, sin_dec])
 }
 
 fn normalize_or_fallback(v: Vector3<f32>) -> Vector3<f32> {
@@ -271,7 +271,7 @@ fn normalize_or_fallback(v: Vector3<f32>) -> Vector3<f32> {
     if n > 0.0 {
         v / n
     } else {
-        Vector3::new(1.0, 0.0, 0.0)
+        Vector3::from_array([1.0, 0.0, 0.0])
     }
 }
 

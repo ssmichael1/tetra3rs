@@ -878,7 +878,7 @@ fn compute_blob_centroids(
                 x_px: final_x as f32,
                 y_px: final_y as f32,
                 mass: sum_i as f32,
-                cov: crate::Matrix2::new(cxx as f32, cxy as f32, cxy as f32, cyy as f32),
+                cov: crate::Matrix2::new([[cxx as f32, cxy as f32], [cxy as f32, cyy as f32]]),
             })
         })
         .collect()

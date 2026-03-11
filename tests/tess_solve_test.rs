@@ -9,7 +9,7 @@
 
 mod test_data;
 
-use nalgebra::Vector3;
+use numeris::Vector3;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -191,17 +191,18 @@ fn trim_tess_science_region(
 fn radec_to_uvec(ra_deg: f64, dec_deg: f64) -> Vector3<f32> {
     let ra = ra_deg.to_radians();
     let dec = dec_deg.to_radians();
-    Vector3::new(
+    Vector3::from_array([
         (dec.cos() * ra.cos()) as f32,
         (dec.cos() * ra.sin()) as f32,
         dec.sin() as f32,
-    )
+    ])
 }
 
 fn angular_separation(a: &Vector3<f32>, b: &Vector3<f32>) -> f32 {
-    let cross = a.cross(b).norm();
+    let cross = a.cross(b);
+    let cross_norm = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
     let dot = a.dot(b);
-    cross.atan2(dot)
+    cross_norm.atan2(dot)
 }
 
 /// Get a SIP polynomial coefficient from the header (e.g. "A_2_1").
@@ -499,13 +500,13 @@ fn test_tess_fits_solve() {
 
         if result.status == SolveStatus::MatchFound {
             let solved_q = result.qicrs2cam.unwrap();
-            let solved_boresight = solved_q.inverse() * Vector3::new(0.0, 0.0, 1.0);
+            let solved_boresight = solved_q.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
             let error_rad = angular_separation(&solved_boresight, &true_boresight);
             let error_arcmin = error_rad.to_degrees() * 60.0;
 
-            let dec = (solved_boresight.z as f64).asin().to_degrees();
-            let ra = (solved_boresight.y as f64)
-                .atan2(solved_boresight.x as f64)
+            let dec = (solved_boresight[2] as f64).asin().to_degrees();
+            let ra = (solved_boresight[1] as f64)
+                .atan2(solved_boresight[0] as f64)
                 .to_degrees()
                 .rem_euclid(360.0);
 

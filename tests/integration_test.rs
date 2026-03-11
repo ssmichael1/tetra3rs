@@ -1,7 +1,7 @@
 //! Integration tests: build a database from Hipparcos, generate synthetic centroids
 //! from known pointing directions, and verify the solver recovers the correct attitude.
 
-use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
+use numeris::{Matrix3, Quaternion, Vector3};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal};
@@ -47,13 +47,13 @@ fn test_generate_and_solve_hipparcos() {
     // Camera frame: +X right, +Y down, +Z boresight.
     //
     // The boresight direction in ICRS:
-    let boresight_icrs = Vector3::new(
+    let boresight_icrs = Vector3::from_array([
         target_dec.cos() * target_ra.cos(),
         target_dec.cos() * target_ra.sin(),
         target_dec.sin(),
-    );
+    ]);
     // Choose "up" direction (celestial north projected onto the image plane)
-    let north_icrs = Vector3::new(0.0, 0.0, 1.0);
+    let north_icrs = Vector3::from_array([0.0, 0.0, 1.0]);
     // Camera Z = boresight (ICRS direction)
     let cam_z = boresight_icrs.normalize();
     // Camera X = right = perpendicular to boresight and north
@@ -62,11 +62,13 @@ fn test_generate_and_solve_hipparcos() {
     let cam_y = cam_z.cross(&cam_x);
 
     // Rotation matrix: rows are camera axes expressed in ICRS
-    let rot = nalgebra::Matrix3::new(
-        cam_x.x, cam_x.y, cam_x.z, cam_y.x, cam_y.y, cam_y.z, cam_z.x, cam_z.y, cam_z.z,
-    );
+    let rot = Matrix3::new([
+        [cam_x[0], cam_x[1], cam_x[2]],
+        [cam_y[0], cam_y[1], cam_y[2]],
+        [cam_z[0], cam_z[1], cam_z[2]],
+    ]);
     // This R satisfies: camera_vec = R * icrs_vec
-    let true_quat = UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot));
+    let true_quat = Quaternion::from_rotation_matrix(&rot);
 
     // Simulate a 15° FOV camera with 1024x1024 sensor
     let fov_rad = 15.0_f32.to_radians();
@@ -86,12 +88,12 @@ fn test_generate_and_solve_hipparcos() {
     let mut centroids: Vec<Centroid> = Vec::new();
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
-        let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
-        let cam_v = rot * icrs_v;
+        let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
+        let cam_v = rot.vecmul(&icrs_v);
 
-        if cam_v.z > 0.01 {
-            let cx_rad = cam_v.x / cam_v.z; // radians from boresight
-            let cy_rad = cam_v.y / cam_v.z;
+        if cam_v[2] > 0.01 {
+            let cx_rad = cam_v[0] / cam_v[2]; // radians from boresight
+            let cy_rad = cam_v[1] / cam_v[2];
 
             // Only keep stars within the FOV
             if cx_rad.abs() < half_fov && cy_rad.abs() < half_fov {
@@ -153,8 +155,8 @@ fn test_generate_and_solve_hipparcos() {
 
     // Compare the solved boresight direction with the true one.
     // solved_quat rotates ICRS → camera, so boresight in ICRS = solved_quat.inverse() * [0,0,1]
-    let solved_boresight = solved_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
-    let true_boresight = true_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
+    let solved_boresight = solved_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
+    let true_boresight = true_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
 
     let angle_error = angular_separation(&solved_boresight, &true_boresight);
 
@@ -185,19 +187,19 @@ fn angular_separation(a: &Vector3<f32>, b: &Vector3<f32>) -> f32 {
 
 /// Build rotation matrix (ICRS → camera) from boresight RA/Dec and roll angle.
 fn rotation_from_ra_dec_roll(ra: f32, dec: f32, roll: f32) -> Matrix3<f32> {
-    let boresight = Vector3::new(dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
+    let boresight = Vector3::from_array([dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]);
 
     // Camera Z = boresight direction
     let cam_z = boresight.normalize();
 
     // Reference "up" in ICRS — use celestial north unless boresight is near a pole
-    let north = Vector3::new(0.0, 0.0, 1.0);
+    let north = Vector3::from_array([0.0, 0.0, 1.0]);
     let raw_x = north.cross(&cam_z);
     let cam_x_noroll = if raw_x.norm() > 1e-6 {
         raw_x.normalize()
     } else {
         // Near pole: fall back to ICRS X-axis as reference
-        let fallback = Vector3::new(1.0, 0.0, 0.0);
+        let fallback = Vector3::from_array([1.0, 0.0, 0.0]);
         fallback.cross(&cam_z).normalize()
     };
     let cam_y_noroll = cam_z.cross(&cam_x_noroll);
@@ -206,9 +208,11 @@ fn rotation_from_ra_dec_roll(ra: f32, dec: f32, roll: f32) -> Matrix3<f32> {
     let cam_x = cam_x_noroll * roll.cos() + cam_y_noroll * roll.sin();
     let cam_y = -cam_x_noroll * roll.sin() + cam_y_noroll * roll.cos();
 
-    Matrix3::new(
-        cam_x.x, cam_x.y, cam_x.z, cam_y.x, cam_y.y, cam_y.z, cam_z.x, cam_z.y, cam_z.z,
-    )
+    Matrix3::new([
+        [cam_x[0], cam_x[1], cam_x[2]],
+        [cam_y[0], cam_y[1], cam_y[2]],
+        [cam_z[0], cam_z[1], cam_z[2]],
+    ])
 }
 
 /// Generate synthetic centroids (in pixel coordinates) for a given rotation and FOV.
@@ -231,12 +235,12 @@ fn generate_centroids_with_noise(
     let mut centroids = Vec::new();
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
-        let icrs_v = Vector3::new(sv[0], sv[1], sv[2]);
-        let cam_v = rot * icrs_v;
+        let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
+        let cam_v = rot.vecmul(&icrs_v);
 
-        if cam_v.z > 0.01 {
-            let cx_rad = cam_v.x / cam_v.z;
-            let cy_rad = cam_v.y / cam_v.z;
+        if cam_v[2] > 0.01 {
+            let cx_rad = cam_v[0] / cam_v[2];
+            let cy_rad = cam_v[1] / cam_v[2];
 
             if cx_rad.abs() < half_fov && cy_rad.abs() < half_fov {
                 let nx = if noise_sigma_px > 0.0 {
@@ -361,7 +365,7 @@ fn test_statistical_1000_random_orientations() {
         let roll: f32 = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
 
         let rot = rotation_from_ra_dec_roll(ra, dec, roll);
-        let boresight_icrs = Vector3::new(dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
+        let boresight_icrs = Vector3::from_array([dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]);
 
         let centroids = generate_centroids(&db, &rot, &boresight_icrs, half_fov, pixel_scale);
 
@@ -378,10 +382,10 @@ fn test_statistical_1000_random_orientations() {
 
                 // Compute boresight error
                 let true_quat =
-                    UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot));
+                    Quaternion::from_rotation_matrix(&rot);
                 let solved_quat = result.qicrs2cam.unwrap();
-                let solved_boresight = solved_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
-                let true_boresight = true_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
+                let solved_boresight = solved_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
+                let true_boresight = true_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
                 let err_rad = angular_separation(&solved_boresight, &true_boresight);
                 let err_arcsec = err_rad.to_degrees() * 3600.0;
 
@@ -668,7 +672,7 @@ fn test_statistical_1000_noisy_centroids() {
         let roll: f32 = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
 
         let rot = rotation_from_ra_dec_roll(ra, dec, roll);
-        let boresight_icrs = Vector3::new(dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
+        let boresight_icrs = Vector3::from_array([dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]);
 
         let centroids = generate_centroids_with_noise(
             &db,
@@ -692,16 +696,16 @@ fn test_statistical_1000_noisy_centroids() {
                 all_solve_times_ms.push(result.solve_time_ms);
 
                 let true_quat =
-                    UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rot));
+                    Quaternion::from_rotation_matrix(&rot);
                 let solved_quat = result.qicrs2cam.unwrap();
-                let solved_boresight = solved_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
-                let true_boresight = true_quat.inverse() * Vector3::new(0.0, 0.0, 1.0);
+                let solved_boresight = solved_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
+                let true_boresight = true_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
                 let err_rad = angular_separation(&solved_boresight, &true_boresight);
                 let err_arcsec = err_rad.to_degrees() * 3600.0;
 
                 // Roll error: angle between the camera x-axes (projected
                 // perpendicular to the true boresight) of the true vs solved rotations.
-                let cam_x = Vector3::new(1.0_f32, 0.0, 0.0);
+                let cam_x = Vector3::from_array([1.0_f32, 0.0, 0.0]);
                 let true_x_icrs = true_quat.inverse() * cam_x;
                 let solved_x_icrs = solved_quat.inverse() * cam_x;
                 let proj_true = true_x_icrs - true_boresight * true_x_icrs.dot(&true_boresight);

@@ -127,7 +127,7 @@ impl SolverDatabase {
         // Precompute unit vectors
         let star_vectors: Vec<[f32; 3]> = stars.iter().map(|s| {
             let v = s.uvec();
-            [v.x, v.y, v.z]
+            [v[0], v[1], v[2]]
         }).collect();
 
         // Save catalog IDs before building the spatial index
@@ -184,11 +184,11 @@ impl SolverDatabase {
             let mut keep_for_patterns = vec![false; num_stars];
             for star_ind in 0..num_stars {
                 // Check if any already-kept star is too close
-                let dir = nalgebra::Vector3::new(
+                let dir = numeris::Vector3::from_array([
                     star_vectors[star_ind][0],
                     star_vectors[star_ind][1],
                     star_vectors[star_ind][2],
-                );
+                ]);
                 let nearby = star_catalog.query_indices_from_uvec(dir, pattern_stars_separation);
                 let occupied = nearby.iter().any(|&idx| keep_for_patterns[idx]);
                 if !occupied {
@@ -212,7 +212,7 @@ impl SolverDatabase {
 
             for center in &lattice_points {
                 // Find pattern stars within this lattice field
-                let center_v = nalgebra::Vector3::new(center[0], center[1], center[2]);
+                let center_v = numeris::Vector3::from_array([center[0], center[1], center[2]]);
                 let field_stars_all = star_catalog.query_indices_from_uvec(center_v, fov_angle);
 
                 // Keep only pattern-eligible stars, in brightness order
