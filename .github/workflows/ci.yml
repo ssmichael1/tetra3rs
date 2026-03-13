@@ -55,6 +55,9 @@ jobs:
             curl --fail -o "data/tess_same_ccd/sector${s}_cam1_ccd1.fits" "$BASE/tess_same_ccd/sector${s}_cam1_ccd1.fits"
           done
 
+      - name: Check notebooks have no outputs
+        run: python3 scripts/check-notebook-outputs.py
+
       - name: Build
         run: cargo build --verbose
 
