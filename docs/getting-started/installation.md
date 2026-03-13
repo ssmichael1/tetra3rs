@@ -32,19 +32,25 @@ To enable centroid extraction from images, add the `image` feature:
 cargo add tetra3 --features image
 ```
 
-## Hipparcos Catalog
+## Star Catalog
 
-tetra3rs generates its pattern database from the Hipparcos catalog.
+tetra3rs generates its pattern database from a merged Gaia DR3 + Hipparcos catalog (~482k stars to G-band magnitude 10). Gaia provides most stars; Hipparcos fills in the brightest stars (G < 4) where Gaia saturates.
 
-**Python:** The catalog is bundled automatically via the [`hipparcos-catalog`](https://pypi.org/project/hipparcos-catalog/) dependency — no manual download needed.
+**Python:** The catalog is bundled in the [`gaia-catalog`](https://pypi.org/project/gaia-catalog/) package, which is installed automatically with `tetra3rs`. No manual download needed — just call `generate_from_gaia()` with no arguments.
 
-**Rust:** Download `hip2.dat` for use with the Rust API:
+**Rust:** Download the pre-built binary catalog (~17 MB):
 
 ```sh
 mkdir -p data
-curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
-gunzip data/hip2.dat.gz
+curl -o data/gaia_merged.bin "https://storage.googleapis.com/tetra3rs-testvecs/gaia_merged.bin"
+```
+
+Or generate your own with a custom magnitude limit:
+
+```sh
+pip install astroquery astropy
+python scripts/download_gaia_catalog.py --mag-limit 12.0 --output data/gaia_merged.bin
 ```
 
 !!! note
-    The Hipparcos catalog is also downloaded automatically when running the Rust integration tests (`cargo test --features image`).
+    The catalog is also downloaded automatically when running the Rust integration tests (`cargo test --features image`).

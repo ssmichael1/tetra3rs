@@ -301,9 +301,9 @@ fn build_skyview_database() -> SolverDatabase {
         catalog_nside: 8,
     };
 
-    let catalog_path = test_data::ensure_test_file("data/hip2.dat");
-    SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
-        .expect("Failed to generate database from Hipparcos catalog")
+    let catalog_path = test_data::ensure_test_file("data/gaia_merged.bin");
+    SolverDatabase::generate_from_gaia(&catalog_path, &config)
+        .expect("Failed to generate database from Gaia catalog")
 }
 
 #[test]
@@ -313,7 +313,6 @@ fn test_skyview_fits_solve() {
         .try_init();
 
     // Ensure all test files are downloaded
-    test_data::ensure_test_file("data/hip2.dat");
     for tc in SKYVIEW_TEST_CASES {
         test_data::ensure_test_file(&format!("data/skyview_10deg_test_images/{}", tc.filename));
     }

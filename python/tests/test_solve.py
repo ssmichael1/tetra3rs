@@ -1,4 +1,4 @@
-"""Database and solve tests — requires hip2.dat."""
+"""Database and solve tests — requires Gaia catalog."""
 
 import math
 import os

@@ -15,6 +15,7 @@ const GCS_BASE_URL: &str = "https://storage.googleapis.com/tetra3rs-testvecs";
 ///
 /// `local_path` is relative to the repo root (e.g. "data/hip2.dat").
 /// Returns the local path string for convenience.
+#[allow(dead_code)]
 pub fn ensure_test_file(local_path: &str) -> String {
     let path = Path::new(local_path);
     if path.exists() {
@@ -38,8 +39,8 @@ pub fn ensure_test_file(local_path: &str) -> String {
         .unwrap_or_else(|e| panic!("Failed to download {}: {}", url, e));
 
     let mut reader = resp.into_body().into_reader();
-    let mut file = fs::File::create(path)
-        .unwrap_or_else(|e| panic!("Failed to create {:?}: {}", path, e));
+    let mut file =
+        fs::File::create(path).unwrap_or_else(|e| panic!("Failed to create {:?}: {}", path, e));
 
     let mut buf = vec![0u8; 1024 * 1024]; // 1MB buffer
     loop {
@@ -56,3 +57,4 @@ pub fn ensure_test_file(local_path: &str) -> String {
     println!("Downloaded {} -> {}", url, local_path);
     local_path.to_string()
 }
+

@@ -1,4 +1,4 @@
-#[cfg(feature = "gaia")]
 pub mod gaia;
 
+#[cfg(feature = "hipparcos")]
 pub mod hipparcos;

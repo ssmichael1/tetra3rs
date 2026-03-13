@@ -506,7 +506,7 @@ impl SolverDatabase {
 
                     // Build matched catalog IDs, centroid indices, and angular residuals
                     let ps = refined_fov / config.image_width.max(1) as f32;
-                    let mut matched_cat_ids: Vec<u64> =
+                    let mut matched_cat_ids: Vec<i64> =
                         Vec::with_capacity(wcs_result.matches.len());
                     let mut matched_cent_inds: Vec<usize> =
                         Vec::with_capacity(wcs_result.matches.len());

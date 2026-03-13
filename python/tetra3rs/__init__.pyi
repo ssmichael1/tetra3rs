@@ -229,8 +229,8 @@ class SolveResult:
         ...
 
     @property
-    def matched_catalog_ids(self) -> npt.NDArray[np.uint64]:
-        """Catalog IDs of matched stars."""
+    def matched_catalog_ids(self) -> npt.NDArray[np.int64]:
+        """Catalog IDs of matched stars (negative IDs = Hipparcos gap-fill stars)."""
         ...
 
     @property
@@ -487,12 +487,12 @@ class Centroid:
 class SolverDatabase:
     """A star pattern database for plate solving.
 
-    Generate from the Hipparcos catalog, or load a previously saved database.
+    Generate from the Gaia or Hipparcos catalog, or load a previously saved database.
     Supports ``pickle`` serialization.
 
     Example::
 
-        db = tetra3rs.SolverDatabase.generate_from_hipparcos()
+        db = tetra3rs.SolverDatabase.generate_from_gaia()  # uses bundled gaia-catalog
         db.save_to_file("my_db.bin")
         db = tetra3rs.SolverDatabase.load_from_file("my_db.bin")
     """
@@ -502,7 +502,7 @@ class SolverDatabase:
     def _from_pickle_bytes(data: bytes) -> "SolverDatabase": ...
 
     @staticmethod
-    def generate_from_hipparcos(
+    def generate_from_gaia(
         catalog_path: Optional[str] = None,
         max_fov_deg: float = 30.0,
         min_fov_deg: Optional[float] = None,
@@ -515,15 +515,24 @@ class SolverDatabase:
         epoch_proper_motion_year: Optional[float] = 2025.0,
         catalog_nside: int = 16,
     ) -> SolverDatabase:
-        """Generate a database from the Hipparcos catalog file.
+        """Generate a database from a Gaia DR3 catalog file.
+
+        Accepts either:
+        - A CSV file (``.csv``) with columns:
+          ``source_id,ra,dec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag,parallax,pmra,pmdec``
+        - A binary file (``.bin``) from the ``gaia-catalog`` package.
+
+        Use ``scripts/download_gaia_catalog.py`` to produce a merged Gaia + Hipparcos CSV,
+        or ``pip install gaia-catalog`` for the pre-built binary catalog.
+        Negative source_ids indicate Hipparcos gap-fill stars.
 
         Args:
-            catalog_path: Path to the hip2.dat file. If None, uses the bundled
-                catalog from the ``hipparcos-catalog`` package.
+            catalog_path: Path to the Gaia catalog file (CSV or binary).
+                If None, uses the bundled catalog from the ``gaia-catalog`` package.
             max_fov_deg: Maximum field of view in degrees.
             min_fov_deg: Minimum field of view in degrees.
                 None means same as max_fov_deg (single-scale).
-            star_max_magnitude: Faintest star to include. None = auto.
+            star_max_magnitude: Faintest star to include (G-band). None = auto.
             pattern_max_error: Maximum edge-ratio error.
             lattice_field_oversampling: Lattice field oversampling factor.
             patterns_per_lattice_field: Patterns per lattice field.

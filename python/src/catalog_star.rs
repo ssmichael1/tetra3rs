@@ -18,7 +18,7 @@ pub(crate) struct PyCatalogStar {
 impl PyCatalogStar {
     /// Catalog identifier (e.g. Hipparcos number).
     #[getter]
-    fn id(&self) -> u64 {
+    fn id(&self) -> i64 {
         self.inner.id
     }
 
@@ -52,7 +52,7 @@ impl PyCatalogStar {
 
     fn __str__(&self) -> String {
         format!(
-            "HIP {} at RA {:.4}°, Dec {:.4}°, mag {:.2}",
+            "Star {} at RA {:.4}°, Dec {:.4}°, mag {:.2}",
             self.inner.id,
             self.inner.ra_rad.to_degrees(),
             self.inner.dec_rad.to_degrees(),

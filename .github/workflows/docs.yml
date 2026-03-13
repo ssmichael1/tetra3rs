@@ -44,14 +44,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data
-          key: test-data-v3
+          key: test-data-v5
 
       - name: Download test data
         if: steps.cache-test-data.outputs.cache-hit != 'true'
         run: |
           mkdir -p data/tess_same_ccd
           BASE=https://storage.googleapis.com/tetra3rs-testvecs
-          curl --fail -o data/hip2.dat "$BASE/hip2.dat"
+          curl --fail -o data/gaia_merged.bin "$BASE/gaia_merged.bin"
           for s in 01 02 03 04 05 06 13 14 15 17; do
             curl --fail -o "data/tess_same_ccd/sector${s}_cam1_ccd1.fits" \
               "$BASE/tess_same_ccd/sector${s}_cam1_ccd1.fits"

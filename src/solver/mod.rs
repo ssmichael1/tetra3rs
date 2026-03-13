@@ -132,7 +132,7 @@ pub struct SolverDatabase {
     pub star_vectors: Vec<[f32; 3]>,
 
     /// Original catalog IDs (e.g. HIP number) for each star.
-    pub star_catalog_ids: Vec<u64>,
+    pub star_catalog_ids: Vec<i64>,
 
     /// Pattern hash table (open addressing, quadratic probing).
     /// Each entry packs the star indices, largest edge angle, and key hash
@@ -322,7 +322,7 @@ pub struct SolveResult {
     /// Pixel↔sky conversions must account for this flip.
     pub parity_flip: bool,
     /// Catalog IDs of matched stars (only populated on success).
-    pub matched_catalog_ids: Vec<u64>,
+    pub matched_catalog_ids: Vec<i64>,
     /// Indices into the input centroid slice for each match.
     pub matched_centroid_indices: Vec<usize>,
     /// Image width in pixels (used for coordinate transforms).

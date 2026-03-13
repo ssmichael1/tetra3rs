@@ -4,7 +4,7 @@ Extracts centroids from 10 TESS FFI images (same CCD across sectors),
 iteratively solves + calibrates with progressively tighter parameters,
 and verifies final RMSE and WCS agreement.
 
-Requires hip2.dat and TESS same-CCD images (downloaded from GCS).
+Requires Gaia catalog and TESS same-CCD images (downloaded from GCS).
 """
 
 import pytest

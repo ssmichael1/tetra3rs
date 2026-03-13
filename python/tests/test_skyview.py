@@ -1,6 +1,6 @@
 """SkyView image integration tests — extract centroids from real FITS images and solve.
 
-Requires hip2.dat and SkyView test images (downloaded automatically from GCS).
+Requires Gaia catalog and SkyView test images (downloaded automatically from GCS).
 """
 
 import pytest

@@ -504,7 +504,7 @@ pub fn fit_polynomial_distortion(
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 /// Build a HashMap from catalog_id → index into star_vectors.
-pub(super) fn build_id_lookup(database: &SolverDatabase) -> HashMap<u64, usize> {
+pub(super) fn build_id_lookup(database: &SolverDatabase) -> HashMap<i64, usize> {
     database
         .star_catalog_ids
         .iter()
@@ -521,7 +521,7 @@ fn gather_matched_points(
     solve_results: &[&SolveResult],
     centroids: &[&[Centroid]],
     database: &SolverDatabase,
-    id_to_idx: &HashMap<u64, usize>,
+    id_to_idx: &HashMap<i64, usize>,
     image_width: u32,
 ) -> Vec<MatchedPoint> {
     let mut points = Vec::new();

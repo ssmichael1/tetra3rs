@@ -23,7 +23,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
 - **Robust** — statistical verification via binomial false-positive probability
 - **Multiscale** — supports a range of field-of-view scales in a single database
-- **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
+- **Proper motion** — propagates catalog star positions to any observation epoch
 - **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading
 - **Centroid extraction** — detect stars from images with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement (requires `image` feature)
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
@@ -62,32 +62,33 @@ pip install .
 
 ## Quick start
 
-### Hipparcos catalog
+### Star catalog
 
-**Python:** The Hipparcos catalog is bundled automatically via the [`hipparcos-catalog`](https://pypi.org/project/hipparcos-catalog/) dependency — no manual download needed.
+tetra3rs uses a merged Gaia DR3 + Hipparcos catalog. The merged catalog uses Gaia for most stars and fills in the brightest stars (G < 4) from Hipparcos where Gaia saturates.
 
-**Rust:** Download `hip2.dat` from the [Hipparcos, the New Reduction (I/311)](http://cdsarc.u-strasbg.fr/ftp/I/311/):
+**Python:** The catalog is bundled in the [`gaia-catalog`](https://pypi.org/project/gaia-catalog/) package (installed automatically with `tetra3rs`). No manual download needed — just call `generate_from_gaia()` with no arguments.
+
+**Rust:** Download the pre-built binary catalog:
 
 ```sh
 mkdir -p data
-curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
-gunzip data/hip2.dat.gz
+curl -o data/gaia_merged.bin "https://storage.googleapis.com/tetra3rs-testvecs/gaia_merged.bin"
 ```
-> [!NOTE]
-> The Hipparcos catalog is also downloaded automatically when running the Rust integration tests (`cargo test --features image`).
+
+Or generate your own with a custom magnitude limit using `scripts/download_gaia_catalog.py`.
 
 ### Example
 
 ```rust
 use tetra3::{GenerateDatabaseConfig, SolverDatabase, SolveConfig, Centroid, SolveStatus};
 
-// Generate a database from the Hipparcos catalog
+// Generate a database from the Gaia catalog
 let config = GenerateDatabaseConfig {
     max_fov_deg: 20.0,
     epoch_proper_motion_year: Some(2025.0),
     ..Default::default()
 };
-let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)?;
+let db = SolverDatabase::generate_from_gaia("data/gaia_merged.bin", &config)?;
 
 // Save the database to disk for fast loading later
 db.save_to_file("data/my_database.rkyv")?;
@@ -180,10 +181,10 @@ result = db.solve_from_centroids(
 
 ## Catalog support
 
-| Catalog | File | Notes |
-|---------|------|-------|
-| Hipparcos | `data/hip2.dat` | Default; includes proper motion |
-| Gaia | `data/gaia_bright_stars.csv` | Requires `--features gaia` (incomplete) |
+| Catalog | Format | Notes |
+|---------|--------|-------|
+| Gaia DR3 + Hipparcos | `.bin` (binary) or `.csv` | Default; merged catalog with proper motion. Binary format bundled in [`gaia-catalog`](https://pypi.org/project/gaia-catalog/) PyPI package |
+| Hipparcos only | `hip2.dat` | Legacy; requires `hipparcos` feature flag |
 
 ## Tests
 
@@ -224,8 +225,7 @@ cargo test --test tess_solve_test --features image -- --nocapture
 ## Roadmap (not in order)
 
 - **Tracking mode** — accept an initial attitude guess to restrict the search to nearby catalog stars, improving speed and robustness for sequential frames (e.g. star trackers solution on previous frame)
-- **Gaia catalog support** — complete the Gaia bright star catalog import (`--features gaia`)
-- **Tycho-2 catalog support** — import the Tycho-2 catalog (~2.5 million stars, fills the gap between Hipparcos and Gaia)
+- **Deeper Gaia catalog** — support fainter limiting magnitudes for narrow-FOV cameras
 
 ## Credits
 

@@ -6,13 +6,12 @@ Contributions are welcome! Whether it's bug reports, feature requests, documenta
 
 1. Fork the repository and clone your fork
 2. Install Rust (stable toolchain)
-3. Download the Hipparcos catalog (needed for Rust integration tests):
+3. Download the star catalog (needed for integration tests):
    ```sh
    mkdir -p data
-   curl -o data/hip2.dat.gz "http://cdsarc.u-strasbg.fr/ftp/I/311/hip2.dat.gz"
-   gunzip data/hip2.dat.gz
+   curl -o data/gaia_merged.bin "https://storage.googleapis.com/tetra3rs-testvecs/gaia_merged.bin"
    ```
-   > For Python, the catalog is bundled automatically via the `hipparcos-catalog` package.
+   > The catalog is also downloaded automatically when running integration tests.
 4. Run the tests:
    ```sh
    cargo test                          # unit tests

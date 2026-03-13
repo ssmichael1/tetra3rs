@@ -3,7 +3,7 @@
 Interactive Jupyter notebooks demonstrating tetra3rs workflows.
 
 !!! note
-    These notebooks are executed during the documentation build using real TESS FITS images and the Hipparcos catalog. To run them locally, download the test data — see [Installation](../getting-started/installation.md).
+    These notebooks are executed during the documentation build using real TESS FITS images and the Gaia merged catalog. To run them locally, download the test data — see [Installation](../getting-started/installation.md).
 
 ## Available Tutorials
 

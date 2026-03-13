@@ -18,7 +18,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
 - **Robust** — statistical verification via binomial false-positive probability
 - **Multiscale** — supports a range of field-of-view scales in a single database
-- **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
+- **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
 - **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading
 - **Centroid extraction** — detect stars from images with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline

@@ -284,13 +284,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hipparcos")]
     fn check_cone_query_from_hipparcos() {
         let hipfile = "data/hip2.dat";
         let data = std::fs::read_to_string(hipfile).expect("Failed to read Hipparcos catalog file");
         let hip_stars = crate::catalogs::hipparcos::load_hipparcos_catalog(&data);
         let stars: Vec<Star> = hip_stars
             .iter()
-            .map(|hip_star| crate::star_from_hipparcos(hip_star, None))
+            .map(|hip_star| crate::star::star_from_hipparcos(hip_star, None))
             .collect();
         let catalog = StarCatalog::new(16, stars);
 
@@ -310,7 +311,7 @@ mod tests {
         let dec = deg2rad(30.0);
         let radius = deg2rad(1.0);
         let hits = catalog.query_stars(ra, dec, radius);
-        let expected: Vec<u64> = catalog
+        let expected: Vec<i64> = catalog
             .stars
             .iter()
             .filter(|s| {
@@ -322,7 +323,7 @@ mod tests {
             })
             .map(|s| s.id)
             .collect();
-        let mut hit_ids: Vec<u64> = hits.iter().map(|s| s.id).collect();
+        let mut hit_ids: Vec<i64> = hits.iter().map(|s| s.id).collect();
         hit_ids.sort_unstable();
         assert_eq!(hit_ids, expected);
     }
@@ -352,7 +353,7 @@ mod tests {
 
         let index = StarCatalog::new(8, stars);
         let hits = index.query_stars(deg2rad(0.5), deg2rad(0.25), deg2rad(3.0));
-        let mut ids: Vec<u64> = hits.iter().map(|s| s.id).collect();
+        let mut ids: Vec<i64> = hits.iter().map(|s| s.id).collect();
         ids.sort_unstable();
 
         assert_eq!(ids, vec![1, 2]);
@@ -383,7 +384,7 @@ mod tests {
 
         let index = StarCatalog::new(8, stars);
         let hits = index.query_stars(deg2rad(0.0), deg2rad(0.0), deg2rad(3.0));
-        let mut ids: Vec<u64> = hits.iter().map(|s| s.id).collect();
+        let mut ids: Vec<i64> = hits.iter().map(|s| s.id).collect();
         ids.sort_unstable();
 
         assert_eq!(ids, vec![10, 11]);

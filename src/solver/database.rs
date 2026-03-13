@@ -10,8 +10,6 @@ use std::collections::HashSet;
 
 use tracing::info;
 
-use crate::catalogs::hipparcos::{load_hipparcos_catalog_from_file, HipparcosStar};
-use crate::star::star_from_hipparcos;
 use crate::{Star, StarCatalog};
 
 use super::combinations::BreadthFirstCombinations;
@@ -68,23 +66,81 @@ fn fibonacci_sphere_lattice(n: usize) -> Vec<[f32; 3]> {
 impl SolverDatabase {
     /// Generate a solver database from a Hipparcos catalog file.
     ///
-    /// This is the main entry point for building a new database. It closely
-    /// follows tetra3's `generate_database()`.
+    /// This is the main entry point for building a new database from Hipparcos.
+    /// It closely follows tetra3's `generate_database()`.
+    #[cfg(feature = "hipparcos")]
     pub fn generate_from_hipparcos(
         catalog_path: &str,
         config: &GenerateDatabaseConfig,
     ) -> anyhow::Result<Self> {
+        use crate::catalogs::hipparcos::load_hipparcos_catalog_from_file;
+        use crate::star::star_from_hipparcos;
+
         info!("Loading Hipparcos catalog from {}", catalog_path);
         let hip_stars = load_hipparcos_catalog_from_file(catalog_path)?;
         info!("Loaded {} raw Hipparcos entries", hip_stars.len());
 
-        Self::generate_from_stars(&hip_stars, config)
+        let stars: Vec<Star> = hip_stars
+            .iter()
+            .map(|h| star_from_hipparcos(h, config.epoch_proper_motion_year))
+            .collect();
+
+        let default_pm_year = 1991.25; // Hipparcos reference epoch
+        Self::generate_from_star_list(stars, config, default_pm_year)
     }
 
-    /// Generate a solver database from pre-loaded Hipparcos stars.
-    pub fn generate_from_stars(
-        hip_stars: &[HipparcosStar],
+    /// Generate a solver database from a Gaia catalog file (CSV or binary).
+    ///
+    /// Accepts either:
+    /// - A CSV file (`.csv`) with columns:
+    ///   `source_id,ra,dec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag,parallax,pmra,pmdec`
+    /// - A binary file (`.bin`) in the compact GDR3 format from the `gaia-catalog` package.
+    ///
+    /// Negative source_ids indicate Hipparcos gap-fill stars from the merged catalog.
+    pub fn generate_from_gaia(
+        catalog_path: &str,
         config: &GenerateDatabaseConfig,
+    ) -> anyhow::Result<Self> {
+        use crate::catalogs::gaia::{load_gaia_binary, read_gaia_csv};
+        use crate::star::star_from_gaia;
+
+        info!("Loading Gaia catalog from {}", catalog_path);
+        let gaia_stars = if catalog_path.ends_with(".csv") {
+            read_gaia_csv(catalog_path)?
+        } else if catalog_path.ends_with(".bin") {
+            load_gaia_binary(catalog_path)
+                .map_err(|e| anyhow::anyhow!("Failed to load Gaia binary: {}", e))?
+        } else {
+            // Auto-detect by reading the first 4 bytes
+            let magic = std::fs::read(catalog_path)
+                .map(|b| if b.len() >= 4 { b[0..4].to_vec() } else { vec![] })
+                .unwrap_or_default();
+            if magic == b"GDR3" {
+                load_gaia_binary(catalog_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to load Gaia binary: {}", e))?
+            } else {
+                read_gaia_csv(catalog_path)?
+            }
+        };
+        info!("Loaded {} Gaia entries", gaia_stars.len());
+
+        let stars: Vec<Star> = gaia_stars
+            .iter()
+            .map(|g| star_from_gaia(g, config.epoch_proper_motion_year))
+            .collect();
+
+        let default_pm_year = 2016.0; // Gaia DR3 reference epoch
+        Self::generate_from_star_list(stars, config, default_pm_year)
+    }
+
+    /// Core database generation from a pre-converted list of generic stars.
+    ///
+    /// `default_pm_year` is used as the proper motion epoch when
+    /// `config.epoch_proper_motion_year` is `None`.
+    pub fn generate_from_star_list(
+        mut stars: Vec<Star>,
+        config: &GenerateDatabaseConfig,
+        default_pm_year: f64,
     ) -> anyhow::Result<Self> {
         let max_fov = config.max_fov_deg.to_radians();
         let min_fov = config
@@ -97,12 +153,6 @@ impl SolverDatabase {
 
         let epoch_pm_year = config.epoch_proper_motion_year;
         info!("Proper motion epoch: {:?}", epoch_pm_year);
-
-        // Convert to Star, filtering out entries that fail conversion
-        let mut stars: Vec<Star> = hip_stars
-            .iter()
-            .map(|h| star_from_hipparcos(h, epoch_pm_year))
-            .collect();
 
         // Sort by brightness (ascending magnitude = brightest first)
         stars.sort_by(|a, b| a.mag.partial_cmp(&b.mag).unwrap_or(std::cmp::Ordering::Equal));
@@ -131,7 +181,7 @@ impl SolverDatabase {
         }).collect();
 
         // Save catalog IDs before building the spatial index
-        let star_catalog_ids: Vec<u64> = stars.iter().map(|s| s.id).collect();
+        let star_catalog_ids: Vec<i64> = stars.iter().map(|s| s.id).collect();
 
         // Build spatial catalog (stars are already brightness-sorted)
         let star_catalog = StarCatalog::new(config.catalog_nside, stars);
@@ -317,8 +367,8 @@ impl SolverDatabase {
             min_fov_rad: min_fov,
             star_max_magnitude,
             num_patterns: pattern_list.len() as u32,
-            epoch_equinox: 2000, // Hipparcos uses ICRS ≈ J2000
-            epoch_proper_motion_year: epoch_pm_year.unwrap_or(1991.25) as f32,
+            epoch_equinox: 2000, // ICRS ≈ J2000
+            epoch_proper_motion_year: epoch_pm_year.unwrap_or(default_pm_year) as f32,
             verification_stars_per_fov: config.verification_stars_per_fov,
             lattice_field_oversampling: config.lattice_field_oversampling,
             patterns_per_lattice_field: config.patterns_per_lattice_field,

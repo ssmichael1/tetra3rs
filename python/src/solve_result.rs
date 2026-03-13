@@ -168,7 +168,7 @@ impl PySolveResult {
 
     /// Catalog IDs of matched stars.
     #[getter]
-    fn matched_catalog_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
+    fn matched_catalog_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
         PyArray1::from_vec(py, self.inner.matched_catalog_ids.clone())
     }
 

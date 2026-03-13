@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tetra3rs"
-version = "0.3.2"
+version = "0.4.0"
 description = "Fast star plate solver written in Rust"
 requires-python = ">=3.10"
-dependencies = ["numpy", "hipparcos-catalog"]
+dependencies = ["numpy", "gaia-catalog"]
 authors = [{ name = "Steven Michael" }]
 license = { text = "MIT" }
 readme = "README.md"

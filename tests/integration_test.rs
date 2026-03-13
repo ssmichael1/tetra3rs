@@ -1,5 +1,7 @@
-//! Integration tests: build a database from Hipparcos, generate synthetic centroids
+//! Integration tests: build a database from Gaia, generate synthetic centroids
 //! from known pointing directions, and verify the solver recovers the correct attitude.
+
+mod test_data;
 
 use numeris::{Matrix3, Quaternion, Vector3};
 use rand::rngs::StdRng;
@@ -7,9 +9,14 @@ use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use tetra3::{Centroid, GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 
+/// Path to the Gaia merged catalog (downloaded from GCS if missing).
+fn gaia_catalog_path() -> String {
+    test_data::ensure_test_file("data/gaia_merged.bin")
+}
+
 /// Build a small test database (wide FOV for speed) and solve a synthetic image.
 #[test]
-fn test_generate_and_solve_hipparcos() {
+fn test_generate_and_solve() {
     // Initialize tracing for debug output
     let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
@@ -27,7 +34,8 @@ fn test_generate_and_solve_hipparcos() {
         catalog_nside: 8,
     };
 
-    let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+    let catalog_path = gaia_catalog_path();
+    let db = SolverDatabase::generate_from_gaia(&catalog_path, &config)
         .expect("Failed to generate database");
 
     println!(
@@ -304,7 +312,7 @@ fn test_statistical_1000_random_orientations() {
         catalog_nside: 8,
     };
 
-    let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
         .expect("Failed to generate database");
 
     println!("\n══════════════════════════════════════════════════════════════");
@@ -570,7 +578,7 @@ fn test_save_and_load_database() {
         catalog_nside: 16,
     };
 
-    let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
         .expect("Failed to generate database");
 
     // Save to a temporary file
@@ -610,7 +618,7 @@ fn test_statistical_1000_noisy_centroids() {
         catalog_nside: 16,
     };
 
-    let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)
+    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
         .expect("Failed to generate database");
 
     println!("\n══════════════════════════════════════════════════════════════");

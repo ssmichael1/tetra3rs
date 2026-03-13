@@ -13,7 +13,7 @@
 //! quaternion — no prior attitude estimate required.
 //!
 //! **Documentation:** For tutorials, concept guides, and Python API reference, see the
-//! [tetra3rs documentation](https://ssmichael1.github.io/tetra3rs/).
+//! [tetra3rs documentation](https://tetra3rs.dev/).
 //!
 //! ## Features
 //!
@@ -21,7 +21,7 @@
 //! - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
 //! - **Robust** — statistical verification via binomial false-positive probability
 //! - **Multiscale** — supports a range of field-of-view scales in a single database
-//! - **Proper motion** — propagates Hipparcos catalog positions to any observation epoch
+//! - **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
 //! - **Zero-copy deserialization** — databases serialize with [rkyv](https://docs.rs/rkyv)
 //!   for instant loading
 //! - **Centroid extraction** — detect stars from images with local background subtraction,
@@ -45,13 +45,13 @@
 //! ```no_run
 //! use tetra3::{GenerateDatabaseConfig, SolverDatabase, SolveConfig, Centroid, SolveStatus};
 //!
-//! // Generate a database from the Hipparcos catalog
+//! // Generate a database from the Gaia catalog
 //! let config = GenerateDatabaseConfig {
 //!     max_fov_deg: 20.0,
 //!     epoch_proper_motion_year: Some(2025.0),
 //!     ..Default::default()
 //! };
-//! let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config).unwrap();
+//! let db = SolverDatabase::generate_from_gaia("data/gaia_merged.bin", &config).unwrap();
 //!
 //! // Save for fast loading later, or load a previously saved database
 //! db.save_to_file("data/my_database.rkyv").unwrap();
@@ -136,7 +136,7 @@
 //!
 
 pub mod aberration;
-/// Raw star catalogs; currently Tycho-2 & Hipparcos
+/// Raw star catalogs (Gaia DR3, optionally Hipparcos)
 pub(crate) mod catalogs;
 pub mod camera_model;
 mod centroid;

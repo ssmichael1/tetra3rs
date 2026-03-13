@@ -315,8 +315,8 @@ const TESS_TEST_CASES: &[TessTestCase] = &[
 /// Build database suitable for ~12° FOV TESS images.
 fn build_tess_database() -> SolverDatabase {
     let config = GenerateDatabaseConfig {
-        max_fov_deg: 14.0,
-        min_fov_deg: None,
+        max_fov_deg: 15.0,
+        min_fov_deg: Some(11.0),
         star_max_magnitude: None,
         pattern_max_error: 0.005,
         lattice_field_oversampling: 100,
@@ -327,9 +327,9 @@ fn build_tess_database() -> SolverDatabase {
         catalog_nside: 8,
     };
 
-    let catalog_path = test_data::ensure_test_file("data/hip2.dat");
-    SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
-        .expect("Failed to generate database from Hipparcos catalog")
+    let catalog_path = test_data::ensure_test_file("data/gaia_merged.bin");
+    SolverDatabase::generate_from_gaia(&catalog_path, &config)
+        .expect("Failed to generate database from Gaia catalog")
 }
 
 #[test]
@@ -339,7 +339,6 @@ fn test_tess_fits_solve() {
         .try_init();
 
     // Ensure all test files are downloaded
-    test_data::ensure_test_file("data/hip2.dat");
     for tc in TESS_TEST_CASES {
         test_data::ensure_test_file(&format!("data/tess_test_images/{}", tc.filename));
     }
@@ -485,7 +484,7 @@ fn test_tess_fits_solve() {
             image_width: sci_width,
             image_height: sci_height,
             fov_max_error_rad: Some((2.0_f32).to_radians()),
-            match_radius: 0.01,
+            match_radius: 0.005,
             match_threshold: 1e-5,
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
@@ -569,7 +568,6 @@ fn test_tess_distortion_fit_and_center_accuracy() {
         .with_env_filter("debug")
         .try_init();
 
-    test_data::ensure_test_file("data/hip2.dat");
     for tc in TESS_TEST_CASES {
         test_data::ensure_test_file(&format!("data/tess_test_images/{}", tc.filename));
     }
@@ -649,7 +647,7 @@ fn test_tess_distortion_fit_and_center_accuracy() {
             image_width: sci_width,
             image_height: sci_height,
             fov_max_error_rad: Some((2.0_f32).to_radians()),
-            match_radius: 0.01,
+            match_radius: 0.005,
             match_threshold: 1e-5,
             solve_timeout_ms: Some(60_000),
             match_max_error: None,
@@ -783,8 +781,6 @@ fn test_tess_distortion_fit_and_center_accuracy() {
 fn test_tess_multi_image_calibration() {
     let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
 
-    test_data::ensure_test_file("data/hip2.dat");
-
     // Same CCD (Camera 1, CCD 1) across 10 sectors — matching notebook sector list
     let same_ccd_images: &[(&str, &str)] = &[
         ("data/tess_same_ccd/sector01_cam1_ccd1.fits", "Sector 1"),
@@ -817,8 +813,8 @@ fn test_tess_multi_image_calibration() {
             epoch_proper_motion_year: Some(2018.0),
             catalog_nside: 8,
         };
-        let catalog_path = test_data::ensure_test_file("data/hip2.dat");
-        SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
+        let catalog_path = test_data::ensure_test_file("data/gaia_merged.bin");
+        SolverDatabase::generate_from_gaia(&catalog_path, &config)
             .expect("Failed to generate database")
     };
 
@@ -922,7 +918,7 @@ fn test_tess_multi_image_calibration() {
 
     let pass_configs = [
         PassConfig {
-            match_radius: 0.01,
+            match_radius: 0.005,
             refine_iterations: 10,
             calibration_order: 3,
             fov_max_error_deg: 0.5,

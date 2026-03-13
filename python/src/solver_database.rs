@@ -16,10 +16,10 @@ use crate::solve_result::PySolveResult;
 
 /// A star pattern database for plate solving.
 ///
-/// Generate from the Hipparcos catalog, or load a previously saved database.
+/// Generate from the Gaia catalog, or load a previously saved database.
 ///
 /// Example:
-///     db = tetra3rs.SolverDatabase.generate_from_hipparcos()
+///     db = tetra3rs.SolverDatabase.generate_from_gaia()  # uses bundled gaia-catalog
 ///     db.save_to_file("my_db.bin")
 ///     db = tetra3rs.SolverDatabase.load_from_file("my_db.bin")
 #[pyclass(name = "SolverDatabase", module = "tetra3rs")]
@@ -29,14 +29,22 @@ pub(crate) struct PySolverDatabase {
 
 #[pymethods]
 impl PySolverDatabase {
-    /// Generate a database from the Hipparcos catalog file.
+    /// Generate a database from a Gaia DR3 catalog file (CSV or binary).
+    ///
+    /// Accepts either:
+    /// - A CSV file (``.csv``) with columns:
+    ///   ``source_id,ra,dec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag,parallax,pmra,pmdec``
+    /// - A binary file (``.bin``) from the ``gaia-catalog`` package.
+    ///
+    /// If ``catalog_path`` is None, uses the bundled catalog from the
+    /// ``gaia-catalog`` package (installed as a dependency).
     ///
     /// Args:
-    ///     catalog_path: Path to the hip2.dat file. If None, uses the bundled
-    ///         catalog from the ``hipparcos-catalog`` package.
+    ///     catalog_path: Path to the Gaia catalog file. If None, uses the
+    ///         bundled catalog from the ``gaia-catalog`` package.
     ///     max_fov_deg: Maximum field of view in degrees. Default 30.
     ///     min_fov_deg: Minimum field of view in degrees. None = same as max (single-scale).
-    ///     star_max_magnitude: Faintest star to include. None = auto.
+    ///     star_max_magnitude: Faintest star to include (G-band). None = auto.
     ///     pattern_max_error: Maximum edge-ratio error. Default 0.001.
     ///     epoch_proper_motion_year: Year for proper motion propagation. Default 2025.
     #[staticmethod]
@@ -53,7 +61,7 @@ impl PySolverDatabase {
         epoch_proper_motion_year = Some(2025.0),
         catalog_nside = 16,
     ))]
-    fn generate_from_hipparcos(
+    fn generate_from_gaia(
         py: Python<'_>,
         catalog_path: Option<&str>,
         max_fov_deg: f32,
@@ -67,16 +75,15 @@ impl PySolverDatabase {
         epoch_proper_motion_year: Option<f64>,
         catalog_nside: u32,
     ) -> PyResult<Self> {
-        // Resolve catalog path: use provided path, or fall back to hipparcos_catalog package
+        // Resolve catalog path: use provided path, or fall back to gaia_catalog package
         let resolved_path: String = match catalog_path {
             Some(p) => p.to_string(),
             None => {
-                let module = py.import("hipparcos_catalog")?;
+                let module = py.import("gaia_catalog")?;
                 let path_obj = module.call_method0("catalog_path")?;
                 path_obj.str()?.to_string()
             }
         };
-        let catalog_path = resolved_path.as_str();
 
         let config = GenerateDatabaseConfig {
             max_fov_deg,
@@ -90,7 +97,7 @@ impl PySolverDatabase {
             epoch_proper_motion_year,
             catalog_nside,
         };
-        let db = SolverDatabase::generate_from_hipparcos(&catalog_path, &config)
+        let db = SolverDatabase::generate_from_gaia(&resolved_path, &config)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PySolverDatabase { inner: db })
     }
@@ -369,7 +376,7 @@ impl PySolverDatabase {
     ///
     /// Returns:
     ///     CatalogStar with that ID, or None if not found.
-    fn get_star_by_id(&self, catalog_id: u64) -> Option<PyCatalogStar> {
+    fn get_star_by_id(&self, catalog_id: i64) -> Option<PyCatalogStar> {
         self.inner
             .star_catalog_ids
             .iter()

@@ -238,24 +238,30 @@ def read_fits_image(path, hdu_index=0):
 # ---------------------------------------------------------------------------
 
 
+def ensure_gaia_catalog():
+    """Ensure gaia_merged.bin is available, downloading from GCS if needed."""
+    bin_path = os.path.join(DATA_DIR, "gaia_merged.bin")
+    download_if_missing(bin_path, "gaia_merged.bin")
+    return bin_path
+
+
 @pytest.fixture(scope="session")
-def hip2_path():
-    """Ensure hip2.dat is available, downloading from GCS if needed."""
-    path = os.path.join(DATA_DIR, "hip2.dat")
+def gaia_catalog_path():
+    """Ensure Gaia merged catalog is available, downloading from GCS if needed."""
     try:
-        return download_if_missing(path, "hip2.dat")
+        return ensure_gaia_catalog()
     except Exception as e:
-        pytest.skip(f"Could not obtain hip2.dat: {e}")
+        pytest.skip(f"Could not obtain Gaia catalog: {e}")
 
 
 @pytest.fixture(scope="session")
-def skyview_db(hip2_path):
+def skyview_db(gaia_catalog_path):
     """Load (or generate and cache) a database suitable for 10deg SkyView images."""
     cache_path = os.path.join(DATA_DIR, "test_skyview_db.rkyv")
     if os.path.exists(cache_path):
         return tetra3rs.SolverDatabase.load_from_file(cache_path)
-    db = tetra3rs.SolverDatabase.generate_from_hipparcos(
-        hip2_path,
+    db = tetra3rs.SolverDatabase.generate_from_gaia(
+        gaia_catalog_path,
         max_fov_deg=15.0,
         star_max_magnitude=7.0,
         pattern_max_error=0.005,
@@ -300,13 +306,13 @@ TESS_SECTORS = [1, 2, 3, 4, 5, 6, 13, 14, 15, 17]
 
 
 @pytest.fixture(scope="session")
-def tess_db(hip2_path):
+def tess_db(gaia_catalog_path):
     """Load (or generate and cache) a database suitable for TESS ~12deg FOV images."""
     cache_path = os.path.join(DATA_DIR, "test_tess_db.rkyv")
     if os.path.exists(cache_path):
         return tetra3rs.SolverDatabase.load_from_file(cache_path)
-    db = tetra3rs.SolverDatabase.generate_from_hipparcos(
-        hip2_path,
+    db = tetra3rs.SolverDatabase.generate_from_gaia(
+        gaia_catalog_path,
         max_fov_deg=14.0,
         pattern_max_error=0.005,
         lattice_field_oversampling=100,

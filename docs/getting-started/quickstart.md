@@ -7,8 +7,8 @@
 ```python
 import tetra3rs
 
-# Generate from the Hipparcos catalog (bundled automatically)
-db = tetra3rs.SolverDatabase.generate_from_hipparcos(
+# Generate from the bundled Gaia catalog (installed with tetra3rs)
+db = tetra3rs.SolverDatabase.generate_from_gaia(
     max_fov_deg=20.0,
     epoch_proper_motion_year=2025.0,
 )
@@ -81,13 +81,13 @@ if result is not None:
 ```rust
 use tetra3::{GenerateDatabaseConfig, SolverDatabase, SolveConfig, Centroid, SolveStatus};
 
-// Generate a database from the Hipparcos catalog
+// Generate a database from the Gaia catalog
 let config = GenerateDatabaseConfig {
     max_fov_deg: 20.0,
     epoch_proper_motion_year: Some(2025.0),
     ..Default::default()
 };
-let db = SolverDatabase::generate_from_hipparcos("data/hip2.dat", &config)?;
+let db = SolverDatabase::generate_from_gaia("data/gaia_merged.bin", &config)?;
 
 // Save and reload
 db.save_to_file("data/my_database.rkyv")?;
