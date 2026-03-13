@@ -24,6 +24,8 @@ def check_notebook(path: Path) -> list[str]:
             problems.append(f"  cell {i}: has outputs")
         if cell.get("execution_count") is not None:
             problems.append(f"  cell {i}: has execution_count")
+        if cell.get("cell_type") == "code" and "execution_count" not in cell:
+            problems.append(f"  cell {i}: missing execution_count key (must be null)")
     return problems
 
 
