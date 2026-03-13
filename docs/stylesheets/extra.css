@@ -1,6 +1,11 @@
 /* Widen the main content area */
 .md-grid {
-    max-width: 1440px;
+    max-width: 1800px;
+}
+
+/* Let the content column use the full grid width */
+.md-content__inner {
+    max-width: 100%;
 }
 
 /* Constrain notebook cell outputs to the content width */
