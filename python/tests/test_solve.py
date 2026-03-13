@@ -220,8 +220,8 @@ class TestSolveResult:
         r = orion_result
         assert len(r.matched_centroids) == r.num_matches
         assert len(r.matched_catalog_ids) == r.num_matches
-        # Catalog IDs should be positive Hipparcos numbers
-        assert all(cid > 0 for cid in r.matched_catalog_ids)
+        # Catalog IDs should be nonzero (positive = Gaia, negative = Hipparcos gap-fill)
+        assert all(cid != 0 for cid in r.matched_catalog_ids)
 
     def test_wcs_fields(self, orion_result):
         r = orion_result
