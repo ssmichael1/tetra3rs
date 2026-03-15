@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+### New features
+
+- **CameraModel save/load.** Added `save_to_file()` and `load_from_file()` methods to `CameraModel` for persisting camera intrinsics (including distortion) to disk using rkyv serialization. Available in both Rust and Python — models saved from one language can be loaded in the other.
+
+### Other
+
+- Added Gaia DR3 and Hipparcos 2 catalog attribution to LICENSE.
+
 ## 0.4.0
 
 ### Breaking changes

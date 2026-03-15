@@ -17,6 +17,8 @@
 //! tangent plane → multiply by f → apply parity → distort → add crpix → pixel
 //! ```
 
+use std::path::Path;
+
 use crate::distortion::Distortion;
 
 /// Camera intrinsics model.
@@ -108,6 +110,22 @@ impl CameraModel {
 
         // 4. Add optical center offset
         (dx + self.crpix[0], dy + self.crpix[1])
+    }
+
+    /// Save the camera model to a file using rkyv.
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))?;
+        std::fs::write(&path, &bytes)?;
+        Ok(())
+    }
+
+    /// Load a camera model from an rkyv file.
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let bytes = std::fs::read(&path)?;
+        let cam = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
+            .map_err(|e| anyhow::anyhow!("rkyv deserialization failed: {}", e))?;
+        Ok(cam)
     }
 }
 
@@ -272,5 +290,37 @@ mod tests {
             expected_xi,
             xi,
         );
+    }
+
+    #[test]
+    fn test_save_load_roundtrip() {
+        use crate::distortion::radial::RadialDistortion;
+
+        let cam = CameraModel {
+            focal_length_px: 5000.0,
+            image_width: 2048,
+            image_height: 1536,
+            crpix: [1.5, -2.3],
+            parity_flip: true,
+            distortion: Distortion::Radial(RadialDistortion::new(-0.1, 0.05, 0.0)),
+        };
+
+        let tmp = std::env::temp_dir().join("test_camera_model.rkyv");
+        cam.save_to_file(&tmp).unwrap();
+
+        let loaded = CameraModel::load_from_file(&tmp).unwrap();
+        assert_eq!(cam.focal_length_px, loaded.focal_length_px);
+        assert_eq!(cam.image_width, loaded.image_width);
+        assert_eq!(cam.image_height, loaded.image_height);
+        assert_eq!(cam.crpix, loaded.crpix);
+        assert_eq!(cam.parity_flip, loaded.parity_flip);
+
+        // Verify distortion roundtrip by checking pixel_to_tanplane
+        let (xi1, eta1) = cam.pixel_to_tanplane(100.0, 200.0);
+        let (xi2, eta2) = loaded.pixel_to_tanplane(100.0, 200.0);
+        assert!((xi1 - xi2).abs() < 1e-15);
+        assert!((eta1 - eta2).abs() < 1e-15);
+
+        std::fs::remove_file(&tmp).ok();
     }
 }

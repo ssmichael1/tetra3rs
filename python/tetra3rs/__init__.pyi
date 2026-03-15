@@ -113,6 +113,26 @@ class CameraModel:
         """Convert tangent-plane coordinates to pixel coordinates."""
         ...
 
+    def save_to_file(self, path: str) -> None:
+        """Save the camera model to a file (rkyv binary format).
+
+        Args:
+            path: File path to write to.
+        """
+        ...
+
+    @staticmethod
+    def load_from_file(path: str) -> "CameraModel":
+        """Load a camera model from a file (rkyv binary format).
+
+        Args:
+            path: File path to read from.
+
+        Returns:
+            CameraModel loaded from the file.
+        """
+        ...
+
 
 class CalibrateResult:
     """Result of camera calibration.

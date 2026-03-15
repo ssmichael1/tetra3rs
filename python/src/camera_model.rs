@@ -155,6 +155,30 @@ impl PyCameraModel {
         self.inner.tanplane_to_pixel(xi, eta)
     }
 
+    /// Save the camera model to a file.
+    ///
+    /// Args:
+    ///     path: File path to write to.
+    fn save_to_file(&self, path: &str) -> PyResult<()> {
+        self.inner
+            .save_to_file(path)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Load a camera model from a file.
+    ///
+    /// Args:
+    ///     path: File path to read from.
+    ///
+    /// Returns:
+    ///     CameraModel loaded from the file.
+    #[staticmethod]
+    fn load_from_file(path: &str) -> PyResult<Self> {
+        let inner = CameraModel::load_from_file(path)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { inner })
+    }
+
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)

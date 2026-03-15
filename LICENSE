@@ -211,6 +211,30 @@ cedar-solve — https://github.com/smroid/cedar-solve
    END OF TERMS AND CONDITIONS
 
 -----------------------------------------------------------------------------
+Gaia DR3 Star Catalog — https://www.cosmos.esa.int/gaia
+-----------------------------------------------------------------------------
+
+This project includes data from the European Space Agency (ESA) mission Gaia
+(https://www.cosmos.esa.int/gaia), processed by the Gaia Data Processing and
+Analysis Consortium (DPAC, https://www.cosmos.esa.int/web/gaia/dpac/consortium).
+Funding for the DPAC has been provided by national institutions, in particular
+the institutions participating in the Gaia Multilateral Agreement.
+
+Gaia DR3 data is licensed under the Creative Commons Attribution-ShareAlike
+3.0 IGO License (CC BY-SA 3.0 IGO):
+https://creativecommons.org/licenses/by-sa/3.0/igo/
+
+Reference: Gaia Collaboration et al. (2023), A&A, 674, A1 (Gaia DR3)
+
+-----------------------------------------------------------------------------
+Hipparcos 2 Star Catalog — https://www.cosmos.esa.int/web/hipparcos
+-----------------------------------------------------------------------------
+
+This project includes data from the Hipparcos 2 catalog (van Leeuwen, 2007,
+A&A, 474, 653). The Hipparcos catalog is provided by ESA and is freely
+available for scientific use.
+
+-----------------------------------------------------------------------------
 Original Tetra license (tetra3 and cedar-solve are derivatives of Tetra):
 -----------------------------------------------------------------------------
 
