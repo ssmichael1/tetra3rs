@@ -1,3 +1,73 @@
+/* Ioskeley Mono — self-hosted */
+@font-face {
+    font-family: "Ioskeley Mono";
+    font-style: normal;
+    font-weight: 400;
+    src: url("../fonts/IoskeleyMono-Regular.woff2") format("woff2");
+    font-display: swap;
+}
+@font-face {
+    font-family: "Ioskeley Mono";
+    font-style: normal;
+    font-weight: 700;
+    src: url("../fonts/IoskeleyMono-Bold.woff2") format("woff2");
+    font-display: swap;
+}
+
+/* Apply Ioskeley Mono as the monospace font */
+:root {
+    --md-code-font: "Ioskeley Mono", SFMono-Regular, Consolas, monospace;
+}
+
+/* Earth tone palette overrides — light mode */
+[data-md-color-scheme="default"] {
+    --md-primary-fg-color: #5d4037;
+    --md-primary-fg-color--light: #8b6b61;
+    --md-primary-fg-color--dark: #3e2723;
+    --md-accent-fg-color: #bf8040;
+    --md-default-bg-color: #faf8f5;
+    --md-default-fg-color--light: #5c524a;
+    --md-typeset-a-color: #8d6e3f;
+}
+
+/* Warm code block backgrounds — light mode */
+[data-md-color-scheme="default"] .highlight,
+[data-md-color-scheme="default"] .md-typeset code {
+    background-color: #f3ece4;
+}
+
+/* Admonition accent colors — light mode */
+[data-md-color-scheme="default"] .md-typeset .admonition,
+[data-md-color-scheme="default"] .md-typeset details {
+    border-color: #bf8040;
+}
+
+/* Earth tone palette overrides — dark mode */
+[data-md-color-scheme="slate"] {
+    --md-primary-fg-color: #4e342e;
+    --md-primary-fg-color--light: #6d4c41;
+    --md-primary-fg-color--dark: #3e2723;
+    --md-accent-fg-color: #d4a06a;
+    --md-default-bg-color: #1e1b18;
+    --md-default-fg-color: #e0d6cc;
+    --md-default-fg-color--light: #b8a99a;
+    --md-typeset-a-color: #d4a06a;
+}
+
+/* Warm code block backgrounds — dark mode */
+[data-md-color-scheme="slate"] .highlight,
+[data-md-color-scheme="slate"] .md-typeset code {
+    background-color: #2a2420;
+}
+
+/* Sidebar styling */
+[data-md-color-scheme="default"] .md-sidebar {
+    border-right: 1px solid #e8e0d6;
+}
+[data-md-color-scheme="slate"] .md-sidebar {
+    border-right: 1px solid #332d28;
+}
+
 /* Widen the main content area */
 .md-grid {
     max-width: 1800px;
