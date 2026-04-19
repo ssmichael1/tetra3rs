@@ -15,6 +15,7 @@ pub mod combinations;
 pub mod database;
 pub mod pattern;
 pub mod solve;
+pub mod track;
 pub mod wcs_refine;
 
 use rkyv::{Archive, Deserialize, Serialize};
@@ -241,6 +242,42 @@ pub struct SolveConfig {
     /// For ground-based or Earth-orbiting observers, this is dominated by
     /// Earth's orbital velocity (~30 km/s). Default: `None` (no correction).
     pub observer_velocity_km_s: Option<[f64; 3]>,
+
+    /// Optional attitude hint for tracking-mode solving.
+    ///
+    /// When set, the solver first attempts a fast direct-correspondence solve
+    /// using the hint (project catalog stars near the hinted boresight, match
+    /// them to centroids by nearest-neighbor in pixel space, run Wahba SVD).
+    /// On success, returns the result; on failure, falls back to the full
+    /// lost-in-space pattern-hash search unless [`SolveConfig::strict_hint`]
+    /// is set.
+    ///
+    /// The quaternion uses the same convention as [`SolveResult::qicrs2cam`]:
+    /// it rotates ICRS vectors into the camera frame. Pass the previous
+    /// frame's `qicrs2cam` to chain solves at video rate.
+    ///
+    /// Tracking mode can succeed with as few as 3 matched stars (LIS needs 4)
+    /// and is robust against pattern-hash failures from low-SNR or sparse
+    /// fields. The main robustness assumption is that the hint is within
+    /// [`SolveConfig::hint_uncertainty_rad`] of the true attitude.
+    pub attitude_hint: Option<Quaternion>,
+
+    /// Angular uncertainty (radians) of [`SolveConfig::attitude_hint`].
+    ///
+    /// Used to size the catalog cone search and the pixel-space match radius
+    /// for centroid–star correspondence. Larger values widen the search and
+    /// allow staler hints, at the cost of more spurious candidates.
+    ///
+    /// Ignored unless `attitude_hint` is set. Default: 1°.
+    pub hint_uncertainty_rad: f32,
+
+    /// When `true`, do not fall back to lost-in-space if the hinted solve
+    /// fails. Returns the hinted-solve failure status directly.
+    ///
+    /// Useful when downstream logic must distinguish "hint was wrong" from
+    /// "fell back to LIS and succeeded with a different attitude than expected."
+    /// Ignored unless `attitude_hint` is set. Default: `false`.
+    pub strict_hint: bool,
 }
 
 impl Default for SolveConfig {
@@ -264,6 +301,9 @@ impl Default for SolveConfig {
                 distortion: Distortion::None,
             },
             observer_velocity_km_s: None,
+            attitude_hint: None,
+            hint_uncertainty_rad: 1.0_f32.to_radians(),
+            strict_hint: false,
         }
     }
 }

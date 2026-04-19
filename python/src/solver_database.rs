@@ -279,6 +279,7 @@ impl PySolverDatabase {
             refine_iterations,
             camera_model: cam,
             observer_velocity_km_s,
+            ..SolveConfig::default()
         };
 
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
