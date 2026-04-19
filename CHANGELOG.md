@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1
+
+### New features
+
+- **Tracking-mode solving via attitude hint.** `SolveConfig` gains an optional `attitude_hint: Option<Quaternion>` (plus `hint_uncertainty_rad` and `strict_hint`). When set, the solver projects catalog stars near the hinted boresight, nearest-neighbor matches them to centroids, runs Wahba SVD, and reuses the existing verification + WCS refine path — skipping the 4-star pattern hash entirely. Succeeds with as few as 3 matched stars (lost-in-space needs 4), is robust to pattern-hash failures from sparse / low-SNR fields, and on failure falls back to lost-in-space unless `strict_hint` is set. Intended for video-rate star trackers chaining solves frame-to-frame.
+
+### Fixes
+
+- `SolveResult::camera_model` now has `image_width` / `image_height` populated from the input `SolveConfig`. Previously these were inherited from `config.camera_model`, so a solve config built with `..Default::default()` (without explicitly constructing a `CameraModel`) would leave them zero, breaking downstream code that consumes the result's camera model.
+
+### Other
+
+- `CLAUDE.md` added to the repo root (guidance for Claude Code sessions in this repo).
+
 ## 0.5.0
 
 ### Precision improvements

@@ -346,3 +346,144 @@ class TestCalibration:
         cal2 = pickle.loads(pickle.dumps(cal))
         assert cal2.n_inliers == cal.n_inliers
         assert abs(cal2.rmse_after_px - cal.rmse_after_px) < 1e-6
+
+
+class TestTrackingMode:
+    """Solve with an attitude hint (tracking mode)."""
+
+    def _make_centroids(self, skyview_db, ra, dec, fov_deg, image_size):
+        f_px = image_size / (2.0 * math.tan(math.radians(fov_deg / 2.0)))
+        stars = skyview_db.cone_search(ra, dec, fov_deg)
+        return project_stars_tan(stars[:50], ra, dec, f_px, image_size)
+
+    @pytest.mark.parametrize("hint_kind", ["quaternion", "rotation_matrix"])
+    def test_tracking_with_hint(self, skyview_db, hint_kind):
+        """LIS solve → perturb attitude → re-solve with hint. Must agree with LIS."""
+        ra, dec, fov_deg, image_size = 83.0, -1.0, 10.0, 2048
+        centroids = self._make_centroids(skyview_db, ra, dec, fov_deg, image_size)
+        assert len(centroids) >= 4
+
+        # Step 1: lost-in-space solve
+        lis = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            fov_max_error_deg=3.0,
+        )
+        assert lis is not None, "LIS solve failed"
+
+        # Step 2: perturb the recovered attitude by 15' around a random axis.
+        # Small-angle quaternion: q_pert = [cos(θ/2), sin(θ/2)·axis]
+        perturb_rad = math.radians(15.0 / 60.0)
+        rng = np.random.default_rng(42)
+        axis = rng.standard_normal(3)
+        axis /= np.linalg.norm(axis)
+        half = perturb_rad / 2.0
+        q_pert = np.array([math.cos(half), *(math.sin(half) * axis)])
+        qw, qx, qy, qz = lis.quaternion
+        # Hamilton product q_pert * lis.quaternion
+        pw, px, py, pz = q_pert
+        hinted_quat = np.array([
+            pw * qw - px * qx - py * qy - pz * qz,
+            pw * qx + px * qw + py * qz - pz * qy,
+            pw * qy - px * qz + py * qw + pz * qx,
+            pw * qz + px * qy - py * qx + pz * qw,
+        ])
+
+        # Pass either the quaternion or the rotation matrix form.
+        if hint_kind == "quaternion":
+            hint = hinted_quat
+        else:
+            # Build the rotation matrix from the perturbed quaternion.
+            w, x, y, z = hinted_quat
+            hint = np.array([
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ])
+
+        tracked = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            camera_model=lis.camera_model,
+            attitude_hint=hint,
+            hint_uncertainty_deg=1.0,
+            strict_hint=True,  # no LIS fallback — we want to test tracking specifically
+        )
+
+        assert tracked is not None, f"Tracking solve failed with {hint_kind} hint"
+        # Boresight agreement with LIS (tracked should land on the same sky point)
+        sep = angular_sep_deg(lis.ra_deg, lis.dec_deg, tracked.ra_deg, tracked.dec_deg)
+        assert sep < 10.0 / 3600.0, (
+            f"Tracked boresight disagrees with LIS by {sep * 3600:.1f}″ ({hint_kind})"
+        )
+
+    def test_tracking_fallback_to_lis_on_bad_hint(self, skyview_db):
+        """A wildly wrong hint should fall back to LIS (default behavior)."""
+        ra, dec, fov_deg, image_size = 83.0, -1.0, 10.0, 2048
+        centroids = self._make_centroids(skyview_db, ra, dec, fov_deg, image_size)
+
+        # Bogus hint pointing 180° away from the actual field.
+        bad_hint = np.array([0.0, 1.0, 0.0, 0.0])  # 180° rotation about X
+
+        result = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            fov_max_error_deg=3.0,
+            attitude_hint=bad_hint,
+            hint_uncertainty_deg=0.5,  # tight — hint must be near truth
+            # strict_hint=False → fallback to LIS
+        )
+
+        assert result is not None, "Should have fallen back to LIS"
+        error = angular_sep_deg(result.ra_deg, result.dec_deg, ra, dec)
+        assert error < 0.5, f"LIS fallback solved wrong field (error {error:.3f}°)"
+
+    def test_strict_hint_fails_on_bad_hint(self, skyview_db):
+        """With strict_hint=True, a bad hint should produce None."""
+        ra, dec, fov_deg, image_size = 83.0, -1.0, 10.0, 2048
+        centroids = self._make_centroids(skyview_db, ra, dec, fov_deg, image_size)
+        bad_hint = np.array([0.0, 1.0, 0.0, 0.0])
+
+        result = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            attitude_hint=bad_hint,
+            hint_uncertainty_deg=0.5,
+            strict_hint=True,
+        )
+        assert result is None, "strict_hint should suppress LIS fallback on bad hint"
+
+    def test_attitude_hint_invalid_shape_raises(self, skyview_db):
+        """Passing a hint with wrong shape should raise ValueError."""
+        centroids = self._make_centroids(skyview_db, 83.0, -1.0, 10.0, 2048)
+        with pytest.raises(ValueError):
+            skyview_db.solve_from_centroids(
+                centroids,
+                fov_estimate_deg=10.0,
+                image_width=2048,
+                image_height=2048,
+                attitude_hint=np.zeros(5),  # wrong size
+            )
+
+    def test_hint_uncertainty_both_raises(self, skyview_db):
+        centroids = self._make_centroids(skyview_db, 83.0, -1.0, 10.0, 2048)
+        with pytest.raises(ValueError):
+            skyview_db.solve_from_centroids(
+                centroids,
+                fov_estimate_deg=10.0,
+                image_width=2048,
+                image_height=2048,
+                attitude_hint=np.array([1.0, 0.0, 0.0, 0.0]),
+                hint_uncertainty_deg=1.0,
+                hint_uncertainty_rad=0.01,
+            )
+
+

@@ -194,6 +194,18 @@ class SolveResult:
         ...
 
     @property
+    def quaternion(self) -> npt.NDArray[np.float64]:
+        """Attitude quaternion as a 4-element ``[w, x, y, z]`` array.
+
+        Rotates ICRS vectors into the camera frame:
+        ``camera_vec = quaternion * icrs_vec``.
+
+        Suitable for feeding back as ``attitude_hint`` on the next frame's
+        ``solve_from_centroids`` call (tracking mode).
+        """
+        ...
+
+    @property
     def ra_deg(self) -> float:
         """Right ascension of the boresight in degrees [0, 360)."""
         ...
@@ -603,6 +615,12 @@ class SolverDatabase:
         refine_iterations: int = 2,
         camera_model: Optional[CameraModel] = None,
         observer_velocity_km_s: Optional[list[float]] = None,
+        attitude_hint: Optional[
+            Union[list[float], npt.NDArray[np.float64]]
+        ] = None,  # [w, x, y, z] quaternion or 3x3 rotation matrix
+        hint_uncertainty_deg: Optional[float] = None,
+        hint_uncertainty_rad: Optional[float] = None,
+        strict_hint: bool = False,
     ) -> Optional[SolveResult]:
         """Solve for camera attitude given star centroids.
 
@@ -635,6 +653,28 @@ class SolverDatabase:
                 positions are aberration-corrected to apparent positions,
                 removing the ~20" bias from Earth's orbital velocity.
                 None = no correction (default).
+            attitude_hint: Optional attitude hint. Accepts either a 4-element
+                ``[w, x, y, z]`` quaternion (list or 1D ndarray, like
+                ``SolveResult.quaternion``) or a 3×3 rotation matrix
+                (2D ndarray, like ``SolveResult.rotation_matrix_icrs_to_camera``),
+                rotating ICRS into the camera frame. When provided, the solver
+                skips the 4-star pattern-hash phase and instead projects nearby
+                catalog stars via the hint, nearest-neighbor matches them to
+                centroids, and runs the same verification + WCS refine path as
+                lost-in-space. Typical use case: video-rate tracking where each
+                frame's solve seeds the next. Succeeds with as few as 3 matched
+                stars (vs. 4 for lost-in-space). On failure, falls back to
+                lost-in-space unless ``strict_hint=True``.
+            hint_uncertainty_deg: Angular uncertainty of the attitude hint,
+                in degrees.
+            hint_uncertainty_rad: Angular uncertainty of the attitude hint,
+                in radians. At most one of the two may be provided; default 1°
+                if neither is set. Used to size the catalog cone search and
+                the initial pixel match radius. Ignored unless ``attitude_hint``
+                is set.
+            strict_hint: If True, do not fall back to lost-in-space if the
+                hinted solve fails. Default False. Ignored unless
+                ``attitude_hint`` is set.
 
         Returns:
             A SolveResult on success, or None if no match was found.

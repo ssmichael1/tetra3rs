@@ -143,6 +143,23 @@ impl PySolverDatabase {
     ///         (ICRS/GCRF frame). When set, catalog positions are aberration-corrected
     ///         to apparent positions, removing ~20" bias from Earth's orbital velocity.
     ///         None = no correction (default).
+    ///     attitude_hint: Optional attitude hint. Accepts either a 4-element
+    ///         ``[w, x, y, z]`` quaternion (like ``SolveResult.quaternion``) or a
+    ///         3×3 rotation matrix (like ``SolveResult.rotation_matrix_icrs_to_camera``),
+    ///         rotating ICRS into the camera frame. When provided, the solver skips
+    ///         the 4-star pattern-hash phase and instead projects nearby catalog
+    ///         stars via the hint, nearest-neighbor matches them to centroids, and
+    ///         runs the same verification + WCS refine path as lost-in-space.
+    ///         Typical use case: video-rate tracking where each frame's solve seeds
+    ///         the next. Succeeds with as few as 3 matched stars (vs. 4 for LIS).
+    ///         On failure falls back to lost-in-space unless ``strict_hint`` is True.
+    ///     hint_uncertainty_deg: Angular uncertainty of the attitude hint, in degrees.
+    ///     hint_uncertainty_rad: Angular uncertainty of the attitude hint, in radians.
+    ///         At most one of the two may be provided; default 1° if neither is set.
+    ///         Used to size the catalog cone search and the initial pixel match radius.
+    ///         Ignored unless ``attitude_hint`` is set.
+    ///     strict_hint: If True, do not fall back to lost-in-space if the hinted
+    ///         solve fails. Default False. Ignored unless ``attitude_hint`` is set.
     ///
     /// Returns:
     ///     SolveResult on success, None if no match was found.
@@ -162,7 +179,12 @@ impl PySolverDatabase {
         refine_iterations = 2,
         camera_model = None,
         observer_velocity_km_s = None,
+        attitude_hint = None,
+        hint_uncertainty_deg = None,
+        hint_uncertainty_rad = None,
+        strict_hint = false,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn solve_from_centroids<'py>(
         &self,
         _py: Python<'py>,
@@ -181,6 +203,10 @@ impl PySolverDatabase {
         refine_iterations: u32,
         camera_model: Option<PyCameraModel>,
         observer_velocity_km_s: Option<[f64; 3]>,
+        attitude_hint: Option<&Bound<'py, pyo3::PyAny>>,
+        hint_uncertainty_deg: Option<f64>,
+        hint_uncertainty_rad: Option<f64>,
+        strict_hint: bool,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
         let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
@@ -267,6 +293,26 @@ impl PySolverDatabase {
             None => CameraModel::from_fov(fov_rad as f64, img_width, img_height),
         };
 
+        // Resolve hint uncertainty: at most one of deg or rad.
+        let hint_uncertainty = match (hint_uncertainty_deg, hint_uncertainty_rad) {
+            (Some(deg), None) => Some((deg as f32).to_radians()),
+            (None, Some(rad)) => Some(rad as f32),
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Specify at most one of hint_uncertainty_deg or hint_uncertainty_rad",
+                ));
+            }
+            (None, None) => None,
+        };
+
+        // Build quaternion from the hint, accepting either a 4-element [w, x, y, z]
+        // quaternion or a 3×3 rotation matrix.
+        let attitude_hint_q = match attitude_hint {
+            None => None,
+            Some(obj) => Some(parse_attitude_hint(obj)?),
+        };
+
+        let default_config = SolveConfig::default();
         let config = SolveConfig {
             fov_estimate_rad: fov_rad,
             image_width: img_width,
@@ -279,6 +325,9 @@ impl PySolverDatabase {
             refine_iterations,
             camera_model: cam,
             observer_velocity_km_s,
+            attitude_hint: attitude_hint_q,
+            hint_uncertainty_rad: hint_uncertainty.unwrap_or(default_config.hint_uncertainty_rad),
+            strict_hint,
         };
 
         let result = self.inner.solve_from_centroids(&centroid_vec, &config);
@@ -514,4 +563,59 @@ impl PySolverDatabase {
             iterations: result.iterations,
         })
     }
+}
+
+/// Parse a Python `attitude_hint` argument into a tetra3 Quaternion.
+///
+/// Accepts either a 4-element quaternion `[w, x, y, z]` (list or 1D ndarray)
+/// or a 3×3 rotation matrix (2D ndarray).
+fn parse_attitude_hint(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<tetra3::Quaternion> {
+    use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+    use pyo3::exceptions::PyValueError;
+
+    // Try 1D [w, x, y, z] quaternion.
+    if let Ok(arr) = obj.extract::<PyReadonlyArray1<f64>>() {
+        let slice = arr.as_slice().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if slice.len() != 4 {
+            return Err(PyValueError::new_err(format!(
+                "attitude_hint 1D array must have 4 elements [w, x, y, z], got {}",
+                slice.len()
+            )));
+        }
+        return Ok(tetra3::Quaternion::new(
+            slice[0] as f32, slice[1] as f32, slice[2] as f32, slice[3] as f32,
+        ));
+    }
+    // Try a plain Python list / tuple of length 4.
+    if let Ok(vec) = obj.extract::<Vec<f64>>() {
+        if vec.len() != 4 {
+            return Err(PyValueError::new_err(format!(
+                "attitude_hint list must have 4 elements [w, x, y, z], got {}",
+                vec.len()
+            )));
+        }
+        return Ok(tetra3::Quaternion::new(
+            vec[0] as f32, vec[1] as f32, vec[2] as f32, vec[3] as f32,
+        ));
+    }
+    // Try a 3×3 rotation matrix.
+    if let Ok(arr) = obj.extract::<PyReadonlyArray2<f64>>() {
+        let shape = arr.shape();
+        if shape != [3, 3] {
+            return Err(PyValueError::new_err(format!(
+                "attitude_hint 2D array must have shape (3, 3), got {:?}",
+                shape
+            )));
+        }
+        let view = arr.as_array();
+        let m = numeris::Matrix3::<f32>::new([
+            [view[(0, 0)] as f32, view[(0, 1)] as f32, view[(0, 2)] as f32],
+            [view[(1, 0)] as f32, view[(1, 1)] as f32, view[(1, 2)] as f32],
+            [view[(2, 0)] as f32, view[(2, 1)] as f32, view[(2, 2)] as f32],
+        ]);
+        return Ok(tetra3::Quaternion::from_rotation_matrix(&m));
+    }
+    Err(PyValueError::new_err(
+        "attitude_hint must be a 4-element [w, x, y, z] quaternion or a 3x3 rotation matrix",
+    ))
 }

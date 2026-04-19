@@ -924,3 +924,163 @@ fn test_statistical_1000_noisy_centroids() {
         n_attempted,
     );
 }
+
+/// Tracking-mode test: solve with LIS, then perturb the attitude and re-solve
+/// using the perturbed attitude as a hint. Verify the hinted solve succeeds
+/// (and ideally faster).
+#[test]
+fn test_tracking_with_attitude_hint() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+        .try_init();
+
+    // Small DB matching test_generate_and_solve so it builds quickly.
+    let config = GenerateDatabaseConfig {
+        max_fov_deg: 20.0,
+        min_fov_deg: None,
+        star_max_magnitude: Some(6.0),
+        pattern_max_error: 0.005,
+        lattice_field_oversampling: 30,
+        patterns_per_lattice_field: 25,
+        verification_stars_per_fov: 50,
+        multiscale_step: 1.5,
+        epoch_proper_motion_year: Some(2025.0),
+        catalog_nside: 8,
+    };
+
+    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
+        .expect("Failed to generate database");
+
+    let fov_rad = 15.0_f32.to_radians();
+    let half_fov = fov_rad / 2.0;
+    let image_width = 1024u32;
+    let image_height = 1024u32;
+    let pixel_scale = fov_rad / image_width as f32;
+
+    let mut rng = StdRng::seed_from_u64(7);
+
+    // Number of fields to test. Each: solve LIS, then re-solve with hint.
+    let n_trials = 20u32;
+    let mut n_lis_ok = 0u32;
+    let mut n_track_ok = 0u32;
+    let mut n_track_recovers_perturbed = 0u32;
+    let mut lis_time_ms = Vec::new();
+    let mut track_time_ms = Vec::new();
+
+    let perturb_arcmin = 30.0_f32; // hint within 0.5° of truth
+    let perturb_rad = perturb_arcmin / 60.0 * std::f32::consts::PI / 180.0;
+
+    for trial in 0..n_trials {
+        let ra: f32 = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
+        let dec: f32 = (rng.random::<f32>() * 2.0 - 1.0).asin();
+        let roll: f32 = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
+
+        let rot = rotation_from_ra_dec_roll(ra, dec, roll);
+        let boresight_icrs =
+            Vector3::from_array([dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]);
+        let centroids = generate_centroids(&db, &rot, &boresight_icrs, half_fov, pixel_scale);
+        if centroids.len() < 4 {
+            continue;
+        }
+
+        // ── Step 1: LIS solve (no hint) ──
+        let lis_config = SolveConfig {
+            fov_estimate_rad: fov_rad,
+            image_width,
+            image_height,
+            fov_max_error_rad: Some(2.0_f32.to_radians()),
+            solve_timeout_ms: Some(10_000),
+            ..Default::default()
+        };
+        let lis_result = db.solve_from_centroids(&centroids, &lis_config);
+        if lis_result.status != SolveStatus::MatchFound {
+            continue;
+        }
+        n_lis_ok += 1;
+        lis_time_ms.push(lis_result.solve_time_ms);
+        let lis_quat = lis_result.qicrs2cam.expect("MatchFound implies quaternion");
+
+        // ── Step 2: perturb the attitude by `perturb_rad` around a random axis ──
+        let axis_x: f32 = rng.random::<f32>() - 0.5;
+        let axis_y: f32 = rng.random::<f32>() - 0.5;
+        let axis_z: f32 = rng.random::<f32>() - 0.5;
+        let axis = Vector3::from_array([axis_x, axis_y, axis_z]).normalize();
+        let half = perturb_rad / 2.0;
+        let s = half.sin();
+        let perturbation = Quaternion::new(half.cos(), s * axis[0], s * axis[1], s * axis[2]);
+        let hinted_quat = perturbation * lis_quat;
+
+        // ── Step 3: re-solve with the perturbed attitude as a hint ──
+        // Reuse the camera model from the LIS result (refined focal length).
+        let track_config = SolveConfig {
+            fov_estimate_rad: fov_rad,
+            image_width,
+            image_height,
+            attitude_hint: Some(hinted_quat),
+            hint_uncertainty_rad: 1.0_f32.to_radians(),
+            strict_hint: true, // disable LIS fallback so we measure tracking alone
+            solve_timeout_ms: Some(2_000),
+            camera_model: lis_result
+                .camera_model
+                .clone()
+                .expect("MatchFound implies camera_model"),
+            ..Default::default()
+        };
+        let track_result = db.solve_from_centroids(&centroids, &track_config);
+        if track_result.status == SolveStatus::MatchFound {
+            n_track_ok += 1;
+            track_time_ms.push(track_result.solve_time_ms);
+
+            // Verify the tracked solution agrees with the LIS solution
+            let tq = track_result.qicrs2cam.unwrap();
+            let lis_bs = lis_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
+            let track_bs = tq.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
+            let agreement = angular_separation(&lis_bs, &track_bs);
+            if agreement < (10.0_f32 / 3600.0).to_radians() {
+                n_track_recovers_perturbed += 1;
+            } else {
+                println!(
+                    "  Trial {:2}: tracked but disagrees with LIS by {:.1}\"",
+                    trial,
+                    agreement.to_degrees() * 3600.0
+                );
+            }
+        } else {
+            println!(
+                "  Trial {:2}: tracking FAILED (status={:?}, perturb={:.1}')",
+                trial, track_result.status, perturb_arcmin
+            );
+        }
+    }
+
+    let mean = |v: &[f32]| -> f32 {
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
+    };
+
+    println!("\n══════════════════════════════════════════════════════════════");
+    println!("  Tracking-mode test ({} trials, {:.1}' hint perturbation)", n_trials, perturb_arcmin);
+    println!("    LIS solves successful:        {:3}/{}", n_lis_ok, n_trials);
+    println!("    Tracking solves successful:   {:3}/{}", n_track_ok, n_lis_ok);
+    println!("    Tracking agrees with LIS:     {:3}/{}", n_track_recovers_perturbed, n_track_ok);
+    println!("    Mean LIS time:      {:7.2} ms", mean(&lis_time_ms));
+    println!("    Mean tracking time: {:7.2} ms", mean(&track_time_ms));
+    println!("══════════════════════════════════════════════════════════════\n");
+
+    assert!(n_lis_ok >= 15, "LIS only solved {}/{} — DB may be too sparse", n_lis_ok, n_trials);
+    assert!(
+        n_track_ok as f64 / n_lis_ok as f64 > 0.90,
+        "Tracking only succeeded for {}/{} of LIS-solved frames",
+        n_track_ok,
+        n_lis_ok
+    );
+    assert!(
+        n_track_recovers_perturbed as f64 / n_track_ok.max(1) as f64 > 0.95,
+        "Tracking matched but disagreed with LIS in {}/{} cases",
+        n_track_ok - n_track_recovers_perturbed,
+        n_track_ok
+    );
+}

@@ -33,7 +33,7 @@ const C_KM_S: f64 = 299_792.458;
 ///
 /// `beta` = observer barycentric velocity / c (dimensionless, ICRS frame).
 /// Formula: s' = s + β - s(s·β), then renormalize.
-fn aberration_correct(sv: &[f32; 3], beta: &[f64; 3]) -> [f32; 3] {
+pub(super) fn aberration_correct(sv: &[f32; 3], beta: &[f64; 3]) -> [f32; 3] {
     let sx = sv[0] as f64;
     let sy = sv[1] as f64;
     let sz = sv[2] as f64;
@@ -104,6 +104,24 @@ impl SolverDatabase {
             })
             .collect();
         let working_centroids: &[Centroid] = &preprocessed;
+
+        // ── Tracking-mode shortcut: if a hint is provided, try direct correspondence first ──
+        if let Some(ref hint) = config.attitude_hint {
+            let hint_result = self.solve_with_hint(working_centroids, config, hint, t0);
+            if hint_result.status == SolveStatus::MatchFound {
+                debug!(
+                    "Hinted solve succeeded in {:.1} ms ({} matches)",
+                    hint_result.solve_time_ms,
+                    hint_result.num_matches.unwrap_or(0)
+                );
+                return hint_result;
+            }
+            if config.strict_hint {
+                debug!("Hinted solve failed and strict_hint is set — returning failure");
+                return hint_result;
+            }
+            debug!("Hinted solve failed; falling back to lost-in-space");
+        }
 
         // Build FOV sweep: exact estimate first, then spiral outward
         let fov_values = build_fov_sweep(
@@ -560,11 +578,15 @@ impl SolverDatabase {
                     // Convert rotation to quaternion
                     let quat = Quaternion::from_rotation_matrix(&refined_rotation);
 
-                    // Build result camera model with refined focal length and detected parity
+                    // Build result camera model with refined focal length, image
+                    // dimensions (always filled from config, even if the input
+                    // camera_model was a Default placeholder), and detected parity.
                     let mut result_cam = config.camera_model.clone();
                     let refined_f = (config.image_width as f64 / 2.0)
                         / (refined_fov as f64 / 2.0).tan();
                     result_cam.focal_length_px = refined_f;
+                    result_cam.image_width = config.image_width;
+                    result_cam.image_height = config.image_height;
                     result_cam.parity_flip = parity_flip;
 
                     return SolveResult {
@@ -710,7 +732,7 @@ fn sort_by_centroid_distance_inline(order: &mut [usize; 4], vectors: &[[f32; 3];
 /// The resulting R satisfies: camera_vec ≈ R * icrs_vec.
 ///
 /// The SVD is computed in f64 for precision, then the result is converted back to f32.
-fn find_rotation_matrix<const N: usize>(
+pub(super) fn find_rotation_matrix<const N: usize>(
     image_vectors: &[[f32; 3]; N],
     catalog_vectors: &[[f32; 3]; N],
 ) -> Matrix3<f32> {
@@ -739,7 +761,7 @@ fn find_rotation_matrix<const N: usize>(
 /// Find unique 1-to-1 matches between image centroids and projected catalog positions.
 ///
 /// Returns Vec<(centroid_local_idx, catalog_star_idx)>.
-fn find_centroid_matches(
+pub(super) fn find_centroid_matches(
     centroid_vectors: &[[f32; 3]],
     catalog_positions: &[(usize, f32, f32)], // (star_idx, cam_x, cam_y) in radians
     match_radius: f32,
@@ -794,7 +816,7 @@ fn find_centroid_matches(
 
 /// Compute the binomial CDF: P(X <= k) where X ~ Binomial(n, p).
 /// Uses iterative computation for numerical stability at typical sizes (n < 500).
-fn binomial_cdf(k: u32, n: u32, p: f64) -> f64 {
+pub(super) fn binomial_cdf(k: u32, n: u32, p: f64) -> f64 {
     if k >= n {
         return 1.0;
     }
