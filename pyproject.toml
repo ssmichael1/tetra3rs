@@ -7,7 +7,7 @@ name = "tetra3rs"
 version = "0.6.0"
 description = "Fast star plate solver written in Rust"
 requires-python = ">=3.10"
-dependencies = ["numpy", "gaia-catalog"]
+dependencies = ["numpy", "gaia-catalog<1.0"]
 authors = [{ name = "Steven Michael" }]
 license = { text = "MIT" }
 readme = "README.md"
