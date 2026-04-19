@@ -122,11 +122,15 @@
 //! v/c), but the final attitude quaternion is biased by ~20″ unless corrected.
 //!
 //! Pass the observer's barycentric velocity (ICRS, km/s) via
-//! [`SolveConfig::observer_velocity_km_s`]. The solver applies a first-order
-//! correction to all catalog vectors before matching and refinement.
+//! [`SolveConfig::observer_velocity_km_s`]. The solver applies the classical
+//! correction `s' = (s + β) / |s + β|` to all catalog vectors before matching
+//! and refinement.
 //!
-//! For Earth-based or Earth-orbiting observers, [`earth_barycentric_velocity`]
-//! provides an approximate velocity from a circular-orbit model:
+//! For ground-based observers, [`earth_barycentric_velocity`] is the whole
+//! story. For observers on LEO spacecraft, Earth-orbital velocity (~7.5 km/s,
+//! ~5″ bias) is *not* negligible — pass the *total* barycentric velocity
+//! (Earth-around-Sun + spacecraft-around-Earth) instead of just
+//! [`earth_barycentric_velocity`] alone.
 //!
 //! ```no_run
 //! use tetra3::{earth_barycentric_velocity, SolveConfig};

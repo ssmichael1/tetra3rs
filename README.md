@@ -190,7 +190,7 @@ The convenience function `earth_barycentric_velocity()` provides an approximate 
 
 
 > [!NOTE]
-> For near-Earth observers, stellar aberration is dominated by Earth's orbital velocity around the Sun (~30 km/s). The surface velocity due to Earth's rotation (~0.46 km/s at the equator) and LEO orbital velocity (~7.5 km/s) are small by comparison and can usually be neglected.
+> For a near-Earth observer, Earth's orbital motion around the Sun (~30 km/s) dominates stellar aberration, producing ~20″ shifts. Earth's surface-rotation contribution (~0.46 km/s at the equator) is only ~0.3″ and can usually be neglected. **LEO orbital velocity (~7.5 km/s) is ~25% of Earth's orbital velocity and produces ~5″ additional direction error** — not negligible for star trackers on LEO spacecraft. Pass the observer's full barycentric velocity (Earth-around-Sun + spacecraft-around-Earth + ground-based surface rotation, as appropriate) to get an unbiased attitude.
 
 **Rust:**
 

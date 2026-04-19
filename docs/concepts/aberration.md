@@ -12,7 +12,7 @@ For Earth-based observers, stellar aberration shifts apparent star positions by 
 | LEO orbital velocity | ~7.5 km/s | ~5″ |
 | Earth's rotation (equator) | ~0.46 km/s | ~0.3″ |
 
-For most applications, Earth's orbital velocity dominates and the other contributions can be neglected.
+For ground-based observers, Earth's orbital velocity dominates and the rotation contribution (~0.3″) can usually be neglected. **For LEO star trackers, the spacecraft's orbital velocity around Earth adds a further ~5″ direction bias on top of the Earth-barycentric ~20″** — not negligible for arcsec-precision attitude. Pass the observer's *total* barycentric velocity (Earth-around-Sun + spacecraft-around-Earth, or ground station surface rotation if applicable) rather than just [`earth_barycentric_velocity()`](../api/functions.md) alone.
 
 ## Correction
 
@@ -34,7 +34,7 @@ result = db.solve_from_centroids(
 )
 ```
 
-The solver applies a first-order correction ($\mathbf{s'} = \mathbf{s} + \boldsymbol{\beta} - \mathbf{s}(\mathbf{s} \cdot \boldsymbol{\beta})$) to all catalog star vectors before matching and refinement, producing an unbiased attitude.
+The solver applies the exact classical correction $\mathbf{s'} = (\mathbf{s} + \boldsymbol{\beta}) / |\mathbf{s} + \boldsymbol{\beta}|$ to all catalog star vectors before matching and refinement, producing an unbiased attitude. The relativistic correction is $O(\beta^2) \sim 10^{-8}$ rad for Earth (~2 mas) and is not applied.
 
 ### Rust
 

@@ -29,18 +29,21 @@ use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
 /// Speed of light in km/s.
 const C_KM_S: f64 = 299_792.458;
 
-/// First-order stellar aberration: true ICRS unit vector → apparent.
+/// Classical stellar aberration: true ICRS unit vector → apparent.
 ///
 /// `beta` = observer barycentric velocity / c (dimensionless, ICRS frame).
-/// Formula: s' = s + β - s(s·β), then renormalize.
+/// Formula: `s' = (s + β) / |s + β|`.
+///
+/// This is the exact classical (non-relativistic) result: a photon with true
+/// direction `−s` in the rest frame has apparent velocity `−c·s − v` in a
+/// frame moving at `v = c·β`, so it appears to arrive from direction
+/// `s + β` (then renormalized to unit length). The relativistic correction
+/// is `O(β²)`, giving ~2 mas for Earth's orbital β ≈ 10⁻⁴ — well below
+/// plate-solve precision.
 pub(super) fn aberration_correct(sv: &[f32; 3], beta: &[f64; 3]) -> [f32; 3] {
-    let sx = sv[0] as f64;
-    let sy = sv[1] as f64;
-    let sz = sv[2] as f64;
-    let dot = sx * beta[0] + sy * beta[1] + sz * beta[2];
-    let ax = sx + beta[0] - sx * dot;
-    let ay = sy + beta[1] - sy * dot;
-    let az = sz + beta[2] - sz * dot;
+    let ax = sv[0] as f64 + beta[0];
+    let ay = sv[1] as f64 + beta[1];
+    let az = sv[2] as f64 + beta[2];
     let norm = (ax * ax + ay * ay + az * az).sqrt();
     [(ax / norm) as f32, (ay / norm) as f32, (az / norm) as f32]
 }
