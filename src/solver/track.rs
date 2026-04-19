@@ -49,26 +49,22 @@ impl SolverDatabase {
         let parity_flip = cam.parity_flip;
         let parity_sign: f32 = if parity_flip { -1.0 } else { 1.0 };
 
-        // Pixel scale (rad/px) and the LIS-equivalent "linear FOV" (= ps × image_width).
-        // These match the conventions used by `wcs_refine::wcs_refine` and the LIS path
-        // in `solve_at_fov`, both of which interpret pixel_scale as `fov_estimate / W`
-        // (the small-angle approximation, not strict pinhole `1/f`). For a 12° FOV the
-        // two differ by ~0.5%; using the wrong one shows up as ~100″ residuals at FOV
-        // edges. See the discussion on the `hinting` branch.
-        //
-        // Prefer the camera model's focal length when it was explicitly set; otherwise
-        // fall back to fov_estimate so a default-constructed `SolveConfig` still works.
+        // True pinhole pixel scale (1/f). Prefer the camera model's focal length
+        // when it was explicitly set; otherwise fall back to fov_estimate so a
+        // default-constructed `SolveConfig` still works.
         let camera_model_initialized =
             cam.image_width == config.image_width && cam.focal_length_px > 2.0;
         let pixel_scale: f32 = if camera_model_initialized {
             (1.0 / cam.focal_length_px) as f32
         } else if config.fov_estimate_rad > 0.0 && config.image_width > 0 {
-            config.fov_estimate_rad / config.image_width as f32
+            let f = (config.image_width as f32 / 2.0)
+                / (config.fov_estimate_rad / 2.0).tan();
+            1.0 / f
         } else {
             return SolveResult::failure(SolveStatus::NoMatch, elapsed_ms(t0));
         };
-        // "Linear" FOV (matches LIS's convention, not the strict angular FOV).
-        let fov_rad = pixel_scale * config.image_width as f32;
+        // Angular FOV derived from pixel scale.
+        let fov_rad = 2.0 * (config.image_width as f32 / 2.0 * pixel_scale).atan();
 
         if preprocessed.len() < MIN_HINT_MATCHES {
             return SolveResult::failure(SolveStatus::TooFew, elapsed_ms(t0));
@@ -257,8 +253,8 @@ impl SolverDatabase {
             })
             .collect();
 
-        // Match LIS's wcs_refine convention: ps_refine = fov_rad / image_width (linear).
-        let ps_refine = fov_rad as f64 / config.image_width as f64;
+        // True pinhole pixel scale for wcs_refine (1/f).
+        let ps_refine = pixel_scale as f64;
 
         let wcs_result = wcs_refine::wcs_refine(
             &rotation_matrix,
@@ -285,7 +281,11 @@ impl SolverDatabase {
         );
 
         // ── Build matched IDs / residuals ──
-        let ps = refined_fov / config.image_width.max(1) as f32;
+        // True pinhole pixel scale derived from the angular `refined_fov`.
+        let ps = {
+            let f = (config.image_width.max(1) as f32 / 2.0) / (refined_fov / 2.0).tan();
+            1.0 / f
+        };
         let mut matched_cat_ids: Vec<i64> = Vec::with_capacity(wcs_result.matches.len());
         let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(wcs_result.matches.len());
         let mut angular_residuals: Vec<f32> = Vec::with_capacity(wcs_result.matches.len());

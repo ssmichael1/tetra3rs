@@ -578,11 +578,15 @@ impl SolverDatabase {
                     // Convert rotation to quaternion
                     let quat = Quaternion::from_rotation_matrix(&refined_rotation);
 
-                    // Build result camera model with refined focal length and detected parity
+                    // Build result camera model with refined focal length, image
+                    // dimensions (always filled from config, even if the input
+                    // camera_model was a Default placeholder), and detected parity.
                     let mut result_cam = config.camera_model.clone();
                     let refined_f = (config.image_width as f64 / 2.0)
                         / (refined_fov as f64 / 2.0).tan();
                     result_cam.focal_length_px = refined_f;
+                    result_cam.image_width = config.image_width;
+                    result_cam.image_height = config.image_height;
                     result_cam.parity_flip = parity_flip;
 
                     return SolveResult {
