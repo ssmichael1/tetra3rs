@@ -7,13 +7,6 @@
 //! y_distorted = y + Σ B_pq · x^p · y^q
 //! ```
 //!
-//! The inverse (undistortion) uses a separately fitted polynomial:
-//!
-//! ```text
-//! x_ideal = x_obs + Σ AP_pq · x_obs^p · y_obs^q
-//! y_ideal = y_obs + Σ BP_pq · x_obs^p · y_obs^q
-//! ```
-//!
 //! Including all terms from order 0:
 //! - **(p+q = 0)**: constant offset — optical center shift
 //! - **(p+q = 1)**: linear terms  — residual scale & rotation
@@ -23,6 +16,11 @@
 //! and other effects that aren't radially symmetric — critical for cameras
 //! like TESS where each CCD is offset from the optical axis.
 //!
+//! Inverse distortion uses Newton iteration on the forward polynomial — see
+//! [`PolynomialDistortion::undistort`]. The legacy `ap_coeffs` / `bp_coeffs`
+//! fields remain in the struct for binary-format compatibility but are
+//! zero-valued in any model produced by this crate.
+//!
 //! Coordinates are in pixels relative to the image center. The coefficients
 //! are stored normalized: internally the (x, y) inputs are divided by a
 //! `scale` factor (typically half the image width) before evaluating the
@@ -30,8 +28,9 @@
 
 /// SIP-like polynomial distortion model.
 ///
-/// Forward: ideal → distorted. Inverse: distorted → ideal.
-/// Both directions are stored as explicit polynomials (no iterative inversion needed).
+/// Forward distortion (ideal → distorted) is the explicit polynomial.
+/// Inverse distortion (distorted → ideal) is computed by Newton iteration
+/// on the forward polynomial — see [`Self::undistort`].
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PolynomialDistortion {
     /// Polynomial order (2..=6 typically).
@@ -44,9 +43,11 @@ pub struct PolynomialDistortion {
     pub a_coeffs: Vec<f64>,
     /// Forward B coefficients (y correction, ideal → distorted) in normalized coords.
     pub b_coeffs: Vec<f64>,
-    /// Inverse AP coefficients (x correction, distorted → ideal) in normalized coords.
+    /// Legacy inverse AP coefficients. Zero in models produced by this crate;
+    /// retained in the struct only for binary-format compatibility with
+    /// previously-saved camera models.
     pub ap_coeffs: Vec<f64>,
-    /// Inverse BP coefficients (y correction, distorted → ideal) in normalized coords.
+    /// Legacy inverse BP coefficients. See [`Self::ap_coeffs`].
     pub bp_coeffs: Vec<f64>,
 }
 
@@ -106,16 +107,10 @@ impl PolynomialDistortion {
     /// `distort(x, y) = (x_d, y_d)`. Converges in 2–4 iterations to machine
     /// precision for typical lens distortion (sub-pixel correction terms).
     ///
-    /// This is *more accurate* than evaluating a separately-fit inverse
-    /// polynomial: a finite-order forward polynomial cannot be perfectly
-    /// inverted by a finite-order inverse polynomial of the same order, so
-    /// the separate-inverse approach has a small "asymmetry" error that grows
-    /// with distortion magnitude. Newton iteration on the forward polynomial
-    /// is exact (limited only by the forward polynomial's expressiveness).
-    ///
-    /// Falls back to the separately-fit inverse polynomial if the iteration
-    /// fails to converge (which shouldn't happen in practice — distortion is
-    /// always small in normalized coords).
+    /// This is exact (limited only by the forward polynomial's expressiveness),
+    /// in contrast to evaluating a separately-fit inverse polynomial which has
+    /// a small "asymmetry" error because a finite-order polynomial cannot
+    /// perfectly invert another finite-order polynomial.
     pub fn undistort(&self, x_d: f64, y_d: f64) -> (f64, f64) {
         const MAX_ITER: usize = 8;
         const TOL_PX: f64 = 1e-9; // sub-nanopixel residual
@@ -139,7 +134,7 @@ impl PolynomialDistortion {
             let rx = fx - x_d;
             let ry = fy - y_d;
             if rx * rx + ry * ry < TOL_PX * TOL_PX {
-                return (x, y);
+                break;
             }
 
             // Jacobian: ∂F/∂(x, y).
@@ -150,8 +145,13 @@ impl PolynomialDistortion {
             let j21 = db_du;
             let j22 = 1.0 + db_dv;
             let det = j11 * j22 - j12 * j21;
+            // Singular Jacobian indicates near-degenerate distortion at this
+            // point. We've never observed this in practice — for any sensible
+            // lens distortion the Jacobian is dominated by the identity. If
+            // it ever fires, the latest iterate is still the best estimate.
+            debug_assert!(det.abs() > 1e-15, "singular Jacobian in undistort Newton step");
             if det.abs() < 1e-15 {
-                break; // singular — fall back below
+                break;
             }
             let inv_det = 1.0 / det;
 
@@ -160,12 +160,7 @@ impl PolynomialDistortion {
             y -= inv_det * (-j21 * rx + j11 * ry);
         }
 
-        // Fallback: separately-fit inverse polynomial.
-        let u = x_d / self.scale;
-        let v = y_d / self.scale;
-        let dx = eval_poly(&self.ap_coeffs, self.order, u, v);
-        let dy = eval_poly(&self.bp_coeffs, self.order, u, v);
-        (x_d + dx * self.scale, y_d + dy * self.scale)
+        (x, y)
     }
 
     /// Returns `true` if all coefficients are zero.

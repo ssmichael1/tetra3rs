@@ -384,10 +384,13 @@ pub(super) fn fit_polynomial_sigma_clip(
         }
     }
 
-    // Fit the inverse polynomial (distorted → ideal) from the same data
-    let mut ap_coeffs = vec![0.0; ncoeffs];
-    let mut bp_coeffs = vec![0.0; ncoeffs];
-    fit_inverse_poly_ls(points, &mask, &pairs, scale, &mut ap_coeffs, &mut bp_coeffs);
+    // The inverse polynomial (distorted → ideal) is no longer fit:
+    // PolynomialDistortion::undistort uses Newton iteration on the forward
+    // polynomial, which is exact (limited only by forward expressiveness).
+    // The ap/bp fields remain in PolynomialDistortion for binary format
+    // compatibility but are zero-valued.
+    let ap_coeffs = vec![0.0; ncoeffs];
+    let bp_coeffs = vec![0.0; ncoeffs];
 
     PolyFitResult {
         a_coeffs,
@@ -732,56 +735,6 @@ pub(super) fn fit_poly_ls(
     if let Ok(cy) = a_mat.solve_qr(&by_vec) {
         for j in 0..ncoeffs {
             b_coeffs[j] = cy[j];
-        }
-    }
-}
-
-/// Fit the inverse polynomial (distorted → ideal) by least-squares.
-///
-/// Model: x_ideal = x_obs + Σ AP_pq · u_d^p · v_d^q   (u_d = x_obs/scale, v_d = y_obs/scale)
-pub(super) fn fit_inverse_poly_ls(
-    points: &[MatchedPoint],
-    mask: &[bool],
-    pairs: &[(u32, u32)],
-    scale: f64,
-    ap_coeffs: &mut [f64],
-    bp_coeffs: &mut [f64],
-) {
-    let ncoeffs = pairs.len();
-    let n_inliers: usize = mask.iter().filter(|&&m| m).count();
-    if n_inliers < ncoeffs {
-        return;
-    }
-
-    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs, 0.0);
-    let mut bx_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
-    let mut by_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
-
-    let mut row = 0;
-    for (i, p) in points.iter().enumerate() {
-        if !mask[i] {
-            continue;
-        }
-        let u = p.x_obs / scale;
-        let v = p.y_obs / scale;
-
-        for (j, &(pp, qq)) in pairs.iter().enumerate() {
-            a_mat[(row, j)] = u.powi(pp as i32) * v.powi(qq as i32);
-        }
-        bx_vec[row] = (p.x_ideal - p.x_obs) / scale;
-        by_vec[row] = (p.y_ideal - p.y_obs) / scale;
-        row += 1;
-    }
-
-    if let Ok(cx) = a_mat.solve_qr(&bx_vec) {
-        for j in 0..ncoeffs {
-            ap_coeffs[j] = cx[j];
-        }
-    }
-
-    if let Ok(cy) = a_mat.solve_qr(&by_vec) {
-        for j in 0..ncoeffs {
-            bp_coeffs[j] = cy[j];
         }
     }
 }

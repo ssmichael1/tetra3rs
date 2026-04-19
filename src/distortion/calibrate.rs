@@ -114,31 +114,38 @@ pub fn calibrate_camera(
 
 /// Extract optical center offset from polynomial order-0 terms into crpix.
 ///
-/// The polynomial's inverse (undistort) constant terms AP_00, BP_00 represent the
-/// optical center shift. Since the pipeline is `pixel - crpix → undistort`, we set
-/// `crpix = -[AP_00, BP_00] * scale` and zero out the constant terms in the polynomial.
+/// The forward polynomial's constant terms A_00, B_00 give the observed pixel
+/// position when the ideal pixel is at the origin — i.e., where the optical
+/// center lands on the sensor. Since the pipeline is `pixel - crpix → undistort`,
+/// we set `crpix = [A_00, B_00] * scale` and zero out the constant terms.
 ///
 /// This separates the physical optical center offset (crpix) from the actual lens
 /// distortion (order 2+), making the camera model more interpretable.
 fn extract_crpix(distortion: Distortion) -> ([f64; 2], Distortion) {
     match distortion {
         Distortion::Polynomial(poly) => {
-            // AP_00 and BP_00 are inverse polynomial constant terms (index 0)
-            let crpix_x = -poly.ap_coeffs[0] * poly.scale;
-            let crpix_y = -poly.bp_coeffs[0] * poly.scale;
+            // A_00 and B_00 are the forward polynomial's constant terms.
+            // distort(0, 0) = (A_00, B_00) * scale = optical center on sensor.
+            let crpix_x = poly.a_coeffs[0] * poly.scale;
+            let crpix_y = poly.b_coeffs[0] * poly.scale;
 
-            // Zero out order-0 terms
+            // Zero out order-0 terms in the forward polynomial. The inverse
+            // (ap/bp) coefficients are no longer fit (Newton iteration on the
+            // forward polynomial replaced separate-inverse evaluation); they
+            // remain zero-valued for binary-format compatibility.
             let mut a = poly.a_coeffs.clone();
             let mut b = poly.b_coeffs.clone();
-            let mut ap = poly.ap_coeffs.clone();
-            let mut bp = poly.bp_coeffs.clone();
             a[0] = 0.0;
             b[0] = 0.0;
-            ap[0] = 0.0;
-            bp[0] = 0.0;
 
-            let new_poly =
-                PolynomialDistortion::new(poly.order, poly.scale, a, b, ap, bp);
+            let new_poly = PolynomialDistortion::new(
+                poly.order,
+                poly.scale,
+                a,
+                b,
+                poly.ap_coeffs,
+                poly.bp_coeffs,
+            );
             ([crpix_x, crpix_y], Distortion::Polynomial(new_poly))
         }
         other => ([0.0, 0.0], other),
