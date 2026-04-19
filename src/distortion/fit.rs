@@ -539,7 +539,11 @@ fn gather_matched_points(
             None => continue,
         };
 
-        let pixel_scale = fov_rad / image_width as f32;
+        // True pinhole pixel scale (1/f).
+        let pixel_scale = {
+            let f = (image_width as f32 / 2.0) / (fov_rad / 2.0).tan();
+            1.0 / f
+        };
         let rot: Matrix3<f32> = quat.to_rotation_matrix();
 
         let parity_sign: f64 = if sr.parity_flip { -1.0 } else { 1.0 };
@@ -699,7 +703,6 @@ pub(super) fn fit_poly_ls(
         return;
     }
 
-    // Fit x-axis: (x_obs - x_ideal) = Σ A_pq * u^p * v^q * scale
     let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs, 0.0);
     let mut bx_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
     let mut by_vec = DynVector::<f64>::zeros(n_inliers, 0.0);

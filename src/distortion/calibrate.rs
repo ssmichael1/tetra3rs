@@ -241,7 +241,11 @@ fn multi_image_calibrate(
     }
     fovs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median_fov = fovs[fovs.len() / 2];
-    let global_pixel_scale = median_fov as f64 / image_width as f64;
+    // True pinhole pixel scale (1/f) from median angular FOV.
+    let global_pixel_scale = {
+        let f = (image_width as f64 / 2.0) / (median_fov as f64 / 2.0).tan();
+        1.0 / f
+    };
     let parity_sign: f64 = if parity_flip { -1.0 } else { 1.0 };
 
     debug!(
@@ -312,8 +316,11 @@ fn multi_image_calibrate(
             let sr = solve_results[img.sr_idx];
             let cents = centroids[img.sr_idx];
 
-            // Per-image pixel scale from its own FOV
-            let per_image_ps = img.fov_rad as f64 / image_width as f64;
+            // Per-image true pinhole pixel scale (1/f) from angular FOV.
+            let per_image_ps = {
+                let f = (image_width as f64 / 2.0) / (img.fov_rad as f64 / 2.0).tan();
+                1.0 / f
+            };
 
             // Preprocess centroids: undistort with current distortion, apply parity
             let centroids_px: Vec<(f64, f64)> = cents

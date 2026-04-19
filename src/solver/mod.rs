@@ -196,8 +196,8 @@ pub struct SolveConfig {
     /// This is used together with `image_width` to compute the pixel scale.
     pub fov_estimate_rad: f32,
     /// Image width in pixels (number of columns).
-    /// Together with `fov_estimate_rad`, defines the pixel scale:
-    /// `pixel_scale = fov_estimate_rad / image_width`.
+    /// Together with `fov_estimate_rad`, defines the focal length:
+    /// `f = (image_width / 2) / tan(fov_estimate_rad / 2)`; pixel scale is `1/f`.
     pub image_width: u32,
     /// Image height in pixels (number of rows).
     pub image_height: u32,
@@ -281,9 +281,12 @@ impl SolveConfig {
     }
 
     /// Pixel scale in radians per pixel (horizontal).
+    ///
+    /// True pinhole: `ps = 1/f` where `f = (W/2) / tan(fov/2)`.
     pub fn pixel_scale(&self) -> f32 {
-        if self.image_width > 0 {
-            self.fov_estimate_rad / self.image_width as f32
+        if self.image_width > 0 && self.fov_estimate_rad > 0.0 {
+            let f = (self.image_width as f32 / 2.0) / (self.fov_estimate_rad / 2.0).tan();
+            1.0 / f
         } else {
             0.0
         }
@@ -413,9 +416,11 @@ impl SolveResult {
             Some((ra.to_degrees().rem_euclid(360.0), dec.to_degrees()))
         } else {
             // ── Fallback: quaternion + FOV ──
+            // True pinhole pixel scale (1/f) from the angular FOV.
             let q = self.qicrs2cam.as_ref()?;
             let fov = self.fov_rad? as f64;
-            let pixel_scale = fov / self.image_width.max(1) as f64;
+            let f = (self.image_width.max(1) as f64 / 2.0) / (fov / 2.0).tan();
+            let pixel_scale = 1.0 / f;
 
             let ps = if self.parity_flip { -1.0 } else { 1.0 };
             let xr = ps * x * pixel_scale;
@@ -476,9 +481,11 @@ impl SolveResult {
             Some((px, py))
         } else {
             // ── Fallback: quaternion + FOV ──
+            // True pinhole pixel scale (1/f) from the angular FOV.
             let q = self.qicrs2cam.as_ref()?;
             let fov = self.fov_rad? as f64;
-            let pixel_scale = fov / self.image_width.max(1) as f64;
+            let f = (self.image_width.max(1) as f64 / 2.0) / (fov / 2.0).tan();
+            let pixel_scale = 1.0 / f;
 
             let ra = ra_deg.to_radians();
             let dec = dec_deg.to_radians();

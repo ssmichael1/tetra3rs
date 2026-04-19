@@ -83,7 +83,11 @@ fn test_generate_and_solve() {
     let half_fov = fov_rad / 2.0;
     let image_width = 1024u32;
     let image_height = 1024u32;
-    let pixel_scale = fov_rad / image_width as f32;
+    // True pinhole pixel scale (1/f); matches the solver's internal convention.
+    let pixel_scale = {
+        let f = (image_width as f32 / 2.0) / (fov_rad / 2.0).tan();
+        1.0 / f
+    };
 
     // Find catalog stars visible in this FOV
     let nearby = db
@@ -328,7 +332,11 @@ fn test_statistical_1000_random_orientations() {
     let half_fov = fov_rad / 2.0;
     let image_width = 1024u32;
     let image_height = 1024u32;
-    let pixel_scale = fov_rad / image_width as f32;
+    // True pinhole pixel scale (1/f); matches the solver's internal convention.
+    let pixel_scale = {
+        let f = (image_width as f32 / 2.0) / (fov_rad / 2.0).tan();
+        1.0 / f
+    };
 
     let solve_config = SolveConfig {
         fov_estimate_rad: fov_rad,
@@ -633,7 +641,11 @@ fn test_statistical_1000_noisy_centroids() {
     let half_fov = fov_rad / 2.0;
     let image_width = 1024u32;
     let image_height = 1024u32;
-    let pixel_scale = fov_rad / image_width as f32;
+    // True pinhole pixel scale (1/f); matches the solver's internal convention.
+    let pixel_scale = {
+        let f = (image_width as f32 / 2.0) / (fov_rad / 2.0).tan();
+        1.0 / f
+    };
     let noise_sigma_px = (noise_sigma_arcsec / 3600.0_f32).to_radians() / pixel_scale;
 
     println!(

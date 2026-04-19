@@ -160,8 +160,10 @@ impl SolverDatabase {
         star_vectors: &[[f32; 3]],
         t0: Instant,
     ) -> SolveResult {
-        let pixel_scale = if config.image_width > 0 {
-            fov_estimate / config.image_width as f32
+        // True pinhole pixel scale (rad/px): ps = 1/f where f = (W/2) / tan(fov/2).
+        let pixel_scale = if config.image_width > 0 && fov_estimate > 0.0 {
+            let f = (config.image_width as f32 / 2.0) / (fov_estimate / 2.0).tan();
+            1.0 / f
         } else {
             0.0
         };
@@ -476,7 +478,11 @@ impl SolverDatabase {
                         .collect();
 
                     // Compute pixel scale for WCS refine from the pattern-match refined FOV
-                    let ps_refine = fov as f64 / config.image_width as f64;
+                    // True pinhole pixel scale for wcs_refine.
+                    let ps_refine = {
+                        let f = (config.image_width as f64 / 2.0) / (fov as f64 / 2.0).tan();
+                        1.0 / f
+                    };
 
                     let wcs_result = wcs_refine::wcs_refine(
                         &rotation_matrix,
@@ -504,8 +510,13 @@ impl SolverDatabase {
                             config.image_width,
                         );
 
-                    // Build matched catalog IDs, centroid indices, and angular residuals
-                    let ps = refined_fov / config.image_width.max(1) as f32;
+                    // Build matched catalog IDs, centroid indices, and angular residuals.
+                    // True pinhole pixel scale derived from the angular `refined_fov`.
+                    let ps = {
+                        let f = (config.image_width.max(1) as f32 / 2.0)
+                            / (refined_fov / 2.0).tan();
+                        1.0 / f
+                    };
                     let mut matched_cat_ids: Vec<i64> =
                         Vec::with_capacity(wcs_result.matches.len());
                     let mut matched_cent_inds: Vec<usize> =

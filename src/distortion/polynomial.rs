@@ -100,7 +100,67 @@ impl PolynomialDistortion {
     }
 
     /// Inverse distortion: distorted → ideal (pixel coords, relative to image center).
+    ///
+    /// Uses Newton iteration on the **forward** polynomial. Given an observed
+    /// distorted pixel `(x_d, y_d)`, finds the ideal `(x, y)` such that
+    /// `distort(x, y) = (x_d, y_d)`. Converges in 2–4 iterations to machine
+    /// precision for typical lens distortion (sub-pixel correction terms).
+    ///
+    /// This is *more accurate* than evaluating a separately-fit inverse
+    /// polynomial: a finite-order forward polynomial cannot be perfectly
+    /// inverted by a finite-order inverse polynomial of the same order, so
+    /// the separate-inverse approach has a small "asymmetry" error that grows
+    /// with distortion magnitude. Newton iteration on the forward polynomial
+    /// is exact (limited only by the forward polynomial's expressiveness).
+    ///
+    /// Falls back to the separately-fit inverse polynomial if the iteration
+    /// fails to converge (which shouldn't happen in practice — distortion is
+    /// always small in normalized coords).
     pub fn undistort(&self, x_d: f64, y_d: f64) -> (f64, f64) {
+        const MAX_ITER: usize = 8;
+        const TOL_PX: f64 = 1e-9; // sub-nanopixel residual
+
+        // Initial guess: pixels are close enough to ideal that x_d ≈ x.
+        // (For TESS the worst-case distortion is ~10 px on 2048-wide images.)
+        let mut x = x_d;
+        let mut y = y_d;
+
+        for _ in 0..MAX_ITER {
+            let u = x / self.scale;
+            let v = y / self.scale;
+            let (a_val, da_du, da_dv) = eval_poly_with_grad(&self.a_coeffs, self.order, u, v);
+            let (b_val, db_du, db_dv) = eval_poly_with_grad(&self.b_coeffs, self.order, u, v);
+
+            // Forward distortion: F(x, y) = (x + s·A(u, v), y + s·B(u, v))
+            let fx = x + a_val * self.scale;
+            let fy = y + b_val * self.scale;
+
+            // Residual: F(x, y) − (x_d, y_d)
+            let rx = fx - x_d;
+            let ry = fy - y_d;
+            if rx * rx + ry * ry < TOL_PX * TOL_PX {
+                return (x, y);
+            }
+
+            // Jacobian: ∂F/∂(x, y).
+            //   ∂(s·A(x/s, y/s))/∂x = s · (1/s) · ∂A/∂u = ∂A/∂u
+            // So J = [[1 + ∂A/∂u, ∂A/∂v], [∂B/∂u, 1 + ∂B/∂v]].
+            let j11 = 1.0 + da_du;
+            let j12 = da_dv;
+            let j21 = db_du;
+            let j22 = 1.0 + db_dv;
+            let det = j11 * j22 - j12 * j21;
+            if det.abs() < 1e-15 {
+                break; // singular — fall back below
+            }
+            let inv_det = 1.0 / det;
+
+            // Newton step: (x, y) ← (x, y) − J⁻¹ · r
+            x -= inv_det * (j22 * rx - j12 * ry);
+            y -= inv_det * (-j21 * rx + j11 * ry);
+        }
+
+        // Fallback: separately-fit inverse polynomial.
         let u = x_d / self.scale;
         let v = y_d / self.scale;
         let dx = eval_poly(&self.ap_coeffs, self.order, u, v);
@@ -203,6 +263,37 @@ fn eval_poly(coeffs: &[f64], order: u32, x: f64, y: f64) -> f64 {
         }
     }
     result
+}
+
+/// Evaluate the polynomial `f(x, y) = Σ c_i · x^p · y^q` together with its
+/// partial derivatives `(∂f/∂x, ∂f/∂y)`.
+///
+/// Returns `(value, df_dx, df_dy)`. Used by `PolynomialDistortion::undistort`
+/// for Newton iteration on the forward polynomial.
+fn eval_poly_with_grad(coeffs: &[f64], order: u32, x: f64, y: f64) -> (f64, f64, f64) {
+    let mut value = 0.0;
+    let mut df_dx = 0.0;
+    let mut df_dy = 0.0;
+    let mut idx = 0;
+    for s in 0..=order {
+        for p in (0..=s).rev() {
+            let q = s - p;
+            let c = coeffs[idx];
+            let xp = x.powi(p as i32);
+            let yq = y.powi(q as i32);
+            value += c * xp * yq;
+            // ∂(x^p · y^q)/∂x = p · x^(p-1) · y^q  (zero when p == 0)
+            if p > 0 {
+                df_dx += c * (p as f64) * x.powi(p as i32 - 1) * yq;
+            }
+            // ∂(x^p · y^q)/∂y = q · x^p · y^(q-1)  (zero when q == 0)
+            if q > 0 {
+                df_dy += c * (q as f64) * xp * y.powi(q as i32 - 1);
+            }
+            idx += 1;
+        }
+    }
+    (value, df_dx, df_dy)
 }
 
 #[cfg(test)]
@@ -311,6 +402,45 @@ mod tests {
         let (xd, yd) = d.distort(100.0, -200.0);
         assert!((xd - 100.0).abs() < 1e-12);
         assert!((yd + 200.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_newton_undistort_exact_inverse() {
+        // Build a non-trivial forward distortion (no inverse coeffs set).
+        // Newton iteration should still recover the ideal pixel exactly.
+        let n = num_coeffs(4);
+        let mut a = vec![0.0; n];
+        let mut b = vec![0.0; n];
+        a[coeff_index(2, 0)] = 0.01;
+        a[coeff_index(0, 2)] = 0.005;
+        a[coeff_index(1, 1)] = -0.003;
+        b[coeff_index(2, 0)] = -0.004;
+        b[coeff_index(0, 2)] = 0.012;
+        b[coeff_index(3, 0)] = 0.001;
+
+        let d = PolynomialDistortion::new(4, 1024.0, a, b, vec![0.0; n], vec![0.0; n]);
+
+        // Forward then back must roundtrip to within numerical precision.
+        for &(x, y) in &[(0.0, 0.0), (100.0, -200.0), (500.0, 400.0), (-800.0, 100.0)] {
+            let (xd, yd) = d.distort(x, y);
+            let (xu, yu) = d.undistort(xd, yd);
+            assert!(
+                (xu - x).abs() < 1e-9,
+                "x roundtrip {} -> {} -> {} (err {:.2e})",
+                x,
+                xd,
+                xu,
+                xu - x
+            );
+            assert!(
+                (yu - y).abs() < 1e-9,
+                "y roundtrip {} -> {} -> {} (err {:.2e})",
+                y,
+                yd,
+                yu,
+                yu - y
+            );
+        }
     }
 
     #[test]
