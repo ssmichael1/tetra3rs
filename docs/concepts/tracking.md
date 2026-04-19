@@ -51,6 +51,39 @@ result2 = db.solve_from_centroids(
 (`result.quaternion` or a plain list/ndarray) or a 3×3 rotation matrix
 (`result.rotation_matrix_icrs_to_camera` or any 3×3 ndarray).
 
+### Quaternion convention
+
+tetra3rs uses the **Hamilton convention** with the real part first:
+
+```
+q = [w, x, y, z]    with    q = w + x·i + y·j + z·k
+```
+
+- **Element order.** `w` is the scalar (real) component; `(x, y, z)` is the
+  vector (imaginary) component. This matches `numpy.quaternion`, `scipy`'s
+  quaternion conventions for `Rotation.as_quat(scalar_first=True)`, and most
+  aerospace / attitude-estimation literature. It does **not** match scipy's
+  default `Rotation.as_quat()` (which is `[x, y, z, w]` — scalar last) —
+  when in doubt, check the element magnitudes: for small rotations `w ≈ 1`
+  and the vector components are small.
+- **Unit.** `w² + x² + y² + z² = 1`. `SolveResult.quaternion` is always
+  unit-length; you should ensure hints passed in are too.
+- **Sense.** The quaternion rotates a vector **from the ICRS frame into the
+  camera frame**: `camera_vec = q ⊗ icrs_vec ⊗ q*` (where `⊗` is quaternion
+  multiplication and `q*` is the conjugate). Equivalently,
+  `R · icrs_vec = camera_vec` where `R` is
+  `SolveResult.rotation_matrix_icrs_to_camera`. To invert the sense (e.g.
+  to get a rotation from camera to ICRS), negate the vector part:
+  `q_inv = [w, -x, -y, -z]`.
+- **Composition.** To combine hints (e.g. apply a small delta rotation to a
+  prior result), use Hamilton-order quaternion multiplication
+  `q_new = q_delta ⊗ q_prior`, where applying `q_new` first rotates by
+  `q_prior` then by `q_delta`. Neither NumPy nor scipy ship a Hamilton
+  quaternion multiply in the standard API — the
+  [integration test][test-source] has a worked example.
+
+[test-source]: https://github.com/ssmichael1/tetra3rs/blob/main/python/tests/test_solve.py
+
 ### Rust
 
 ```rust

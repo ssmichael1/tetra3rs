@@ -93,11 +93,19 @@ impl PySolveResult {
 
     /// Attitude quaternion as a 4-element ``[w, x, y, z]`` array.
     ///
-    /// Rotates ICRS vectors into the camera frame:
-    /// ``camera_vec = quaternion * icrs_vec``.
+    /// **Convention.** Hamilton, scalar first: ``q = w + x·i + y·j + z·k``
+    /// with ``w² + x² + y² + z² = 1``. This matches the
+    /// ``scalar_first=True`` convention in scipy's ``Rotation.as_quat()``
+    /// and is the usual convention in aerospace / attitude literature.
+    /// (It does **not** match scipy's default scalar-last ordering.)
+    ///
+    /// **Sense.** Rotates a vector from the ICRS frame into the camera frame:
+    /// ``camera_vec = q ⊗ icrs_vec ⊗ q*``. Equivalently,
+    /// ``rotation_matrix_icrs_to_camera @ icrs_vec == camera_vec``.
     ///
     /// Suitable for feeding back as ``attitude_hint`` on the next frame's
-    /// ``solve_from_centroids`` call (tracking mode).
+    /// ``solve_from_centroids`` call (tracking mode). See
+    /// ``concepts/tracking.md`` for more on the convention.
     #[getter]
     fn quaternion<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         let q = self

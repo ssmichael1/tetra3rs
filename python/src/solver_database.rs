@@ -143,16 +143,24 @@ impl PySolverDatabase {
     ///         (ICRS/GCRF frame). When set, catalog positions are aberration-corrected
     ///         to apparent positions, removing ~20" bias from Earth's orbital velocity.
     ///         None = no correction (default).
-    ///     attitude_hint: Optional attitude hint. Accepts either a 4-element
-    ///         ``[w, x, y, z]`` quaternion (like ``SolveResult.quaternion``) or a
-    ///         3×3 rotation matrix (like ``SolveResult.rotation_matrix_icrs_to_camera``),
-    ///         rotating ICRS into the camera frame. When provided, the solver skips
-    ///         the 4-star pattern-hash phase and instead projects nearby catalog
-    ///         stars via the hint, nearest-neighbor matches them to centroids, and
-    ///         runs the same verification + WCS refine path as lost-in-space.
-    ///         Typical use case: video-rate tracking where each frame's solve seeds
-    ///         the next. Succeeds with as few as 3 matched stars (vs. 4 for LIS).
-    ///         On failure falls back to lost-in-space unless ``strict_hint`` is True.
+    ///     attitude_hint: Optional attitude hint. Accepts either:
+    ///
+    ///         * a 4-element ``[w, x, y, z]`` quaternion (list or 1D ndarray),
+    ///           using the Hamilton, scalar-first convention — same as
+    ///           ``SolveResult.quaternion``. This matches scipy's
+    ///           ``Rotation.as_quat(scalar_first=True)``; it does **not** match
+    ///           scipy's default (scalar-last) ordering.
+    ///         * a 3×3 rotation matrix (2D ndarray) — same as
+    ///           ``SolveResult.rotation_matrix_icrs_to_camera``.
+    ///
+    ///         Either form must rotate a vector from the ICRS frame into the
+    ///         camera frame. When provided, the solver skips the 4-star
+    ///         pattern-hash phase and instead projects nearby catalog stars via
+    ///         the hint, nearest-neighbor matches them to centroids, and runs the
+    ///         same verification + WCS refine path as lost-in-space. Typical use:
+    ///         video-rate tracking where each frame's solve seeds the next.
+    ///         Succeeds with as few as 3 matched stars (vs. 4 for LIS). On
+    ///         failure falls back to lost-in-space unless ``strict_hint`` is True.
     ///     hint_uncertainty_deg: Angular uncertainty of the attitude hint, in degrees.
     ///     hint_uncertainty_rad: Angular uncertainty of the attitude hint, in radians.
     ///         At most one of the two may be provided; default 1° if neither is set.
