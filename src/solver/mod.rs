@@ -71,6 +71,128 @@ impl PatternEntry {
     }
 }
 
+// ── Pattern catalog (sharded hash table) ────────────────────────────────────
+
+/// Pattern hash table with sharded backing storage.
+///
+/// The table is logically one flat array of [`PatternEntry`] slots addressed
+/// by index `0..total_len`, but physically split into shards of up to
+/// [`Self::SHARD_SIZE`] entries each.
+///
+/// **Why shards?** rkyv 0.8's default archive format uses 32-bit relative
+/// offsets (2 GB range). A single `Vec<PatternEntry>` holding ≥90 M entries
+/// (~2.2 GB at 24 B/entry) overflows that offset during serialization,
+/// causing databases covering wide FOV ranges (e.g. 0.5°–5°) to crash in
+/// `save_to_file`. Splitting the storage into shards means each shard
+/// serializes as an independent region with its own in-range offset, letting
+/// the aggregate table grow to any size while keeping the default rkyv ABI.
+///
+/// Probe logic is unchanged in spirit — `idx / SHARD_SIZE` picks the shard,
+/// `idx % SHARD_SIZE` picks the slot within. The outer `Vec<Vec<...>>` is a
+/// few pointers and stays permanently in L1 cache, so the extra indirection
+/// is measurement-noise.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub struct PatternCatalog {
+    /// Total number of entries (sum of all shard lengths).
+    pub total_len: u64,
+    /// Shards. Every shard except possibly the last is exactly
+    /// [`Self::SHARD_SIZE`] entries long; the last shard holds the remainder.
+    pub shards: Vec<Vec<PatternEntry>>,
+}
+
+impl PatternCatalog {
+    /// Entries per shard. Chosen so each shard is ~770 MB (32 M × 24 B),
+    /// well under rkyv's 2 GB offset limit. A power of two so the per-probe
+    /// division and modulo compile to shift + mask.
+    pub const SHARD_SIZE: usize = 1 << 25; // 33 554 432
+
+    /// Allocate a catalog of `capacity` empty entries.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let n_full = capacity / Self::SHARD_SIZE;
+        let remainder = capacity % Self::SHARD_SIZE;
+        let mut shards = Vec::with_capacity(n_full + usize::from(remainder > 0));
+        for _ in 0..n_full {
+            shards.push(vec![PatternEntry::EMPTY; Self::SHARD_SIZE]);
+        }
+        if remainder > 0 {
+            shards.push(vec![PatternEntry::EMPTY; remainder]);
+        }
+        Self {
+            total_len: capacity as u64,
+            shards,
+        }
+    }
+
+    /// Total number of slots (equal to the `capacity` passed to
+    /// [`Self::with_capacity`]).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.total_len as usize
+    }
+
+    /// Returns `true` if the catalog has no slots.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
+    }
+
+    /// Immutable access to slot `idx`. Panics if `idx >= len()`.
+    #[inline]
+    pub fn get(&self, idx: usize) -> &PatternEntry {
+        &self.shards[idx / Self::SHARD_SIZE][idx % Self::SHARD_SIZE]
+    }
+
+    /// Mutable access to slot `idx`. Panics if `idx >= len()`.
+    #[inline]
+    pub fn get_mut(&mut self, idx: usize) -> &mut PatternEntry {
+        &mut self.shards[idx / Self::SHARD_SIZE][idx % Self::SHARD_SIZE]
+    }
+}
+
+#[cfg(test)]
+mod pattern_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn small_catalog_single_shard() {
+        let mut cat = PatternCatalog::with_capacity(100);
+        assert_eq!(cat.len(), 100);
+        assert_eq!(cat.shards.len(), 1);
+        assert_eq!(cat.shards[0].len(), 100);
+
+        *cat.get_mut(42) = PatternEntry::new([1, 2, 3, 4], 0.5, 0xabcd);
+        let e = cat.get(42);
+        assert_eq!(e.star_indices, [1, 2, 3, 4]);
+        assert!((e.largest_edge - 0.5).abs() < 1e-6);
+        assert_eq!(e.key_hash, 0xabcd);
+        assert!(cat.get(0).is_empty());
+    }
+
+    #[test]
+    fn empty_catalog() {
+        let cat = PatternCatalog::with_capacity(0);
+        assert_eq!(cat.len(), 0);
+        assert!(cat.is_empty());
+        assert_eq!(cat.shards.len(), 0);
+    }
+
+    #[test]
+    fn rkyv_roundtrip_small() {
+        let mut cat = PatternCatalog::with_capacity(1024);
+        *cat.get_mut(0) = PatternEntry::new([10, 20, 30, 40], 0.1, 0x1111);
+        *cat.get_mut(1023) = PatternEntry::new([1, 2, 3, 4], 0.9, 0xffff);
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cat).expect("serialize");
+        let restored: PatternCatalog =
+            rkyv::from_bytes::<PatternCatalog, rkyv::rancor::Error>(&bytes).expect("deserialize");
+
+        assert_eq!(restored.len(), 1024);
+        assert_eq!(restored.get(0).star_indices, [10, 20, 30, 40]);
+        assert_eq!(restored.get(1023).key_hash, 0xffff);
+        assert!(restored.get(500).is_empty());
+    }
+}
+
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
 
 /// Outcome of a plate-solve attempt.
@@ -136,9 +258,11 @@ pub struct SolverDatabase {
     pub star_catalog_ids: Vec<i64>,
 
     /// Pattern hash table (open addressing, quadratic probing).
-    /// Each entry packs the star indices, largest edge angle, and key hash
-    /// into a single cache-friendly struct. Empty slots have `star_indices == [0,0,0,0]`.
-    pub pattern_catalog: Vec<PatternEntry>,
+    /// Sharded for rkyv compatibility — see [`PatternCatalog`].
+    /// Each slot packs the 4 star indices, largest edge angle, and a 16-bit
+    /// key hash prefilter into a single cache-friendly struct. Empty slots
+    /// have `star_indices == [0, 0, 0, 0]`.
+    pub pattern_catalog: PatternCatalog,
 
     /// Database generation parameters.
     pub props: DatabaseProperties,

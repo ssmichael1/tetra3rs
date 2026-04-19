@@ -110,13 +110,13 @@ pub fn hash_to_index(hash: u64, table_size: u64) -> u64 {
 pub fn insert_pattern(
     entry: super::PatternEntry,
     hash_index: u64,
-    table: &mut [super::PatternEntry],
+    table: &mut super::PatternCatalog,
 ) -> usize {
     let max_ind = table.len() as u64;
     for c in 0u64.. {
         let i = ((hash_index.wrapping_add(c.wrapping_mul(c))) % max_ind) as usize;
-        if table[i].is_empty() {
-            table[i] = entry;
+        if table.get(i).is_empty() {
+            *table.get_mut(i) = entry;
             return i;
         }
     }

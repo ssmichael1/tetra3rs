@@ -339,7 +339,7 @@ impl SolverDatabase {
                 // Walk the hash chain inline (quadratic probing)
                 for c in 0u64.. {
                     let tidx = ((hidx.wrapping_add(c.wrapping_mul(c))) % table_len) as usize;
-                    let entry = &self.pattern_catalog[tidx];
+                    let entry = self.pattern_catalog.get(tidx);
                     if entry.is_empty() {
                         break; // end of chain
                     }

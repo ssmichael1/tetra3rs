@@ -316,7 +316,7 @@ impl SolverDatabase {
             pattern_list.len() as f64 / catalog_length as f64
         );
 
-        let mut pattern_catalog = vec![PatternEntry::EMPTY; catalog_length];
+        let mut pattern_catalog = super::PatternCatalog::with_capacity(catalog_length);
 
         for pat in &pattern_list {
             // Get the 4 star vectors

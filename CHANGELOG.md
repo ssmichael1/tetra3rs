@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.6.0
+
+### Fixes
+
+- **Multiscale databases no longer crash on `save_to_file` (issue #13).** Databases
+  covering a wide range of field-of-view scales (e.g. 0.5°–5°) can generate hash
+  tables larger than 2 GB, which overflowed rkyv's default 32-bit relative-offset
+  limit and caused serialization to panic with *"out of range integral type
+  conversion attempted"*. The pattern catalog is now stored as
+  [`PatternCatalog`](https://docs.rs/tetra3/0.6.0/tetra3/solver/struct.PatternCatalog.html)
+  — a sharded container that splits its backing storage into independently-archived
+  chunks of up to ~770 MB each. Probe logic is unchanged in spirit (one additional
+  L1-resident dereference per probe, effectively zero runtime cost).
+
+### Breaking changes
+
+- **`.rkyv` database file format bumped.** Existing cached `.rkyv` files saved
+  with 0.5.x or earlier will fail to load under 0.6.0. Regenerate via
+  `SolverDatabase::generate_from_gaia(...)` (Rust) or
+  `generate_from_gaia(...)` (Python). First-use regeneration is automatic for
+  Python users whose databases live in the `gaia-catalog` package cache.
+- **`SolverDatabase::pattern_catalog` field type** changed from
+  `Vec<PatternEntry>` to `PatternCatalog`. Access slots via `.get(idx)` /
+  `.get_mut(idx)` rather than `[idx]`; the hash-probe loop in user code (if
+  any — most users don't access this field directly) needs a one-line update.
+- **Python: upper-bounded `gaia-catalog<1.0`.** The bundled Gaia binary
+  catalog format is unchanged in 0.6.0 and still works with
+  `gaia-catalog` 0.1.x. Adding this upper bound is a forward guard: if
+  `gaia-catalog` ever ships a breaking binary-format change under a
+  `1.0` release, this prevents it from silently being installed under a
+  `tetra3rs 0.6.x` that wouldn't be able to read it. No-op for users
+  today. Older `tetra3rs` releases don't pin `gaia-catalog` at all —
+  we'd protect 0.5.x users similarly via a future `0.5.2` patch if a
+  breaking `gaia-catalog` release ever lands.
+
 ## 0.5.1
 
 ### New features
