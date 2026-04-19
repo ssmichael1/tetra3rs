@@ -250,6 +250,15 @@ fn build_configs() -> Vec<ConfigCase> {
                 ..Default::default()
             },
         },
+        ConfigCase {
+            label: "matched-filter+snr",
+            config: CentroidExtractionConfig {
+                sigma_threshold: 3.0,
+                snr_min: Some(5.0),
+                matched_filter_sigma: Some(1.5),
+                ..Default::default()
+            },
+        },
     ]
 }
 

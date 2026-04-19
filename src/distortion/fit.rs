@@ -564,7 +564,7 @@ fn gather_matched_points(
 
             let sv = &database.star_vectors[star_idx];
             let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
-            let cam_v = rot.vecmul(&icrs_v);
+            let cam_v = rot * icrs_v;
 
             if cam_v[2] <= 0.0 {
                 continue;
@@ -604,8 +604,8 @@ fn fit_radial_ls(points: &[MatchedPoint], mask: &[bool]) -> (f64, f64, f64) {
 
     // Each point contributes 2 rows (x and y equations)
     let nrows = inlier_count * 2;
-    let mut a_mat = DynMatrix::<f64>::zeros(nrows, 3, 0.0);
-    let mut b_vec = DynVector::<f64>::zeros(nrows, 0.0);
+    let mut a_mat = DynMatrix::<f64>::zeros(nrows, 3);
+    let mut b_vec = DynVector::<f64>::zeros(nrows);
 
     let mut row = 0;
     for (i, p) in points.iter().enumerate() {
@@ -633,7 +633,7 @@ fn fit_radial_ls(points: &[MatchedPoint], mask: &[bool]) -> (f64, f64, f64) {
 
     let coeffs = a_mat
         .solve_qr(&b_vec)
-        .unwrap_or_else(|_| DynVector::zeros(3, 0.0));
+        .unwrap_or_else(|_| DynVector::zeros(3));
 
     (coeffs[0], coeffs[1], coeffs[2])
 }
@@ -706,9 +706,9 @@ pub(super) fn fit_poly_ls(
         return;
     }
 
-    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs, 0.0);
-    let mut bx_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
-    let mut by_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
+    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs);
+    let mut bx_vec = DynVector::<f64>::zeros(n_inliers);
+    let mut by_vec = DynVector::<f64>::zeros(n_inliers);
 
     let mut row = 0;
     for (i, p) in points.iter().enumerate() {

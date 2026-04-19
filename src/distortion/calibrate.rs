@@ -421,7 +421,7 @@ fn multi_image_calibrate(
             for &(cent_idx, cat_idx) in &ref_img.matches {
                 let sv = &database.star_vectors[cat_idx];
                 let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
-                let cam_v = rot.vecmul(&icrs_v);
+                let cam_v = rot * icrs_v;
 
                 if cam_v[2] <= 0.0 {
                     continue;

@@ -1051,6 +1051,7 @@ def extract_centroids(
     local_bg_block_size: Optional[int] = 64,
     max_elongation: Optional[float] = 3.0,
     snr_min: Optional[float] = 5.0,
+    matched_filter_sigma: Optional[float] = None,
 ) -> ExtractionResult:
     """Extract star centroids from a 2D image array.
 
@@ -1068,6 +1069,10 @@ def extract_centroids(
             Computed as sum_intensity / (sqrt(pixel_count) * sigma_at_peak).
             Pairs well with a permissive sigma_threshold (2.5-3.0) to let
             the per-blob cut do the false-positive rejection. None = disabled.
+        matched_filter_sigma: Apply a Gaussian matched filter of this sigma
+            (in pixels) before thresholding. Boosts point-source SNR; used
+            only to form the detection mask so photometry is unaffected.
+            Consider lowering sigma_threshold when enabled. None = disabled.
 
     Returns:
         ExtractionResult with centroids and image statistics.

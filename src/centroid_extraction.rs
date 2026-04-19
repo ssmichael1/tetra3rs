@@ -108,6 +108,25 @@ pub struct CentroidExtractionConfig {
     ///
     /// Default: Some(5.0). Set to `None` to disable.
     pub snr_min: Option<f32>,
+
+    /// Apply a Gaussian matched filter to the bg-subtracted image before
+    /// thresholding. When `Some(sigma)`, the image is convolved with a
+    /// separable 1-D Gaussian (σ in pixels, kernel truncated at 3σ). The
+    /// filtered image is used **only** to form the detection mask —
+    /// centroid positions and intensities are still measured on the
+    /// unfiltered bg-subtracted image, so photometry is unaffected.
+    ///
+    /// A matched filter boosts point-source SNR by concentrating the
+    /// star's PSF into fewer effective pixels before thresholding. The
+    /// gain is largest for faint stars in noisy or dense images. The
+    /// filter has a broad optimum: σ within a factor of ~2 of the true
+    /// PSF width still recovers nearly all the SNR.
+    ///
+    /// When enabled, consider lowering `sigma_threshold` (e.g. to 2.5–3.0)
+    /// since the filtered image has lower noise.
+    ///
+    /// Default: None (disabled).
+    pub matched_filter_sigma: Option<f32>,
 }
 
 impl Default for CentroidExtractionConfig {
@@ -123,6 +142,7 @@ impl Default for CentroidExtractionConfig {
             local_bg_block_size: Some(64),
             max_elongation: Some(3.0),
             snr_min: Some(5.0),
+            matched_filter_sigma: None,
         }
     }
 }
@@ -271,18 +291,49 @@ fn extract_from_gray(
         gray_input.iter().map(|&v| (v - bg_mean).max(0.0)).collect()
     };
 
-    // ── Step 3: per-pixel threshold ──
+    // ── Step 3: optional matched filter for thresholding only ──
+    // When `matched_filter_sigma` is set, we threshold on a Gaussian-smoothed
+    // copy of the residual image (separable 1-D blur via numeris). Centroids
+    // are still measured on the unfiltered `gray`, so intensities and CoM
+    // positions are unaffected. Zero-copy in and out: `gray` is moved into
+    // DynMatrix, filtered (one allocation for the blur output), then moved
+    // back out via `into_vec`. DynMatrix is column-major; our row-major Vec
+    // is interpreted as a transposed matrix, which doesn't matter because
+    // the Gaussian kernel is symmetric.
+    let (gray, filtered_for_mask): (Vec<f32>, Option<Vec<f32>>) =
+        match config.matched_filter_sigma {
+            Some(sigma) if sigma.is_finite() && sigma > 0.0 => {
+                let mat = numeris::DynMatrix::<f32>::from_vec(
+                    width as usize,
+                    height as usize,
+                    gray,
+                );
+                let blurred = numeris::imageproc::gaussian_blur(
+                    &mat,
+                    sigma,
+                    numeris::imageproc::BorderMode::Replicate,
+                );
+                let filtered = blurred.into_vec();
+                let gray = mat.into_vec();
+                (gray, Some(filtered))
+            }
+            _ => (gray, None),
+        };
+    let thresh_src: &[f32] = filtered_for_mask.as_deref().unwrap_or(&gray);
+
+    // ── Step 4: per-pixel threshold ──
     // In local mode, the threshold adapts to the noise surface; in global
     // mode every pixel shares the same sigma. Mathematically equivalent
     // to the previous `gray > bg_mean + N*bg_sigma` check.
     let mask: Vec<bool> = if let Some(sig) = &sigma_surface {
-        gray.iter()
+        thresh_src
+            .iter()
             .zip(sig.iter())
             .map(|(&v, &s)| v > config.sigma_threshold * s)
             .collect()
     } else {
         let cut = config.sigma_threshold * bg_sigma;
-        gray.iter().map(|&v| v > cut).collect()
+        thresh_src.iter().map(|&v| v > cut).collect()
     };
     let labels = label_connected_components(&mask, width, height, config.use_8_connectivity);
     let num_labels = *labels.iter().max().unwrap_or(&0) as usize;
