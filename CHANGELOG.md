@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+### Precision improvements
+
+- **True-pinhole pixel scale throughout.** The solver previously used the small-angle approximation `pixel_scale = fov / image_width` internally while storing `focal_length_px = (W/2) / tan(fov/2)` (true pinhole) on the result. At finite FOV the two differ by ~0.5%, producing ~100″ residuals at field corners if downstream code mixed them. The internal pipeline (`solve.rs`, `wcs_refine.rs`, `SolveConfig::pixel_scale`, distortion calibration, synthetic test generators) now uses `1/f` everywhere.
+- **Newton iteration for polynomial undistort.** `PolynomialDistortion::undistort` now solves the forward polynomial by Newton iteration (2-4 iterations to machine precision) instead of evaluating a separately-fit inverse polynomial. A finite-order inverse polynomial cannot perfectly invert a finite-order forward polynomial, and the resulting asymmetry error amplified at field corners under tight match radii. Newton is exact (limited only by forward polynomial expressiveness) and eliminates the asymmetry.
+- **TESS multi-image calibration**: average agreement with FITS WCS dropped from 0.81″ to **0.42″** across 10 sectors, with every sector improved or equal. Sector 17 specifically: RMSE 5.25″ → 2.56″.
+
+### Breaking changes
+
+- **`wcs_to_rotation` return value** — the returned FOV is now the *angular* FOV `2·atan(ps·W/2)` rather than the linear `ps·W`. Matches the convention of `fov_estimate_rad` elsewhere. Affects any external code calling this function directly; internal callers are all updated.
+- **Removed `term_pairs_range` / `num_coeffs_range`** from `distortion::polynomial`. These `pub` helpers were unused in-tree and had no external users we're aware of.
+- **`PolynomialDistortion::{ap_coeffs, bp_coeffs}`** are retained in the struct for binary-format compatibility but are zero-valued in any model produced by this crate. `fit_inverse_poly_ls` removed.
+
+### Other
+
+- `SolveConfig::pixel_scale()` return value is now `1/f` (true pinhole) instead of `fov / W` (linear); the two differ by ~0.5% at 15° FOV.
+
 ## 0.4.1
 
 ### New features
