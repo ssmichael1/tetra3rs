@@ -802,9 +802,10 @@ pub fn wcs_to_rotation(
         [boresight[0] as f32, boresight[1] as f32, boresight[2] as f32],
     ]);
 
-    // FOV from pixel scale in X direction
+    // FOV from pixel scale in X direction.
+    // ps_x = 1/f (true pinhole). Angular FOV = 2·atan(W/(2f)) = 2·atan(ps_x·W/2).
     let ps_x = cam_x_icrs_raw.norm(); // radians per pixel
-    let fov = (ps_x * image_width as f64) as f32;
+    let fov = (2.0 * ((ps_x * image_width as f64) / 2.0).atan()) as f32;
 
     // Parity from determinant of CD
     let det_cd = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
@@ -958,11 +959,13 @@ mod tests {
 
     #[test]
     fn test_wcs_to_rotation_simple() {
+        // True pinhole: ps = 1/f where f = (W/2) / tan(fov/2).
         let crval_ra = std::f64::consts::FRAC_PI_2;
         let crval_dec = 0.0;
         let fov_deg = 10.0_f64;
         let image_width = 1000u32;
-        let ps = fov_deg.to_radians() / image_width as f64;
+        let f = (image_width as f64 / 2.0) / (fov_deg.to_radians() / 2.0).tan();
+        let ps = 1.0 / f;
 
         let cd = [[ps, 0.0], [0.0, ps]];
         let (rot, fov, parity) = wcs_to_rotation(&cd, crval_ra, crval_dec, image_width);

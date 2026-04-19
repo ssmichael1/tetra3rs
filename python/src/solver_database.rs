@@ -491,6 +491,7 @@ impl PySolverDatabase {
             max_iterations,
             sigma_clip,
             convergence_threshold_px,
+            ..CalibrateConfig::default()
         };
 
         let result = calibrate_camera(

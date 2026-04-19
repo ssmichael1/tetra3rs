@@ -7,13 +7,6 @@
 //! y_distorted = y + Σ B_pq · x^p · y^q
 //! ```
 //!
-//! The inverse (undistortion) uses a separately fitted polynomial:
-//!
-//! ```text
-//! x_ideal = x_obs + Σ AP_pq · x_obs^p · y_obs^q
-//! y_ideal = y_obs + Σ BP_pq · x_obs^p · y_obs^q
-//! ```
-//!
 //! Including all terms from order 0:
 //! - **(p+q = 0)**: constant offset — optical center shift
 //! - **(p+q = 1)**: linear terms  — residual scale & rotation
@@ -23,6 +16,11 @@
 //! and other effects that aren't radially symmetric — critical for cameras
 //! like TESS where each CCD is offset from the optical axis.
 //!
+//! Inverse distortion uses Newton iteration on the forward polynomial — see
+//! [`PolynomialDistortion::undistort`]. The legacy `ap_coeffs` / `bp_coeffs`
+//! fields remain in the struct for binary-format compatibility but are
+//! zero-valued in any model produced by this crate.
+//!
 //! Coordinates are in pixels relative to the image center. The coefficients
 //! are stored normalized: internally the (x, y) inputs are divided by a
 //! `scale` factor (typically half the image width) before evaluating the
@@ -30,8 +28,9 @@
 
 /// SIP-like polynomial distortion model.
 ///
-/// Forward: ideal → distorted. Inverse: distorted → ideal.
-/// Both directions are stored as explicit polynomials (no iterative inversion needed).
+/// Forward distortion (ideal → distorted) is the explicit polynomial.
+/// Inverse distortion (distorted → ideal) is computed by Newton iteration
+/// on the forward polynomial — see [`Self::undistort`].
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PolynomialDistortion {
     /// Polynomial order (2..=6 typically).
@@ -44,9 +43,11 @@ pub struct PolynomialDistortion {
     pub a_coeffs: Vec<f64>,
     /// Forward B coefficients (y correction, ideal → distorted) in normalized coords.
     pub b_coeffs: Vec<f64>,
-    /// Inverse AP coefficients (x correction, distorted → ideal) in normalized coords.
+    /// Legacy inverse AP coefficients. Zero in models produced by this crate;
+    /// retained in the struct only for binary-format compatibility with
+    /// previously-saved camera models.
     pub ap_coeffs: Vec<f64>,
-    /// Inverse BP coefficients (y correction, distorted → ideal) in normalized coords.
+    /// Legacy inverse BP coefficients. See [`Self::ap_coeffs`].
     pub bp_coeffs: Vec<f64>,
 }
 
@@ -100,12 +101,66 @@ impl PolynomialDistortion {
     }
 
     /// Inverse distortion: distorted → ideal (pixel coords, relative to image center).
+    ///
+    /// Uses Newton iteration on the **forward** polynomial. Given an observed
+    /// distorted pixel `(x_d, y_d)`, finds the ideal `(x, y)` such that
+    /// `distort(x, y) = (x_d, y_d)`. Converges in 2–4 iterations to machine
+    /// precision for typical lens distortion (sub-pixel correction terms).
+    ///
+    /// This is exact (limited only by the forward polynomial's expressiveness),
+    /// in contrast to evaluating a separately-fit inverse polynomial which has
+    /// a small "asymmetry" error because a finite-order polynomial cannot
+    /// perfectly invert another finite-order polynomial.
     pub fn undistort(&self, x_d: f64, y_d: f64) -> (f64, f64) {
-        let u = x_d / self.scale;
-        let v = y_d / self.scale;
-        let dx = eval_poly(&self.ap_coeffs, self.order, u, v);
-        let dy = eval_poly(&self.bp_coeffs, self.order, u, v);
-        (x_d + dx * self.scale, y_d + dy * self.scale)
+        const MAX_ITER: usize = 8;
+        const TOL_PX: f64 = 1e-9; // sub-nanopixel residual
+
+        // Initial guess: pixels are close enough to ideal that x_d ≈ x.
+        // (For TESS the worst-case distortion is ~10 px on 2048-wide images.)
+        let mut x = x_d;
+        let mut y = y_d;
+
+        for _ in 0..MAX_ITER {
+            let u = x / self.scale;
+            let v = y / self.scale;
+            let (a_val, da_du, da_dv) = eval_poly_with_grad(&self.a_coeffs, self.order, u, v);
+            let (b_val, db_du, db_dv) = eval_poly_with_grad(&self.b_coeffs, self.order, u, v);
+
+            // Forward distortion: F(x, y) = (x + s·A(u, v), y + s·B(u, v))
+            let fx = x + a_val * self.scale;
+            let fy = y + b_val * self.scale;
+
+            // Residual: F(x, y) − (x_d, y_d)
+            let rx = fx - x_d;
+            let ry = fy - y_d;
+            if rx * rx + ry * ry < TOL_PX * TOL_PX {
+                break;
+            }
+
+            // Jacobian: ∂F/∂(x, y).
+            //   ∂(s·A(x/s, y/s))/∂x = s · (1/s) · ∂A/∂u = ∂A/∂u
+            // So J = [[1 + ∂A/∂u, ∂A/∂v], [∂B/∂u, 1 + ∂B/∂v]].
+            let j11 = 1.0 + da_du;
+            let j12 = da_dv;
+            let j21 = db_du;
+            let j22 = 1.0 + db_dv;
+            let det = j11 * j22 - j12 * j21;
+            // Singular Jacobian indicates near-degenerate distortion at this
+            // point. We've never observed this in practice — for any sensible
+            // lens distortion the Jacobian is dominated by the identity. If
+            // it ever fires, the latest iterate is still the best estimate.
+            debug_assert!(det.abs() > 1e-15, "singular Jacobian in undistort Newton step");
+            if det.abs() < 1e-15 {
+                break;
+            }
+            let inv_det = 1.0 / det;
+
+            // Newton step: (x, y) ← (x, y) − J⁻¹ · r
+            x -= inv_det * (j22 * rx - j12 * ry);
+            y -= inv_det * (-j21 * rx + j11 * ry);
+        }
+
+        (x, y)
     }
 
     /// Returns `true` if all coefficients are zero.
@@ -160,36 +215,6 @@ pub fn term_pairs(order: u32) -> Vec<(u32, u32)> {
     pairs
 }
 
-/// Number of polynomial coefficients for a restricted order range.
-///
-/// Only terms with `min_order ≤ p+q ≤ max_order` are included.
-/// For SIP-convention calibration, use `min_order=2` to exclude the
-/// constant and linear terms that are degenerate with per-image attitude.
-pub fn num_coeffs_range(min_order: u32, max_order: u32) -> usize {
-    assert!(min_order <= max_order);
-    let total = num_coeffs(max_order);
-    if min_order == 0 {
-        total
-    } else {
-        total - num_coeffs(min_order - 1)
-    }
-}
-
-/// Enumerate (p, q) pairs with `min_order ≤ p+q ≤ max_order`.
-///
-/// Same enumeration order as [`term_pairs`] but skipping low-order terms.
-pub fn term_pairs_range(min_order: u32, max_order: u32) -> Vec<(u32, u32)> {
-    assert!(min_order <= max_order);
-    let mut pairs = Vec::with_capacity(num_coeffs_range(min_order, max_order));
-    for s in min_order..=max_order {
-        for p in (0..=s).rev() {
-            let q = s - p;
-            pairs.push((p, q));
-        }
-    }
-    pairs
-}
-
 /// Evaluate a polynomial correction: Σ c_i · x^p_i · y^q_i
 /// `coeffs` is a flat vector indexed by `coeff_index(p, q)`.
 fn eval_poly(coeffs: &[f64], order: u32, x: f64, y: f64) -> f64 {
@@ -203,6 +228,37 @@ fn eval_poly(coeffs: &[f64], order: u32, x: f64, y: f64) -> f64 {
         }
     }
     result
+}
+
+/// Evaluate the polynomial `f(x, y) = Σ c_i · x^p · y^q` together with its
+/// partial derivatives `(∂f/∂x, ∂f/∂y)`.
+///
+/// Returns `(value, df_dx, df_dy)`. Used by `PolynomialDistortion::undistort`
+/// for Newton iteration on the forward polynomial.
+fn eval_poly_with_grad(coeffs: &[f64], order: u32, x: f64, y: f64) -> (f64, f64, f64) {
+    let mut value = 0.0;
+    let mut df_dx = 0.0;
+    let mut df_dy = 0.0;
+    let mut idx = 0;
+    for s in 0..=order {
+        for p in (0..=s).rev() {
+            let q = s - p;
+            let c = coeffs[idx];
+            let xp = x.powi(p as i32);
+            let yq = y.powi(q as i32);
+            value += c * xp * yq;
+            // ∂(x^p · y^q)/∂x = p · x^(p-1) · y^q  (zero when p == 0)
+            if p > 0 {
+                df_dx += c * (p as f64) * x.powi(p as i32 - 1) * yq;
+            }
+            // ∂(x^p · y^q)/∂y = q · x^p · y^(q-1)  (zero when q == 0)
+            if q > 0 {
+                df_dy += c * (q as f64) * xp * y.powi(q as i32 - 1);
+            }
+            idx += 1;
+        }
+    }
+    (value, df_dx, df_dy)
 }
 
 #[cfg(test)]
@@ -264,45 +320,6 @@ mod tests {
     }
 
     #[test]
-    fn test_num_coeffs_range() {
-        // min_order=2, max_order=4: terms with p+q in {2, 3, 4}
-        // order 2: 3 terms, order 3: 4 terms, order 4: 5 terms = 12 total
-        assert_eq!(num_coeffs_range(2, 4), 12);
-        // Full range should equal num_coeffs
-        assert_eq!(num_coeffs_range(0, 4), num_coeffs(4));
-        // Single order
-        assert_eq!(num_coeffs_range(2, 2), 3); // (2,0),(1,1),(0,2)
-        assert_eq!(num_coeffs_range(3, 3), 4); // (3,0),(2,1),(1,2),(0,3)
-        // Starting from 1
-        assert_eq!(num_coeffs_range(1, 4), num_coeffs(4) - 1); // exclude (0,0)
-    }
-
-    #[test]
-    fn test_term_pairs_range() {
-        let pairs = term_pairs_range(2, 4);
-        assert_eq!(pairs.len(), 12);
-        // All pairs should have p+q >= 2
-        for &(p, q) in &pairs {
-            assert!(p + q >= 2, "({}, {}) has sum < 2", p, q);
-            assert!(p + q <= 4, "({}, {}) has sum > 4", p, q);
-        }
-        // First pair should be (2,0)
-        assert_eq!(pairs[0], (2, 0));
-        // Should not contain any order 0 or 1 terms
-        assert!(!pairs.contains(&(0, 0)));
-        assert!(!pairs.contains(&(1, 0)));
-        assert!(!pairs.contains(&(0, 1)));
-    }
-
-    #[test]
-    fn test_term_pairs_range_matches_full() {
-        // term_pairs_range(0, order) should equal term_pairs(order)
-        let full = term_pairs(4);
-        let range = term_pairs_range(0, 4);
-        assert_eq!(full, range);
-    }
-
-    #[test]
     fn test_zero_distortion_roundtrip() {
         let d = PolynomialDistortion::zero(4, 1024.0);
         let (xu, yu) = d.undistort(100.0, -200.0);
@@ -311,6 +328,45 @@ mod tests {
         let (xd, yd) = d.distort(100.0, -200.0);
         assert!((xd - 100.0).abs() < 1e-12);
         assert!((yd + 200.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_newton_undistort_exact_inverse() {
+        // Build a non-trivial forward distortion (no inverse coeffs set).
+        // Newton iteration should still recover the ideal pixel exactly.
+        let n = num_coeffs(4);
+        let mut a = vec![0.0; n];
+        let mut b = vec![0.0; n];
+        a[coeff_index(2, 0)] = 0.01;
+        a[coeff_index(0, 2)] = 0.005;
+        a[coeff_index(1, 1)] = -0.003;
+        b[coeff_index(2, 0)] = -0.004;
+        b[coeff_index(0, 2)] = 0.012;
+        b[coeff_index(3, 0)] = 0.001;
+
+        let d = PolynomialDistortion::new(4, 1024.0, a, b, vec![0.0; n], vec![0.0; n]);
+
+        // Forward then back must roundtrip to within numerical precision.
+        for &(x, y) in &[(0.0, 0.0), (100.0, -200.0), (500.0, 400.0), (-800.0, 100.0)] {
+            let (xd, yd) = d.distort(x, y);
+            let (xu, yu) = d.undistort(xd, yd);
+            assert!(
+                (xu - x).abs() < 1e-9,
+                "x roundtrip {} -> {} -> {} (err {:.2e})",
+                x,
+                xd,
+                xu,
+                xu - x
+            );
+            assert!(
+                (yu - y).abs() < 1e-9,
+                "y roundtrip {} -> {} -> {} (err {:.2e})",
+                y,
+                yd,
+                yu,
+                yu - y
+            );
+        }
     }
 
     #[test]
