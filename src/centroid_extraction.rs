@@ -91,6 +91,23 @@ pub struct CentroidExtractionConfig {
     ///
     /// Default: None (disabled)
     pub max_elongation: Option<f32>,
+
+    /// Minimum per-blob signal-to-noise ratio to keep a detection.
+    ///
+    /// Computed as `sum_intensity / (sqrt(pixel_count) * sigma_at_peak)`,
+    /// where `sigma_at_peak` is sampled from the local noise map (or the
+    /// global background sigma when `local_bg_block_size` is `None`). This
+    /// is the total integrated significance of the detection, distinct
+    /// from `sigma_threshold` which is a per-pixel cut used only to form
+    /// the detection mask.
+    ///
+    /// Pairing a permissive `sigma_threshold` (e.g. 2.5–3.0) with an
+    /// `snr_min` around 5 is the recommended configuration: the per-pixel
+    /// cut samples more of each star's PSF wings, and the per-blob SNR
+    /// cut does the false-positive rejection.
+    ///
+    /// Default: Some(5.0). Set to `None` to disable.
+    pub snr_min: Option<f32>,
 }
 
 impl Default for CentroidExtractionConfig {
@@ -105,6 +122,7 @@ impl Default for CentroidExtractionConfig {
             use_8_connectivity: true,
             local_bg_block_size: Some(64),
             max_elongation: Some(3.0),
+            snr_min: Some(5.0),
         }
     }
 }
@@ -207,64 +225,82 @@ fn extract_from_gray(
     height: u32,
     config: &CentroidExtractionConfig,
 ) -> Result<CentroidExtractionResult> {
-    let _w = width as usize;
-    let _h = height as usize;
+    // ── Step 1: estimate background and noise ──
+    // When `local_bg_block_size` is set, always build a local background
+    // surface. The local *noise* surface is only used for per-pixel
+    // thresholding when `snr_min` is also set — that gates the adaptive
+    // per-pixel + per-blob-SNR pipeline as a coupled opt-in and leaves
+    // single-scalar-sigma behavior untouched otherwise.
+    let (bg_surface, sigma_surface, bg_mean, bg_sigma) = match config.local_bg_block_size {
+        Some(block_size) => {
+            let want_sigma = config.snr_min.is_some();
+            let (bg, sig) =
+                estimate_local_bg_sigma(gray_input, width, height, block_size, config, want_sigma);
+            match sig {
+                Some(sig) => {
+                    let bg_mean = median_finite(&bg);
+                    let bg_sigma = median_finite(&sig);
+                    (Some(bg), Some(sig), bg_mean, bg_sigma)
+                }
+                None => {
+                    // Legacy path: local bg, global-sigma from residual.
+                    let noise_input: Vec<f32> =
+                        gray_input.iter().zip(bg.iter()).map(|(&v, &b)| v - b).collect();
+                    let (m, s) = estimate_background(&noise_input, width, height, config);
+                    (Some(bg), None, m, s)
+                }
+            }
+        }
+        None => {
+            let (m, s) = estimate_background(gray_input, width, height, config);
+            (None, None, m, s)
+        }
+    };
+    let threshold = bg_mean + config.sigma_threshold * bg_sigma;
 
-    // ── Step 1: local background subtraction ──
-    // If local_bg_block_size is set, estimate and subtract a spatially varying
-    // background model. This is critical for images with nebulosity, Milky Way
-    // emission, vignetting, or other large-scale intensity gradients.
-    let gray: Vec<f32>;
-    let local_bg: Option<Vec<f32>>;
-    if let Some(block_size) = config.local_bg_block_size {
-        let bg = estimate_local_background(gray_input, width, height, block_size);
-        gray = gray_input
-            .iter()
-            .zip(bg.iter())
-            .map(|(&v, &b)| (v - b).max(0.0))
-            .collect();
-        local_bg = Some(bg);
-    } else {
-        gray = gray_input.to_vec();
-        local_bg = None;
-    }
-
-    // ── Step 2: estimate residual background noise ──
-    // Use unclamped residuals for noise estimation so the lower half of the
-    // distribution is preserved (clamping to 0 destroys it).
-    let noise_input = if let Some(ref bg) = local_bg {
+    // ── Step 2: subtract background to produce the residual image ──
+    // Always subtract, so downstream thresholding and centroiding treat the
+    // bg as zero. Clamp negatives to zero for intensity-weighted moments.
+    let gray: Vec<f32> = if let Some(bg) = &bg_surface {
         gray_input
             .iter()
             .zip(bg.iter())
-            .map(|(&v, &b)| v - b)
-            .collect::<Vec<f32>>()
+            .map(|(&v, &b)| (v - b).max(0.0))
+            .collect()
     } else {
-        gray_input.to_vec()
+        gray_input.iter().map(|&v| (v - bg_mean).max(0.0)).collect()
     };
-    let (bg_mean, bg_sigma) = estimate_background(&noise_input, width, height, config);
-    let threshold = bg_mean + config.sigma_threshold * bg_sigma;
 
-    // ── Step 3: threshold and label blobs ──
-    let mask: Vec<bool> = gray.iter().map(|&v| v > threshold).collect();
+    // ── Step 3: per-pixel threshold ──
+    // In local mode, the threshold adapts to the noise surface; in global
+    // mode every pixel shares the same sigma. Mathematically equivalent
+    // to the previous `gray > bg_mean + N*bg_sigma` check.
+    let mask: Vec<bool> = if let Some(sig) = &sigma_surface {
+        gray.iter()
+            .zip(sig.iter())
+            .map(|(&v, &s)| v > config.sigma_threshold * s)
+            .collect()
+    } else {
+        let cut = config.sigma_threshold * bg_sigma;
+        gray.iter().map(|&v| v > cut).collect()
+    };
     let labels = label_connected_components(&mask, width, height, config.use_8_connectivity);
     let num_labels = *labels.iter().max().unwrap_or(&0) as usize;
 
     // ── Step 4: compute centroids ──
-    // Use the local-background-subtracted image for centroid weighting so that
-    // the intensity weights reflect only the stellar signal, not the gradient.
-    let bg_for_centroids = if local_bg.is_some() {
-        // Already subtracted — use 0 as the level
-        0.0
-    } else {
-        bg_mean
-    };
+    // The residual image already has bg subtracted, so bg_for_centroids = 0.
+    // The per-blob SNR cut (when configured) samples the noise map at each
+    // blob's peak pixel and short-circuits before the expensive annulus
+    // and quadratic-refinement work.
     let raw_centroids = compute_blob_centroids(
         &gray,
         &labels,
         num_labels,
         width,
         height,
-        bg_for_centroids,
+        0.0,
+        bg_sigma,
+        sigma_surface.as_deref(),
         config,
     );
     let num_blobs_raw = raw_centroids.len();
@@ -307,27 +343,55 @@ fn extract_from_gray(
     })
 }
 
-/// Estimate a spatially varying background by computing block medians and
-/// interpolating between block centers.
+/// Estimate a spatially varying background surface (and optionally a noise
+/// surface) by computing per-tile statistics and bilinearly interpolating
+/// between tile centers.
 ///
-/// The image is divided into `block_size × block_size` tiles. For each tile,
-/// the median pixel value is computed (ignoring zeros). A smooth background
-/// surface is then reconstructed via bilinear interpolation between tile
-/// centers.
+/// The image is divided into `block_size × block_size` tiles. For each tile:
+///   - The median pixel value estimates the local background level.
+///   - When `want_sigma`, the lower-half RMS (sigma-clipped) of pixels at or
+///     below the median estimates the local noise sigma. The lower half is
+///     used because it is uncontaminated by stars, which only bias the
+///     distribution upward.
 ///
-/// This effectively removes large-scale structure (nebulosity, Milky Way
-/// emission, vignetting) while preserving point sources (stars).
-fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size: u32) -> Vec<f32> {
+/// The surface is reconstructed via bilinear interpolation between tile
+/// centers, yielding a smooth per-pixel estimate. Scratch buffers are
+/// allocated once up front and reused across tiles.
+///
+/// This removes large-scale structure (nebulosity, vignetting) and, when
+/// the sigma surface is built, lets the detection threshold adapt to
+/// regions of varying noise.
+fn estimate_local_bg_sigma(
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    block_size: u32,
+    config: &CentroidExtractionConfig,
+    want_sigma: bool,
+) -> (Vec<f32>, Option<Vec<f32>>) {
     let w = width as usize;
     let h = height as usize;
     let bs = block_size as usize;
 
-    // Number of blocks in each dimension
-    let nx = (w + bs - 1) / bs;
-    let ny = (h + bs - 1) / bs;
+    let nx = w.div_ceil(bs);
+    let ny = h.div_ceil(bs);
 
-    // Compute median for each block
     let mut block_medians = vec![0.0f32; nx * ny];
+    let mut block_sigmas = if want_sigma {
+        vec![0.0f32; nx * ny]
+    } else {
+        Vec::new()
+    };
+
+    // Reusable scratch buffers: one allocation per call instead of one per tile.
+    let tile_cap = bs * bs;
+    let mut vals: Vec<f32> = Vec::with_capacity(tile_cap);
+    let mut low_half: Vec<f32> = if want_sigma {
+        Vec::with_capacity(tile_cap)
+    } else {
+        Vec::new()
+    };
+
     for by in 0..ny {
         for bx in 0..nx {
             let x0 = bx * bs;
@@ -335,7 +399,7 @@ fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size
             let x1 = (x0 + bs).min(w);
             let y1 = (y0 + bs).min(h);
 
-            let mut vals: Vec<f32> = Vec::with_capacity(bs * bs);
+            vals.clear();
             for y in y0..y1 {
                 for x in x0..x1 {
                     let v = pixels[y * w + x];
@@ -345,23 +409,92 @@ fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size
                 }
             }
 
+            let tile_idx = by * nx + bx;
             if vals.is_empty() {
-                block_medians[by * nx + bx] = 0.0;
-            } else {
-                vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-                block_medians[by * nx + bx] = vals[vals.len() / 2];
+                // medians and (optional) sigmas already zero-initialized
+                continue;
             }
+
+            // Quickselect for the median — O(N) vs the old O(N log N) sort.
+            let k = vals.len() / 2;
+            vals.select_nth_unstable_by(k, f32::total_cmp);
+            let median = vals[k];
+            block_medians[tile_idx] = median;
+
+            if !want_sigma {
+                continue;
+            }
+
+            // Lower-half sigma-clipped RMS, mirrored to yield Gaussian σ.
+            // After select_nth_unstable, `vals` is partially ordered — the
+            // `<= median` filter still gives the correct half.
+            low_half.clear();
+            low_half.extend(vals.iter().copied().filter(|&v| v <= median));
+            let mut sigma = 0.0_f32;
+            for _ in 0..config.sigma_clip_iterations {
+                if low_half.is_empty() {
+                    break;
+                }
+                let sum: f64 = low_half.iter().map(|&v| v as f64).sum();
+                let mean_low = (sum / low_half.len() as f64) as f32;
+                let var_sum: f64 = low_half
+                    .iter()
+                    .map(|&v| ((v - mean_low) as f64).powi(2))
+                    .sum();
+                sigma = (var_sum / low_half.len() as f64).sqrt() as f32;
+                if sigma < 1e-10 {
+                    break;
+                }
+                let lo = mean_low - config.sigma_clip_factor * sigma;
+                let hi = mean_low + config.sigma_clip_factor * sigma;
+                let before = low_half.len();
+                low_half.retain(|&v| v >= lo && v <= hi);
+                if low_half.len() == before {
+                    break;
+                }
+            }
+            block_sigmas[tile_idx] = sigma;
         }
     }
 
-    // Bilinearly interpolate between block centers to produce a smooth
-    // background estimate at every pixel.
-    let mut background = vec![0.0f32; w * h];
+    let bg_surface = bilinear_upscale(&block_medians, nx, ny, w, h, bs);
+    let sigma_surface = if want_sigma {
+        Some(bilinear_upscale(&block_sigmas, nx, ny, w, h, bs))
+    } else {
+        None
+    };
+    (bg_surface, sigma_surface)
+}
+
+/// Median of the finite values in a slice. Returns 0.0 for empty input.
+/// Uses quickselect (O(N) expected) rather than a full sort.
+fn median_finite(values: &[f32]) -> f32 {
+    let mut v: Vec<f32> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    let k = v.len() / 2;
+    v.select_nth_unstable_by(k, f32::total_cmp);
+    v[k]
+}
+
+/// Bilinearly upsample a tile-resolution value grid to full pixel resolution.
+///
+/// `tile_values` is `nx × ny` row-major. Output is `w × h` row-major. Tile
+/// centers are located at `((bx + 0.5) * bs, (by + 0.5) * bs)`.
+fn bilinear_upscale(
+    tile_values: &[f32],
+    nx: usize,
+    ny: usize,
+    w: usize,
+    h: usize,
+    bs: usize,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; w * h];
     let half_bs = bs as f32 / 2.0;
 
     for y in 0..h {
         for x in 0..w {
-            // Position in block-center coordinates
             let bx_f = (x as f32 - half_bs) / bs as f32;
             let by_f = (y as f32 - half_bs) / bs as f32;
 
@@ -373,19 +506,19 @@ fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size
             let fx = (bx_f - bx0 as f32).clamp(0.0, 1.0);
             let fy = (by_f - by0 as f32).clamp(0.0, 1.0);
 
-            let m00 = block_medians[by0 * nx + bx0];
-            let m10 = block_medians[by0 * nx + bx1];
-            let m01 = block_medians[by1 * nx + bx0];
-            let m11 = block_medians[by1 * nx + bx1];
+            let m00 = tile_values[by0 * nx + bx0];
+            let m10 = tile_values[by0 * nx + bx1];
+            let m01 = tile_values[by1 * nx + bx0];
+            let m11 = tile_values[by1 * nx + bx1];
 
-            background[y * w + x] = m00 * (1.0 - fx) * (1.0 - fy)
+            out[y * w + x] = m00 * (1.0 - fx) * (1.0 - fy)
                 + m10 * fx * (1.0 - fy)
                 + m01 * (1.0 - fx) * fy
                 + m11 * fx * fy;
         }
     }
 
-    background
+    out
 }
 
 /// Convert a DynamicImage to a Vec<f32> of grayscale values.
@@ -452,15 +585,13 @@ fn estimate_background(
         return (0.0, 0.0);
     }
 
-    values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Quickselect median — O(N) expected, vs O(N log N) for a full sort. The
+    // lower-half noise estimate below doesn't need sortedness; only the
+    // value at index n/2 matters.
     let n = values.len();
-
-    // Median as robust background level
-    let median = if n % 2 == 0 {
-        (values[n / 2 - 1] + values[n / 2]) / 2.0
-    } else {
-        values[n / 2]
-    };
+    let k = n / 2;
+    values.select_nth_unstable_by(k, f32::total_cmp);
+    let median = values[k];
 
     // Estimate noise from pixels at or below the median (uncontaminated by stars).
     // These represent the "dark side" of the noise distribution.
@@ -587,20 +718,21 @@ fn label_connected_components(
         }
     }
 
-    // Second pass: flatten labels
-    // Build a mapping from root -> sequential label
-    let mut root_map = std::collections::HashMap::new();
+    // Second pass: flatten labels via a Vec<u32> remap (indexed by root
+    // label). Faster than a HashMap — no hashing, single cache-friendly
+    // read/write per pixel. Slot 0 is sentinel for "unmapped".
+    let mut root_to_seq = vec![0u32; parent.len()];
     let mut seq = 1u32;
 
     for label in labels.iter_mut() {
         if *label > 0 {
             let root = find(&mut parent, *label);
-            let mapped = root_map.entry(root).or_insert_with(|| {
-                let s = seq;
+            let slot = &mut root_to_seq[root as usize];
+            if *slot == 0 {
+                *slot = seq;
                 seq += 1;
-                s
-            });
-            *label = *mapped;
+            }
+            *label = *slot;
         }
     }
 
@@ -618,7 +750,7 @@ struct RawCentroid {
 
 /// Compute intensity-weighted centroids for each labeled blob.
 ///
-/// For each blob that passes size and elongation filters:
+/// For each blob that passes size, elongation, and per-blob SNR filters:
 /// 1. A local background is estimated from the median of non-blob pixels in a
 ///    5-pixel annulus around the blob's bounding box.
 /// 2. Intensity-weighted moments are re-accumulated with the local background
@@ -630,6 +762,10 @@ struct RawCentroid {
 ///
 /// When `max_elongation` is set in config, blobs with elongation ratio
 /// (major/minor axis) exceeding the threshold are rejected as non-stellar.
+/// When `snr_min` is set, blobs whose integrated SNR (sum_intensity /
+/// (sqrt(pixel_count) * sigma_at_peak)) falls below the threshold are
+/// rejected *before* the annulus and quadratic-fit work — the common case
+/// on noisy images where most raw blobs are spurious.
 fn compute_blob_centroids(
     gray: &[f32],
     labels: &[u32],
@@ -637,6 +773,8 @@ fn compute_blob_centroids(
     width: u32,
     height: u32,
     bg_level: f32,
+    global_sigma: f32,
+    sigma_surface: Option<&[f32]>,
     config: &CentroidExtractionConfig,
 ) -> Vec<RawCentroid> {
     let w = width as usize;
@@ -729,159 +867,182 @@ fn compute_blob_centroids(
 
     let h = height as usize;
 
-    accums
-        .into_iter()
-        .enumerate()
-        .skip(1) // skip label 0 (background)
-        .filter_map(|(blob_label, acc)| {
-            if acc.pixel_count < config.min_pixels
-                || acc.pixel_count > config.max_pixels
-                || acc.sum_intensity <= 0.0
-            {
-                return None;
+    // Reusable scratch for per-blob annulus sampling. One allocation,
+    // `clear()`-ed per blob, sized to a reasonable upper bound so we
+    // rarely reallocate. Dense fields can see tens of thousands of
+    // blobs; allocating per-blob is a measurable cost otherwise.
+    let mut annulus_vals: Vec<f32> = Vec::with_capacity(256);
+
+    let mut result: Vec<RawCentroid> = Vec::with_capacity(accums.len().saturating_sub(1));
+
+    for (blob_label, acc) in accums.into_iter().enumerate().skip(1) {
+        if acc.pixel_count < config.min_pixels
+            || acc.pixel_count > config.max_pixels
+            || acc.sum_intensity <= 0.0
+        {
+            continue;
+        }
+
+        // --- Initial CoM for elongation filter (uses global bg) ---
+        let dx_bar = acc.sum_x / acc.sum_intensity;
+        let dy_bar = acc.sum_y / acc.sum_intensity;
+        let cxx = acc.sum_xx / acc.sum_intensity - dx_bar * dx_bar;
+        let cyy = acc.sum_yy / acc.sum_intensity - dy_bar * dy_bar;
+        let cxy = acc.sum_xy / acc.sum_intensity - dx_bar * dy_bar;
+
+        // Elongation filter
+        if let Some(max_elong) = config.max_elongation {
+            let trace = cxx + cyy;
+            let det = cxx * cyy - cxy * cxy;
+            let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
+            let lambda_max = (trace + disc) / 2.0;
+            let lambda_min = (trace - disc).max(1e-12) / 2.0;
+            let elongation = (lambda_max / lambda_min).sqrt() as f32;
+            if elongation > max_elong {
+                continue;
             }
+        }
 
-            // --- Initial CoM for elongation filter (uses global bg) ---
-            let dx_bar = acc.sum_x / acc.sum_intensity;
-            let dy_bar = acc.sum_y / acc.sum_intensity;
-            let cxx = acc.sum_xx / acc.sum_intensity - dx_bar * dx_bar;
-            let cyy = acc.sum_yy / acc.sum_intensity - dy_bar * dy_bar;
-            let cxy = acc.sum_xy / acc.sum_intensity - dx_bar * dy_bar;
-
-            // Elongation filter
-            if let Some(max_elong) = config.max_elongation {
-                let trace = cxx + cyy;
-                let det = cxx * cyy - cxy * cxy;
-                let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
-                let lambda_max = (trace + disc) / 2.0;
-                let lambda_min = (trace - disc).max(1e-12) / 2.0;
-                let elongation = (lambda_max / lambda_min).sqrt() as f32;
-                if elongation > max_elong {
-                    return None;
+        // Per-blob SNR filter — runs before annulus sampling and
+        // quadratic refinement so spurious blobs are rejected cheaply.
+        // sigma_at_peak is sampled from the local noise map when
+        // available, else falls back to the global background sigma.
+        if let Some(snr_min) = config.snr_min {
+            let peak_idx = acc.peak_row * w + acc.peak_col;
+            let sigma_at_peak = sigma_surface
+                .map(|s| s[peak_idx])
+                .unwrap_or(global_sigma);
+            if sigma_at_peak > 0.0 {
+                let noise = (acc.pixel_count as f64).sqrt() * sigma_at_peak as f64;
+                let snr = (acc.sum_intensity / noise) as f32;
+                if snr < snr_min {
+                    continue;
                 }
             }
+        }
 
-            // --- Per-blob local background from annulus ---
-            // Expand bounding box by margin, collect non-blob pixels
-            const ANNULUS_MARGIN: usize = 5;
-            let r0 = acc.min_row.saturating_sub(ANNULUS_MARGIN);
-            let r1 = (acc.max_row + ANNULUS_MARGIN + 1).min(h);
-            let c0 = acc.min_col.saturating_sub(ANNULUS_MARGIN);
-            let c1 = (acc.max_col + ANNULUS_MARGIN + 1).min(w);
+        // --- Per-blob local background from annulus ---
+        // Expand bounding box by margin, collect non-blob pixels.
+        const ANNULUS_MARGIN: usize = 5;
+        let r0 = acc.min_row.saturating_sub(ANNULUS_MARGIN);
+        let r1 = (acc.max_row + ANNULUS_MARGIN + 1).min(h);
+        let c0 = acc.min_col.saturating_sub(ANNULUS_MARGIN);
+        let c1 = (acc.max_col + ANNULUS_MARGIN + 1).min(w);
 
-            let mut annulus_vals: Vec<f32> = Vec::new();
-            for r in r0..r1 {
-                let row_off = r * w;
-                for c in c0..c1 {
-                    let idx = row_off + c;
-                    if labels[idx] == 0 {
-                        annulus_vals.push(gray[idx]);
-                    }
+        annulus_vals.clear();
+        for r in r0..r1 {
+            let row_off = r * w;
+            for c in c0..c1 {
+                let idx = row_off + c;
+                if labels[idx] == 0 {
+                    annulus_vals.push(gray[idx]);
                 }
             }
+        }
 
-            // Median of annulus (residual local background in bg-subtracted image)
-            let local_bg = if annulus_vals.is_empty() {
-                0.0_f64
-            } else {
-                annulus_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-                let mid = annulus_vals.len() / 2;
-                if annulus_vals.len() % 2 == 0 {
-                    (annulus_vals[mid - 1] + annulus_vals[mid]) as f64 / 2.0
-                } else {
-                    annulus_vals[mid] as f64
+        // Median of annulus (residual local background in bg-subtracted image).
+        // Quickselect — O(N) expected — matches what the global and per-tile
+        // medians do. Uses the single n/2 element rather than averaging two
+        // middle elements; the difference is sub-DN for typical annulus sizes
+        // and matters less than the overall pedestal accuracy.
+        let local_bg = if annulus_vals.is_empty() {
+            0.0_f64
+        } else {
+            let mid = annulus_vals.len() / 2;
+            annulus_vals.select_nth_unstable_by(mid, f32::total_cmp);
+            annulus_vals[mid] as f64
+        };
+
+        // --- Re-accumulate moments with local background correction ---
+        let ref_col = acc.ref_col;
+        let ref_row = acc.ref_row;
+        let mut sum_x = 0.0_f64;
+        let mut sum_y = 0.0_f64;
+        let mut sum_xx = 0.0_f64;
+        let mut sum_yy = 0.0_f64;
+        let mut sum_xy = 0.0_f64;
+        let mut sum_i = 0.0_f64;
+
+        for r in acc.min_row..=acc.max_row {
+            let row_off = r * w;
+            for c in acc.min_col..=acc.max_col {
+                let idx = row_off + c;
+                if labels[idx] as usize == blob_label {
+                    let intensity = (gray[idx] as f64 - local_bg).max(0.0);
+                    let dx = c as f64 - ref_col as f64;
+                    let dy = r as f64 - ref_row as f64;
+                    sum_x += dx * intensity;
+                    sum_y += dy * intensity;
+                    sum_xx += dx * dx * intensity;
+                    sum_yy += dy * dy * intensity;
+                    sum_xy += dx * dy * intensity;
+                    sum_i += intensity;
                 }
+            }
+        }
+
+        if sum_i <= 0.0 {
+            continue;
+        }
+
+        let dx_bar = sum_x / sum_i;
+        let dy_bar = sum_y / sum_i;
+        let xbar = ref_col as f64 + dx_bar;
+        let ybar = ref_row as f64 + dy_bar;
+        let cxx = sum_xx / sum_i - dx_bar * dx_bar;
+        let cyy = sum_yy / sum_i - dy_bar * dy_bar;
+        let cxy = sum_xy / sum_i - dx_bar * dy_bar;
+
+        // --- Quadratic peak refinement ---
+        let mut final_x = xbar;
+        let mut final_y = ybar;
+
+        let pc = acc.peak_col;
+        let pr = acc.peak_row;
+        if acc.pixel_count >= 5 && pc >= 1 && pr >= 1 && pc + 1 < w && pr + 1 < h {
+            // Build 3x3 grid of background-subtracted values around peak
+            let effective_bg = local_bg;
+            let v = |dy: isize, dx: isize| -> f64 {
+                let r = (pr as isize + dy) as usize;
+                let c = (pc as isize + dx) as usize;
+                gray[r * w + c] as f64 - effective_bg
             };
 
-            // --- Re-accumulate moments with local background correction ---
-            let ref_col = acc.ref_col;
-            let ref_row = acc.ref_row;
-            let mut sum_x = 0.0_f64;
-            let mut sum_y = 0.0_f64;
-            let mut sum_xx = 0.0_f64;
-            let mut sum_yy = 0.0_f64;
-            let mut sum_xy = 0.0_f64;
-            let mut sum_i = 0.0_f64;
+            let b = (v(0, 1) - v(0, -1)) / 2.0;
+            let c_coeff = (v(1, 0) - v(-1, 0)) / 2.0;
+            let d = (v(0, 1) + v(0, -1) - 2.0 * v(0, 0)) / 2.0;
+            let f = (v(1, 0) + v(-1, 0) - 2.0 * v(0, 0)) / 2.0;
+            let e = (v(1, 1) - v(1, -1) - v(-1, 1) + v(-1, -1)) / 4.0;
 
-            for r in acc.min_row..=acc.max_row {
-                let row_off = r * w;
-                for c in acc.min_col..=acc.max_col {
-                    let idx = row_off + c;
-                    if labels[idx] as usize == blob_label {
-                        let intensity = (gray[idx] as f64 - local_bg).max(0.0);
-                        let dx = c as f64 - ref_col as f64;
-                        let dy = r as f64 - ref_row as f64;
-                        sum_x += dx * intensity;
-                        sum_y += dy * intensity;
-                        sum_xx += dx * dx * intensity;
-                        sum_yy += dy * dy * intensity;
-                        sum_xy += dx * dy * intensity;
-                        sum_i += intensity;
+            let denom = 4.0 * d * f - e * e;
+            if denom.abs() > 1e-10 {
+                let x_off = (e * c_coeff - 2.0 * f * b) / denom;
+                let y_off = (e * b - 2.0 * d * c_coeff) / denom;
+
+                // Only apply if offset is within half a pixel
+                if x_off.abs() <= 0.5 && y_off.abs() <= 0.5 {
+                    let qx = pc as f64 + x_off;
+                    let qy = pr as f64 + y_off;
+                    // Only use quadratic when it agrees with CoM (within 0.5 px).
+                    // For asymmetric or blended blobs, CoM is more reliable.
+                    let dist_sq = (qx - xbar) * (qx - xbar) + (qy - ybar) * (qy - ybar);
+                    if dist_sq < 0.25 {
+                        final_x = qx;
+                        final_y = qy;
                     }
                 }
             }
+        }
 
-            if sum_i <= 0.0 {
-                return None;
-            }
+        result.push(RawCentroid {
+            x_px: final_x as f32,
+            y_px: final_y as f32,
+            mass: sum_i as f32,
+            cov: crate::Matrix2::new([[cxx as f32, cxy as f32], [cxy as f32, cyy as f32]]),
+        });
+    }
 
-            let dx_bar = sum_x / sum_i;
-            let dy_bar = sum_y / sum_i;
-            let xbar = ref_col as f64 + dx_bar;
-            let ybar = ref_row as f64 + dy_bar;
-            let cxx = sum_xx / sum_i - dx_bar * dx_bar;
-            let cyy = sum_yy / sum_i - dy_bar * dy_bar;
-            let cxy = sum_xy / sum_i - dx_bar * dy_bar;
-
-            // --- Quadratic peak refinement ---
-            let mut final_x = xbar;
-            let mut final_y = ybar;
-
-            let pc = acc.peak_col;
-            let pr = acc.peak_row;
-            if acc.pixel_count >= 5 && pc >= 1 && pr >= 1 && pc + 1 < w && pr + 1 < h {
-                // Build 3x3 grid of background-subtracted values around peak
-                let effective_bg = local_bg;
-                let v = |dy: isize, dx: isize| -> f64 {
-                    let r = (pr as isize + dy) as usize;
-                    let c = (pc as isize + dx) as usize;
-                    gray[r * w + c] as f64 - effective_bg
-                };
-
-                let b = (v(0, 1) - v(0, -1)) / 2.0;
-                let c_coeff = (v(1, 0) - v(-1, 0)) / 2.0;
-                let d = (v(0, 1) + v(0, -1) - 2.0 * v(0, 0)) / 2.0;
-                let f = (v(1, 0) + v(-1, 0) - 2.0 * v(0, 0)) / 2.0;
-                let e = (v(1, 1) - v(1, -1) - v(-1, 1) + v(-1, -1)) / 4.0;
-
-                let denom = 4.0 * d * f - e * e;
-                if denom.abs() > 1e-10 {
-                    let x_off = (e * c_coeff - 2.0 * f * b) / denom;
-                    let y_off = (e * b - 2.0 * d * c_coeff) / denom;
-
-                    // Only apply if offset is within half a pixel
-                    if x_off.abs() <= 0.5 && y_off.abs() <= 0.5 {
-                        let qx = pc as f64 + x_off;
-                        let qy = pr as f64 + y_off;
-                        // Only use quadratic when it agrees with CoM (within 0.5 px).
-                        // For asymmetric or blended blobs, CoM is more reliable.
-                        let dist_sq = (qx - xbar) * (qx - xbar) + (qy - ybar) * (qy - ybar);
-                        if dist_sq < 0.25 {
-                            final_x = qx;
-                            final_y = qy;
-                        }
-                    }
-                }
-            }
-
-            Some(RawCentroid {
-                x_px: final_x as f32,
-                y_px: final_y as f32,
-                mass: sum_i as f32,
-                cov: crate::Matrix2::new([[cxx as f32, cxy as f32], [cxy as f32, cyy as f32]]),
-            })
-        })
-        .collect()
+    result
 }
 
 #[cfg(test)]

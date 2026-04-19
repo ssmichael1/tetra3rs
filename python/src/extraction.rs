@@ -199,6 +199,7 @@ impl PyExtractionResult {
 ///     max_centroids: Maximum number of centroids to return. None = all.
 ///     local_bg_block_size: Block size for local background estimation. None = global only.
 ///     max_elongation: Maximum blob elongation ratio. None = disabled.
+///     snr_min: Minimum per-blob signal-to-noise ratio. None = disabled. Default 5.0.
 ///
 /// Returns:
 ///     ExtractionResult with centroids and image statistics.
@@ -211,6 +212,7 @@ impl PyExtractionResult {
     max_centroids = None,
     local_bg_block_size = Some(64),
     max_elongation = Some(3.0),
+    snr_min = Some(5.0),
 ))]
 pub(crate) fn extract_centroids(
     image: &Bound<'_, pyo3::PyAny>,
@@ -220,6 +222,7 @@ pub(crate) fn extract_centroids(
     max_centroids: Option<usize>,
     local_bg_block_size: Option<u32>,
     max_elongation: Option<f32>,
+    snr_min: Option<f32>,
 ) -> PyResult<PyExtractionResult> {
     let (pixels, width, height) = image_to_f32(image)?;
 
@@ -233,6 +236,7 @@ pub(crate) fn extract_centroids(
         use_8_connectivity: true,
         local_bg_block_size,
         max_elongation,
+        snr_min,
     };
 
     let result =

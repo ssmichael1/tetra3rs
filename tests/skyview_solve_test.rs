@@ -398,6 +398,7 @@ fn test_skyview_fits_solve() {
             use_8_connectivity: true,
             local_bg_block_size: Some(64),
             max_elongation: Some(3.0),
+            snr_min: None,
         };
 
         let extraction =

@@ -54,6 +54,13 @@ codegen-units = 1
 rand = "0.10.0"
 rand_distr = "0.6.0"
 ureq = "3"
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "extract"
+path = "benches/extract.rs"
+harness = false
+required-features = ["image"]
 
 # integration tests use centroid extraction which needs the "image" feature
 # The test itself reads FITS files directly (minimal parser in-test)
@@ -65,4 +72,9 @@ required-features = ["image"]
 [[test]]
 name = "tess_solve_test"
 path = "tests/tess_solve_test.rs"
+required-features = ["image"]
+
+[[test]]
+name = "ab_extraction"
+path = "tests/ab_extraction.rs"
 required-features = ["image"]

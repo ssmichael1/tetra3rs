@@ -1050,6 +1050,7 @@ def extract_centroids(
     max_centroids: Optional[int] = None,
     local_bg_block_size: Optional[int] = 64,
     max_elongation: Optional[float] = 3.0,
+    snr_min: Optional[float] = 5.0,
 ) -> ExtractionResult:
     """Extract star centroids from a 2D image array.
 
@@ -1063,6 +1064,10 @@ def extract_centroids(
         local_bg_block_size: Block size for local background estimation.
             None = global background only.
         max_elongation: Maximum blob elongation ratio. None = disabled.
+        snr_min: Minimum per-blob signal-to-noise ratio to keep a detection.
+            Computed as sum_intensity / (sqrt(pixel_count) * sigma_at_peak).
+            Pairs well with a permissive sigma_threshold (2.5-3.0) to let
+            the per-blob cut do the false-positive rejection. None = disabled.
 
     Returns:
         ExtractionResult with centroids and image statistics.
