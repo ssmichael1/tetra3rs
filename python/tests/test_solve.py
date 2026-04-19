@@ -415,10 +415,13 @@ class TestTrackingMode:
         )
 
         assert tracked is not None, f"Tracking solve failed with {hint_kind} hint"
-        # Boresight agreement with LIS (tracked should land on the same sky point)
-        sep = angular_sep_deg(lis.ra_deg, lis.dec_deg, tracked.ra_deg, tracked.dec_deg)
-        assert sep < 10.0 / 3600.0, (
-            f"Tracked boresight disagrees with LIS by {sep * 3600:.1f}″ ({hint_kind})"
+        # On noiseless synthetic data, tracking and LIS converge to the same
+        # fixed point of wcs_refine — agreement should be well below 1″.
+        # We use 1″ as a loose bound that catches gross regressions but
+        # tolerates any numerical scatter on real-data use cases.
+        sep_arcsec = angular_sep_deg(lis.ra_deg, lis.dec_deg, tracked.ra_deg, tracked.dec_deg) * 3600.0
+        assert sep_arcsec < 1.0, (
+            f"Tracked boresight disagrees with LIS by {sep_arcsec:.3f}″ ({hint_kind})"
         )
 
     def test_tracking_fallback_to_lis_on_bad_hint(self, skyview_db):

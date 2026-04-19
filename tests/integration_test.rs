@@ -1031,16 +1031,22 @@ fn test_tracking_with_attitude_hint() {
             n_track_ok += 1;
             track_time_ms.push(track_result.solve_time_ms);
 
-            // Verify the tracked solution agrees with the LIS solution
+            // Verify the tracked solution agrees with the LIS solution.
+            // On noiseless synthetic data the two paths converge to the same
+            // fixed point of wcs_refine, so agreement is at f32 floating-point
+            // noise (effectively zero). 1″ is very loose and only catches
+            // gross regressions — tighten if we ever want to detect subtler
+            // divergence between the two paths.
             let tq = track_result.qicrs2cam.unwrap();
             let lis_bs = lis_quat.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
             let track_bs = tq.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
             let agreement = angular_separation(&lis_bs, &track_bs);
-            if agreement < (10.0_f32 / 3600.0).to_radians() {
+            const AGREEMENT_THRESHOLD_ARCSEC: f32 = 1.0;
+            if agreement < (AGREEMENT_THRESHOLD_ARCSEC / 3600.0).to_radians() {
                 n_track_recovers_perturbed += 1;
             } else {
                 println!(
-                    "  Trial {:2}: tracked but disagrees with LIS by {:.1}\"",
+                    "  Trial {:2}: tracked but disagrees with LIS by {:.2}\"",
                     trial,
                     agreement.to_degrees() * 3600.0
                 );
