@@ -91,6 +91,23 @@ impl PySolveResult {
         )
     }
 
+    /// Attitude quaternion as a 4-element ``[w, x, y, z]`` array.
+    ///
+    /// Rotates ICRS vectors into the camera frame:
+    /// ``camera_vec = quaternion * icrs_vec``.
+    ///
+    /// Suitable for feeding back as ``attitude_hint`` on the next frame's
+    /// ``solve_from_centroids`` call (tracking mode).
+    #[getter]
+    fn quaternion<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        let q = self
+            .inner
+            .qicrs2cam
+            .as_ref()
+            .expect("MatchFound must have quaternion");
+        PyArray1::from_vec(py, vec![q.w as f64, q.x as f64, q.y as f64, q.z as f64])
+    }
+
     /// Right ascension of the boresight in degrees [0, 360).
     #[getter]
     fn ra_deg(&self) -> f64 {

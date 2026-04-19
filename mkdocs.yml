@@ -89,6 +89,7 @@ nav:
       - Camera Model: concepts/camera-model.md
       - WCS Output: concepts/wcs.md
       - Stellar Aberration: concepts/aberration.md
+      - Tracking Mode: concepts/tracking.md
   - Tutorials:
       - tutorials/index.md
       - Basic Plate Solving: tutorials/basic-solve.ipynb
