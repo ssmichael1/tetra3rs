@@ -18,12 +18,20 @@
 //! ## Features
 //!
 //! - **Lost-in-space solving** — determines attitude from star patterns with no initial guess
+//! - **Tracking mode** — when an attitude hint is available (e.g. the previous frame's
+//!   solution), skip the 4-star pattern-hash phase and match centroids directly against
+//!   catalog stars near the hinted boresight. Set [`SolveConfig::attitude_hint`] /
+//!   [`SolveConfig::hint_uncertainty_rad`]. Succeeds with as few as 3 stars, robust to
+//!   sparse / low-SNR fields, with automatic fallback to lost-in-space unless
+//!   [`SolveConfig::strict_hint`] is set.
 //! - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
 //! - **Robust** — statistical verification via binomial false-positive probability
 //! - **Multiscale** — supports a range of field-of-view scales in a single database
 //! - **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
 //! - **Zero-copy deserialization** — databases serialize with [rkyv](https://docs.rs/rkyv)
-//!   for instant loading
+//!   for instant loading. The pattern catalog is stored as a sharded
+//!   [`solver::PatternCatalog`] so databases of any size — including wide-FOV-range
+//!   multiscale databases that exceed 2 GB — can be saved and loaded safely.
 //! - **Centroid extraction** — detect stars from images with local background subtraction,
 //!   connected-component labeling, and quadratic sub-pixel peak refinement (`image` feature)
 //! - **Camera model** — unified [`CameraModel`] struct (focal length, optical center, parity,
@@ -38,7 +46,7 @@
 //!   ground-based / Earth-orbiting observers)
 //! - **Tested on real spacecraft imagery** — successfully solves NASA TESS Full Frame
 //!   Images (~12° FOV, significant optical distortion). Multi-image calibration across
-//!   10 TESS sectors achieves RMSE <15″ and <10″ agreement with FITS WCS solutions
+//!   10 TESS sectors achieves sub-arcsec agreement with FITS WCS solutions
 //!
 //! ## Example
 //!
@@ -80,6 +88,31 @@
 //!         result.num_matches.unwrap(), result.solve_time_ms);
 //! }
 //! ```
+//!
+//! ## Tracking mode
+//!
+//! For frame-to-frame solving where each solve seeds the next, pass the prior
+//! attitude as a hint to skip the 4-star pattern-hash phase:
+//!
+//! ```no_run
+//! # use tetra3::{SolveConfig, SolverDatabase, Centroid};
+//! # fn dummy(prev: tetra3::solver::SolveResult, db: SolverDatabase, centroids: Vec<Centroid>) {
+//! let config = SolveConfig {
+//!     attitude_hint: prev.qicrs2cam,
+//!     hint_uncertainty_rad: 1.0_f32.to_radians(),
+//!     camera_model: prev.camera_model.clone().unwrap(),
+//!     ..SolveConfig::new((15.0_f32).to_radians(), 1024, 1024)
+//! };
+//! let result = db.solve_from_centroids(&centroids, &config);
+//! # }
+//! ```
+//!
+//! The solver projects catalog stars near the hinted boresight, nearest-neighbor
+//! matches them to centroids, and runs the same Wahba SVD + verification + WCS
+//! refine path as lost-in-space. Tracking succeeds with as few as 3 matched stars
+//! (LIS needs 4) and is robust to pattern-hash failures from sparse / low-SNR
+//! fields. On failure it falls back to lost-in-space automatically unless
+//! [`SolveConfig::strict_hint`] is `true`.
 //!
 //! ## Stellar aberration
 //!

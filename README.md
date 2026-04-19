@@ -20,11 +20,12 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 ## Features
 
 - **Lost-in-space solving** — determines attitude from star patterns with no initial guess
+- **Tracking mode** — when an attitude hint is available (e.g. the previous frame's solution), skip the 4-star pattern-hash phase and match centroids directly against catalog stars near the hinted boresight. Succeeds with as few as 3 stars, robust to sparse/low-SNR fields, with automatic fallback to lost-in-space if the hint is stale
 - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
 - **Robust** — statistical verification via binomial false-positive probability
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates catalog star positions to any observation epoch
-- **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading
+- **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading. The pattern catalog is sharded so databases of any size (including wide-FOV-range multiscale databases that exceed 2 GB) can be saved and loaded safely
 - **Centroid extraction** — detect stars from images with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement (requires `image` feature)
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit SIP polynomial or radial distortion models from one or more solved images via `calibrate_camera`
@@ -135,6 +136,44 @@ Some imaging systems produce mirror-reflected images (e.g. FITS files with `CDEL
 
 The `SolveResult` includes a `parity_flip` flag (`bool` / `True`/`False` in Python) indicating whether this correction was applied. This is critical for pixel↔sky coordinate conversions: when `parity_flip` is `True`, the mapping between pixel x-coordinates and camera-frame x must include a sign flip.
 
+### Tracking mode
+
+When you already have a rough attitude estimate — typically the previous frame's solution in a video-rate star tracker, a propagated gyro estimate, or a coarse attitude sensor — you can skip the lost-in-space pattern-hash phase entirely by passing an `attitude_hint`:
+
+**Rust:**
+
+```rust
+use tetra3::SolveConfig;
+
+// Reuse the camera model from the previous solve so the refined focal length carries over.
+let config = SolveConfig {
+    attitude_hint: prev_result.qicrs2cam,
+    hint_uncertainty_rad: 1.0_f32.to_radians(),
+    camera_model: prev_result.camera_model.clone().unwrap(),
+    ..SolveConfig::new((15.0_f32).to_radians(), 1024, 1024)
+};
+let result = db.solve_from_centroids(&centroids, &config);
+```
+
+**Python:**
+
+```python
+# `attitude_hint` accepts either a 4-element [w, x, y, z] quaternion
+# (Hamilton, scalar-first) or a 3×3 rotation matrix.
+result = db.solve_from_centroids(
+    centroids,
+    fov_estimate_deg=15.0,
+    image_shape=(1024, 1024),
+    camera_model=prev_result.camera_model,
+    attitude_hint=prev_result.quaternion,  # or .rotation_matrix_icrs_to_camera
+    hint_uncertainty_deg=1.0,
+)
+```
+
+The solver projects catalog stars near the hinted boresight, nearest-neighbor matches them to centroids, and runs the same Wahba SVD + verification + WCS refine path as lost-in-space. Tracking succeeds with as few as 3 matched stars (lost-in-space needs 4) and is robust to pattern-hash failures from sparse / low-SNR fields. On failure it falls back to lost-in-space automatically — set `strict_hint=True` (`strict_hint: true` in Rust) to opt out of the fallback.
+
+See [`docs/concepts/tracking.md`](https://tetra3rs.dev/concepts/tracking/) for details on hint uncertainty, quaternion convention, and limitations.
+
 ### Stellar aberration correction
 
 Stellar aberration is the apparent displacement of star positions caused by the finite speed of light combined with the observer's velocity — analogous to how rain appears to fall at an angle when you're moving. For Earth-based observers, this shifts apparent star positions by up to ~20" (v/c ≈ 10⁻⁴ rad). Without correction, the solved attitude is biased by up to ~20".
@@ -224,7 +263,6 @@ cargo test --test tess_solve_test --features image -- --nocapture
 
 ## Roadmap (not in order)
 
-- **Tracking mode** — accept an initial attitude guess to restrict the search to nearby catalog stars, improving speed and robustness for sequential frames (e.g. star trackers solution on previous frame)
 - **Deeper Gaia catalog** — support fainter limiting magnitudes for narrow-FOV cameras
 
 ## Credits
