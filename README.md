@@ -16,6 +16,9 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 > [!IMPORTANT]
 > **Status: Alpha** — The core solver is based on well-vetted algorithms but has only been tested against a limited set of images. The API is not yet stable and may change between releases.  Having said that, I've made it work on both low-SNR images taken with a camera in my backyard and with high-star-density images from more-complex telescopes.
 
+> [!WARNING]
+> **0.6.0 is a breaking release.** The `.rkyv` solver database file format changed (sharded pattern catalog to support multiscale databases > 2 GB), and the Rust `SolverDatabase::pattern_catalog` field type changed from `Vec<PatternEntry>` to `PatternCatalog`. `.rkyv` files written by 0.5.x or earlier will not load under 0.6.0 — regenerate via `generate_from_gaia`. See [CHANGELOG.md](CHANGELOG.md) for the full list.
+
 
 ## Features
 
