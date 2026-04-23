@@ -1,6 +1,9 @@
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = version("tetra3rs")
+try:
+    __version__ = version("tetra3rs")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 from .tetra3rs import *  # type: ignore  # noqa: F403
 from .tetra3rs import (
