@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1
+
+### Fixes
+
+- **`import tetra3rs` no longer crashes when installed without package
+  metadata (issue #22).** The module-level call to
+  `importlib.metadata.version("tetra3rs")` raised `PackageNotFoundError`
+  in environments where the package is on `sys.path` without a
+  corresponding `.dist-info/` directory — e.g. Pi OS image builds that
+  copy the source tree instead of running `pip install`. `__version__`
+  now falls back to `"0.0.0+unknown"` when metadata is unavailable.
+  Properly pip-installed users see the correct version string as before.
+
 ## 0.6.0
 
 ### Fixes
