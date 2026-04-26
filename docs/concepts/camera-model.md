@@ -54,7 +54,12 @@ The result is tangent-plane coordinates `(ξ, η)` in radians, suitable for gnom
 === "With distortion"
 
     ```python
+    # Pure radial (Brown-Conrady with k1, k2, k3; tangential set to 0)
     distortion = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+
+    # Or full Brown-Conrady with tangential / decentering coefficients:
+    # distortion = tetra3rs.RadialDistortion(k1=-7e-9, p1=5e-7, p2=-3e-7)
+
     cam = tetra3rs.CameraModel(
         focal_length_px=11718.4,
         image_width=2048,

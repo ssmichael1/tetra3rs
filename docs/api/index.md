@@ -23,7 +23,7 @@ Python API documentation for tetra3rs, auto-generated from type stubs.
 
 | Class | Description |
 |-------|-------------|
-| [`RadialDistortion`](distortion.md#tetra3rs.RadialDistortion) | Radial (k1, k2, k3) distortion model |
+| [`RadialDistortion`](distortion.md#tetra3rs.RadialDistortion) | Brown-Conrady distortion model — radial `(k1, k2, k3)` + optional tangential `(p1, p2)` |
 | [`PolynomialDistortion`](distortion.md#tetra3rs.PolynomialDistortion) | SIP-like polynomial distortion model |
 
 ## Module-Level Functions
