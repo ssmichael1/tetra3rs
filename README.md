@@ -16,8 +16,30 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 > [!IMPORTANT]
 > **Status: Alpha** — The core solver is based on well-vetted algorithms but has only been tested against a limited set of images. The API is not yet stable and may change between releases.  Having said that, I've made it work on both low-SNR images taken with a camera in my backyard and with high-star-density images from more-complex telescopes.
 
+> [!CAUTION]
+> **Database format change in 0.7.0 — older databases will not load.**
+> The solver database serialization format moved from rkyv to
+> [postcard](https://docs.rs/postcard) and the on-disk extension changed
+> from `.rkyv` to `.bin`. **Existing `.rkyv` files saved by 0.6.x or
+> earlier — both `SolverDatabase` and `CameraModel` — must be
+> regenerated.** Pickled `tetra3rs` objects from older wheels will also
+> fail to unpickle.
+>
+> Regenerate solver databases with `SolverDatabase::generate_from_gaia(...)`
+> in Rust, or `tetra3rs.SolverDatabase.generate_from_gaia(...)` in Python.
+> The bundled [`gaia-catalog`](https://pypi.org/project/gaia-catalog/)
+> PyPI package handles this transparently for Python users — first solve
+> after upgrading regenerates the cached database automatically.
+
 > [!WARNING]
-> **Recent breaking releases.** The solver database serialization format moved from rkyv to [postcard](https://docs.rs/postcard) and the on-disk extension changed from `.rkyv` to `.bin`. Older `.rkyv` files will not load — regenerate via `generate_from_gaia`. The Rust `SolverDatabase::pattern_catalog` field is now a flat `PatternCatalog` (the rkyv-era sharding workaround was removed). See [CHANGELOG.md](CHANGELOG.md) for the full list.
+> **Other 0.7.0 breaking changes.** The Rust `SolverDatabase::pattern_catalog`
+> field is now a flat `PatternCatalog` (the rkyv-era sharding workaround
+> was removed); `RadialDistortion` gained `p1, p2` tangential coefficients
+> (full Brown-Conrady); `CalibrateConfig::polynomial_order` was replaced
+> by `model: DistortionModelType`; the public Rust function
+> `extract_centroids(path, ...)` was removed in favor of
+> `extract_centroids_from_image(...)`. See [CHANGELOG.md](CHANGELOG.md)
+> for the full list.
 
 
 ## Features

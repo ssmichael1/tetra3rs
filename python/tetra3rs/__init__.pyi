@@ -829,6 +829,22 @@ class RadialDistortion:
         d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
         d = tetra3rs.RadialDistortion(k1=-7e-9, p1=5e-7, p2=-3e-7)
         x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
+
+    References:
+      - Conrady, A. E. (1919). "Decentred Lens-Systems."
+        *Monthly Notices of the Royal Astronomical Society*, 79(5): 384-390.
+        — Original derivation of the tangential / decentering form.
+        https://doi.org/10.1093/mnras/79.5.384
+      - Brown, D. C. (1966). "Decentering Distortion of Lenses."
+        *Photogrammetric Engineering*, 32(3): 444-462. — Modernized form.
+      - Brown, D. C. (1971). "Close-Range Camera Calibration."
+        *Photogrammetric Engineering*, 37(8): 855-866. — Calibration procedure.
+      - Zhang, Z. (2000). "A Flexible New Technique for Camera Calibration."
+        *IEEE TPAMI*, 22(11): 1330-1334. — Multi-image planar calibration
+        (the standard method, used in OpenCV ``calibrateCamera``).
+        https://doi.org/10.1109/34.888718
+      - OpenCV documentation for the equivalent ``(k1, k2, k3, p1, p2)``
+        formulation: https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
     """
 
     def __reduce__(self) -> tuple: ...
@@ -895,6 +911,22 @@ class PolynomialDistortion:
     the polynomial internally and returns it via the camera model), or
     directly from coefficient arrays (e.g. extracted from a FITS WCS SIP
     model). Supports ``pickle`` serialization.
+
+    References:
+      - Shupe, D. L.; Moshir, M.; Li, J.; Makovoz, D.; Narron, R.;
+        Hook, R. N. (2005). "The SIP Convention for Representing
+        Distortion in FITS Image Headers." *Astronomical Data Analysis
+        Software and Systems XIV*, ASP Conference Series, 347: 491.
+        — Original SIP specification.
+        https://www.adass.org/adass/proceedings/adass04/reprints/P3-1-3.pdf
+      - FITS WCS SIP convention registry entry:
+        https://fits.gsfc.nasa.gov/registry/sip.html
+
+    The convention here is SIP-like — same A_pq, B_pq polynomial basis on
+    normalized pixel coordinates. Standard SIP starts at order 2 (the
+    linear part is absorbed into the WCS CD matrix); this implementation
+    also includes order 0 / 1 terms so a single fit can absorb optical-
+    center offset and residual scale/rotation from the matched-points data.
     """
 
     def __reduce__(self) -> tuple: ...

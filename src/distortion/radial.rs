@@ -9,6 +9,27 @@
 //! camera model's `crpix` is subtracted before this model is applied).
 //! Setting `p1 = p2 = 0` reduces to pure radial Brown-Conrady, which is the
 //! historical default and what [`RadialDistortion::new`] constructs.
+//!
+//! # References
+//!
+//! - **Conrady, A. E.** (1919). "Decentred Lens-Systems."
+//!   *Monthly Notices of the Royal Astronomical Society*, 79(5): 384-390.
+//!   — The original derivation of the tangential / decentering distortion
+//!   form. <https://doi.org/10.1093/mnras/79.5.384>
+//! - **Brown, D. C.** (1966). "Decentering Distortion of Lenses."
+//!   *Photogrammetric Engineering*, 32(3): 444-462. — Modernized the
+//!   Conrady formulation; gave the radial-plus-tangential form used today.
+//! - **Brown, D. C.** (1971). "Close-Range Camera Calibration."
+//!   *Photogrammetric Engineering*, 37(8): 855-866. — Camera calibration
+//!   procedure; basis for the OpenCV / photogrammetry conventions.
+//! - **Zhang, Z.** (2000). "A Flexible New Technique for Camera Calibration."
+//!   *IEEE TPAMI*, 22(11): 1330-1334. — Multi-image planar-target
+//!   calibration that became the standard method (and the model
+//!   implemented by OpenCV's `calibrateCamera`).
+//!   <https://doi.org/10.1109/34.888718>
+//! - **OpenCV documentation** for the equivalent
+//!   `(k1, k2, k3, p1, p2)` formulation:
+//!   <https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html>
 
 /// Brown-Conrady radial+tangential distortion.
 ///
@@ -18,6 +39,13 @@
 ///
 /// Undistortion (inverse) is computed via 2D Newton iteration on the forward
 /// model — see [`Self::undistort`].
+///
+/// # References
+///
+/// - Conrady, A. E. (1919). *MNRAS* 79: 384.
+/// - Brown, D. C. (1966). *Photogrammetric Engineering* 32: 444.
+/// - Zhang, Z. (2000). *IEEE TPAMI* 22(11): 1330.
+/// - See the [module-level docs](self) for full citations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RadialDistortion {
     /// First radial coefficient (barrel < 0, pincushion > 0).
