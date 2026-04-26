@@ -33,7 +33,7 @@ use crate::centroid::Centroid;
 use crate::error::{Error, Result};
 use image::GenericImageView;
 use numeris::imageproc::{
-    connected_components_with_label_buffer, Component, Connectivity,
+    connected_components_with_label_buffer, gaussian_blur, BorderMode, Component, Connectivity,
 };
 use numeris::DynMatrix;
 
@@ -102,6 +102,25 @@ pub struct CentroidExtractionConfig {
     ///
     /// Default: None (disabled)
     pub max_elongation: Option<f32>,
+
+    /// Apply a Gaussian matched filter to the bg-subtracted image before
+    /// thresholding. When `Some(sigma)`, the image is convolved with a
+    /// separable 1-D Gaussian (σ in pixels, kernel truncated at 3σ). The
+    /// filtered image is used **only** to form the detection mask —
+    /// centroid positions and intensities are still measured on the
+    /// unfiltered bg-subtracted image, so photometry is unaffected.
+    ///
+    /// A matched filter boosts point-source SNR by concentrating the
+    /// star's PSF into fewer effective pixels before thresholding. The
+    /// gain is largest for faint stars in noisy or dense images. The
+    /// filter has a broad optimum: σ within a factor of ~2 of the true
+    /// PSF width still recovers nearly all the SNR.
+    ///
+    /// When enabled, consider lowering `sigma_threshold` (e.g. to 2.5–3.0)
+    /// since the filtered image has lower noise.
+    ///
+    /// Default: None (disabled).
+    pub matched_filter_sigma: Option<f32>,
 }
 
 impl Default for CentroidExtractionConfig {
@@ -116,6 +135,7 @@ impl Default for CentroidExtractionConfig {
             use_8_connectivity: true,
             local_bg_block_size: Some(64),
             max_elongation: Some(3.0),
+            matched_filter_sigma: None,
         }
     }
 }
@@ -204,8 +224,8 @@ fn extract_from_gray(
     height: u32,
     config: &CentroidExtractionConfig,
 ) -> Result<CentroidExtractionResult> {
-    let _w = width as usize;
-    let _h = height as usize;
+    let w = width as usize;
+    let h = height as usize;
 
     // ── Step 1: local background subtraction ──
     // If local_bg_block_size is set, estimate and subtract a spatially varying
@@ -241,19 +261,32 @@ fn extract_from_gray(
     let (bg_mean, bg_sigma) = estimate_background(&noise_input, width, height, config);
     let threshold = bg_mean + config.sigma_threshold * bg_sigma;
 
-    // ── Step 3: threshold and label blobs ──
-    // Build a u8 mask in a row-major DynMatrix (numeris's CCL takes a MatrixRef).
-    // Foreground = 1, background = 0.
-    let w = width as usize;
-    let h = height as usize;
-    let mut mask = DynMatrix::<u8>::zeros(h, w);
-    for r in 0..h {
-        for c in 0..w {
-            if gray[r * w + c] > threshold {
-                mask[(r, c)] = 1;
-            }
+    // ── Step 3: optional matched filter for thresholding only ──
+    // When `matched_filter_sigma` is set, the bg-subtracted residual is
+    // convolved with a Gaussian and threshold/CCL run on the filtered copy.
+    // Centroids are still measured on the unfiltered `gray`, so intensities
+    // and CoM positions are unaffected. The same transpose trick as Step 1
+    // applies: Gaussian blur is separable and symmetric, so it commutes with
+    // the transpose.
+    let filtered: Option<Vec<f32>> = match config.matched_filter_sigma {
+        Some(sigma) if sigma.is_finite() && sigma > 0.0 => {
+            let mat = DynMatrix::<f32>::from_vec(w, h, gray.clone());
+            Some(gaussian_blur(&mat, sigma, BorderMode::Replicate).into_vec())
         }
-    }
+        _ => None,
+    };
+    let thresh_src: &[f32] = filtered.as_deref().unwrap_or(&gray);
+
+    // ── Step 4: threshold and label blobs ──
+    // Build a u8 mask DynMatrix in proper (h, w) layout for CCL — its
+    // bbox/labels conventions assume the supplied dimensions match the image.
+    let mask = DynMatrix::<u8>::from_fn(h, w, |r, c| {
+        if thresh_src[r * w + c] > threshold {
+            1u8
+        } else {
+            0u8
+        }
+    });
     let connectivity = if config.use_8_connectivity {
         Connectivity::Eight
     } else {

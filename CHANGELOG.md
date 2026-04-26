@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.1
+
+### New features
+
+- **Optional Gaussian matched filter in centroid extraction.** New
+  `CentroidExtractionConfig::matched_filter_sigma: Option<f32>` field
+  (Python keyword `matched_filter_sigma`, default `None`). When set, the
+  background-subtracted residual is convolved with a separable Gaussian
+  (kernel truncated at 3σ, replicate border) before thresholding. The
+  filtered image is used **only** to form the detection mask — centroid
+  positions and intensities are still measured on the unfiltered residual,
+  so photometry is unaffected. Boosts point-source SNR for detection in
+  noisy or dense fields. Consider lowering `sigma_threshold` to 2.5–3.0
+  when enabled.
+
 ## 0.7.0
 
 ### Breaking changes

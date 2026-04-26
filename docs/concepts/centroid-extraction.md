@@ -11,13 +11,15 @@ Raw image
   │
   ├─ 2. Global noise estimation (lower-half sigma clipping)
   │
-  ├─ 3. Thresholding (σ above background)
+  ├─ 3. Optional Gaussian matched filter (PSF-tuned σ)
   │
-  ├─ 4. Connected component labeling (union-find)
+  ├─ 4. Thresholding (σ above background)
   │
-  ├─ 5. Blob filtering (size, elongation)
+  ├─ 5. Connected component labeling (union-find)
   │
-  ├─ 6. Centroid computation (intensity-weighted moments + quadratic refinement)
+  ├─ 6. Blob filtering (size, elongation)
+  │
+  ├─ 7. Centroid computation (intensity-weighted moments + quadratic refinement)
   │
   └─ Output: sorted list of Centroid objects
 ```
@@ -52,7 +54,17 @@ $$
 
 **Why the lower half?** Stars and nebulosity only contaminate pixels *above* the background. By using only the lower half of the distribution and assuming symmetry, we get a clean estimate of the Gaussian noise floor without any astrophysical contamination.
 
-## 3. Connected Component Labeling
+## 3. Optional Gaussian Matched Filter
+
+When `matched_filter_sigma` is set, the bg-subtracted residual is convolved with a separable Gaussian (kernel truncated at 3σ) before thresholding. The filtered image is used **only** to form the detection mask — centroid positions and intensities are still measured on the unfiltered residual, so photometry is unaffected.
+
+A matched filter concentrates a star's PSF into fewer effective pixels, raising the per-pixel signal-to-noise of point sources relative to single-pixel noise spikes. The gain is largest for faint stars in noisy or dense images, where many spurious blobs would otherwise survive the threshold and contaminate the brightness-sorted top-N list.
+
+**Tuning**: σ within a factor of ~2 of the true PSF width recovers nearly all the SNR — the filter has a broad optimum. When enabled, consider lowering `sigma_threshold` (e.g. to 2.5–3.0) since the filtered image has lower noise. Disabled by default (`None`).
+
+**Cost**: roughly 10–15% extra extraction time on a typical 4Mpx frame (separable 1D blur + one HW float buffer). Use it when downstream solver time is dominated by spurious centroids, not as a speed optimization.
+
+## 4. Connected Component Labeling
 
 Pixels above the threshold are grouped into blobs using a **two-pass union-find** algorithm with 8-connectivity (diagonal neighbors included):
 
@@ -62,7 +74,7 @@ Pixels above the threshold are grouped into blobs using a **two-pass union-find*
 
 This produces a label map where each connected group of bright pixels shares a unique integer label.
 
-## 4. Blob Filtering
+## 5. Blob Filtering
 
 Blobs are filtered before centroid computation:
 
@@ -70,7 +82,7 @@ Blobs are filtered before centroid computation:
 - **Maximum pixels** (`max_pixels`, default 10,000) — Rejects very extended objects, large nebulae, or noise blobs from detector artifacts
 - **Elongation** (`max_elongation`, default 3.0) — Computed from the covariance eigenvalue ratio $\sqrt{\lambda_{\max} / \lambda_{\min}}$. Rejects cosmic ray hits, satellite trails, and diffraction spikes. Set to `None` to disable.
 
-## 5. Centroid Computation
+## 6. Centroid Computation
 
 Each surviving blob is centroided through several substeps:
 
@@ -125,7 +137,7 @@ The sub-pixel offset is found by setting $\nabla f = 0$ and solving the resultin
 
 Otherwise, the center-of-mass position is kept. This fallback ensures robustness for blended or asymmetric sources where the quadratic model breaks down.
 
-## 6. Output
+## 7. Output
 
 Centroids are converted to **image-center origin** coordinates:
 
@@ -150,6 +162,7 @@ Optionally, the list can be truncated to `max_centroids` entries.
 | `max_centroids` | None | Maximum centroids to return (None = all) |
 | `local_bg_block_size` | 64 | Tile size for local background (None = skip) |
 | `max_elongation` | 3.0 | Maximum elongation ratio (None = disabled) |
+| `matched_filter_sigma` | None | Gaussian matched filter σ in pixels (None = disabled) |
 
 !!! tip "TESS example"
     For TESS Full Frame Images with their wide-field defocused optics, typical settings are `sigma_threshold=300`, `min_pixels=4`, `local_bg_block_size=16`, `max_elongation=6.0`. The high sigma threshold rejects the dense background, and the relaxed elongation allows for the broad, slightly asymmetric TESS PSF.
