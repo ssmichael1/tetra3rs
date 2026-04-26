@@ -15,18 +15,6 @@
   noisy or dense fields. Consider lowering `sigma_threshold` to 2.5–3.0
   when enabled.
 
-### Other changes
-
-- **Local background subtraction delegated to
-  [`numeris::imageproc::median_pool_upsampled`](https://docs.rs/numeris).**
-  The hand-rolled block-median + bilinear interpolation in
-  `centroid_extraction.rs` (~80 lines) is replaced by the numeris helper,
-  which performs the same operation (per-tile median + bilinear upsample
-  to image resolution). Behaviour is unchanged for typical inputs; the
-  numeris version no longer skips zero-valued pixels in the per-tile
-  median, which is irrelevant for natural-scene images but slightly
-  changes results on synthetically masked frames.
-
 ## 0.7.0
 
 ### Breaking changes

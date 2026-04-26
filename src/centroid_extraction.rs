@@ -33,8 +33,7 @@ use crate::centroid::Centroid;
 use crate::error::{Error, Result};
 use image::GenericImageView;
 use numeris::imageproc::{
-    connected_components_with_label_buffer, gaussian_blur, median_pool_upsampled, BorderMode,
-    Component, Connectivity,
+    connected_components_with_label_buffer, gaussian_blur, BorderMode, Component, Connectivity,
 };
 use numeris::DynMatrix;
 
@@ -229,26 +228,23 @@ fn extract_from_gray(
     let h = height as usize;
 
     // ── Step 1: local background subtraction ──
-    // Block-median + bilinear upsample: stars are sparse outliers in any
-    // 64×64 tile, so the per-tile median rejects them. The bilinear upsample
-    // produces a smooth background map without the cost of a true sliding
-    // median. We pass the row-major buffer to numeris as a (w, h) column-major
-    // matrix — i.e. the transpose of the image. Block-median + bilinear are
-    // both symmetric in the row/col axes, so the operation commutes with the
-    // transpose; reading `into_vec()` yields the row-major background.
-    let local_bg: Option<Vec<f32>> = config.local_bg_block_size.map(|block_size| {
-        let mat = DynMatrix::<f32>::from_vec(w, h, gray_input.to_vec());
-        median_pool_upsampled(&mat, block_size as usize).into_vec()
-    });
-    let gray: Vec<f32> = if let Some(ref bg) = local_bg {
-        gray_input
+    // If local_bg_block_size is set, estimate and subtract a spatially varying
+    // background model. This is critical for images with nebulosity, Milky Way
+    // emission, vignetting, or other large-scale intensity gradients.
+    let gray: Vec<f32>;
+    let local_bg: Option<Vec<f32>>;
+    if let Some(block_size) = config.local_bg_block_size {
+        let bg = estimate_local_background(gray_input, width, height, block_size);
+        gray = gray_input
             .iter()
             .zip(bg.iter())
             .map(|(&v, &b)| (v - b).max(0.0))
-            .collect()
+            .collect();
+        local_bg = Some(bg);
     } else {
-        gray_input.to_vec()
-    };
+        gray = gray_input.to_vec();
+        local_bg = None;
+    }
 
     // ── Step 2: estimate residual background noise ──
     // Use unclamped residuals for noise estimation so the lower half of the
@@ -355,6 +351,87 @@ fn extract_from_gray(
         threshold,
         num_blobs_raw,
     })
+}
+
+/// Estimate a spatially varying background by computing block medians and
+/// interpolating between block centers.
+///
+/// The image is divided into `block_size × block_size` tiles. For each tile,
+/// the median pixel value is computed (ignoring zeros). A smooth background
+/// surface is then reconstructed via bilinear interpolation between tile
+/// centers.
+///
+/// This effectively removes large-scale structure (nebulosity, Milky Way
+/// emission, vignetting) while preserving point sources (stars).
+fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size: u32) -> Vec<f32> {
+    let w = width as usize;
+    let h = height as usize;
+    let bs = block_size as usize;
+
+    // Number of blocks in each dimension
+    let nx = (w + bs - 1) / bs;
+    let ny = (h + bs - 1) / bs;
+
+    // Compute median for each block
+    let mut block_medians = vec![0.0f32; nx * ny];
+    for by in 0..ny {
+        for bx in 0..nx {
+            let x0 = bx * bs;
+            let y0 = by * bs;
+            let x1 = (x0 + bs).min(w);
+            let y1 = (y0 + bs).min(h);
+
+            let mut vals: Vec<f32> = Vec::with_capacity(bs * bs);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let v = pixels[y * w + x];
+                    if v > 0.0 && v.is_finite() {
+                        vals.push(v);
+                    }
+                }
+            }
+
+            if vals.is_empty() {
+                block_medians[by * nx + bx] = 0.0;
+            } else {
+                vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                block_medians[by * nx + bx] = vals[vals.len() / 2];
+            }
+        }
+    }
+
+    // Bilinearly interpolate between block centers to produce a smooth
+    // background estimate at every pixel.
+    let mut background = vec![0.0f32; w * h];
+    let half_bs = bs as f32 / 2.0;
+
+    for y in 0..h {
+        for x in 0..w {
+            // Position in block-center coordinates
+            let bx_f = (x as f32 - half_bs) / bs as f32;
+            let by_f = (y as f32 - half_bs) / bs as f32;
+
+            let bx0 = (bx_f.floor() as isize).max(0).min(nx as isize - 1) as usize;
+            let by0 = (by_f.floor() as isize).max(0).min(ny as isize - 1) as usize;
+            let bx1 = (bx0 + 1).min(nx - 1);
+            let by1 = (by0 + 1).min(ny - 1);
+
+            let fx = (bx_f - bx0 as f32).clamp(0.0, 1.0);
+            let fy = (by_f - by0 as f32).clamp(0.0, 1.0);
+
+            let m00 = block_medians[by0 * nx + bx0];
+            let m10 = block_medians[by0 * nx + bx1];
+            let m01 = block_medians[by1 * nx + bx0];
+            let m11 = block_medians[by1 * nx + bx1];
+
+            background[y * w + x] = m00 * (1.0 - fx) * (1.0 - fy)
+                + m10 * fx * (1.0 - fy)
+                + m01 * (1.0 - fx) * fy
+                + m11 * fx * fy;
+        }
+    }
+
+    background
 }
 
 /// Convert a DynamicImage to a Vec<f32> of grayscale values.
