@@ -38,13 +38,15 @@
 
 ### Other changes
 
-- **`numeris` bumped to 0.5.10** to pick up native serde support for
-  `Matrix<T, M, N>` and `Quaternion<T>`. The 0.4 → 0.5 bump is a minor
-  API change at call sites: `Matrix::vecmul(&v)` is now the `*` operator
-  (`m * v`), and `DynMatrix::zeros(rows, cols, fill)` /
-  `DynVector::zeros(n, fill)` lost their fill argument
-  (`zeros(rows, cols)` / `zeros(n)`). All internal call sites are
-  updated.
+- **`numeris` bumped to 0.5.11** for native serde support
+  (`Matrix<T, M, N>`, `Quaternion<T>`), `imageproc` connected-component
+  labelling, and `optim::least_squares_lm_dyn` (Levenberg-Marquardt on
+  dynamic-size residual vectors — used by the new Brown-Conrady fit).
+  The 0.4 → 0.5 bump was a minor API change at call sites:
+  `Matrix::vecmul(&v)` is now the `*` operator (`m * v`), and
+  `DynMatrix::zeros(rows, cols, fill)` / `DynVector::zeros(n, fill)`
+  lost their fill argument (`zeros(rows, cols)` / `zeros(n)`). All
+  internal call sites are updated.
 - **`csv` dependency dropped.** The Gaia DR3 CSV reader
   (`catalogs::gaia::read_gaia_csv`) is now a hand-rolled ~30-line parser
   for the fixed 9-column unquoted schema produced by
@@ -113,17 +115,41 @@
   `tetra3::distortion::fit::fit_polynomial_distortion` remain
   available as standalone Rust API.
 - **`calibrate_camera` is now model-agnostic.** It can fit either a SIP
-  polynomial (the existing default) or a Brown-Conrady radial
-  `(k1, k2, k3)` distortion model. Selected via
+  polynomial (the existing default) or a full Brown-Conrady distortion
+  model (radial `k1, k2, k3` + tangential `p1, p2`, plus an
+  optical-axis offset `(cx, cy)` jointly fit). Selected via
   `CalibrateConfig::model: DistortionModelType { Polynomial { order } | Radial }`.
   Both models go through the same alternating per-image
-  WCS-refinement + global-fit pipeline, so multi-image radial
-  calibration (the canonical OpenCV / Zhang's-method shape) is now
-  available. Python: pass `model="radial"` (or `"polynomial"`, the
-  default) to `SolverDatabase.calibrate_camera()`. Breaking: the
-  Rust `CalibrateConfig::polynomial_order: u32` field is replaced by
-  `model: DistortionModelType`; callers need to update construction
-  to `CalibrateConfig { model: DistortionModelType::Polynomial { order: 4 }, .. }`.
+  WCS-refinement + global-fit pipeline. Python: pass `model="radial"`
+  (or `"polynomial"`, the default) to
+  `SolverDatabase.calibrate_camera()`.
+  Breaking: the Rust `CalibrateConfig::polynomial_order: u32` field is
+  replaced by `model: DistortionModelType`; callers need to update
+  construction to
+  `CalibrateConfig { model: DistortionModelType::Polynomial { order: 4 }, .. }`.
+- **`RadialDistortion` extended to full Brown-Conrady** — the struct
+  now carries `p1, p2` tangential / decentering coefficients in
+  addition to `k1, k2, k3`. Setting `p1 = p2 = 0` reduces to pure
+  radial Brown-Conrady (the historical default). New constructor
+  `RadialDistortion::with_tangential(k1, k2, k3, p1, p2)`;
+  `RadialDistortion::new(k1, k2, k3)` keeps the same signature and
+  sets `p1 = p2 = 0`. `distort` and `undistort` use the full forward
+  model; the inverse uses 2D Newton iteration on the forward
+  Jacobian. Python `tetra3rs.RadialDistortion(...)` accepts `p1, p2`
+  kwargs and exposes them as properties.
+  Breaking: pickle format changes (struct gained two fields). Rebuild
+  any persisted radial distortion models.
+- **Centered radial fit (`fit_radial_centered_sigma_clip`) uses
+  numeris's nonlinear LS.** The 7-parameter joint fit
+  `(cx, cy, k1, k2, k3, p1, p2)` dispatches to
+  `numeris::optim::least_squares_lm_dyn` (Levenberg-Marquardt on
+  dynamic-size residuals). Replaces ~250 lines of hand-rolled LM
+  (normal equations + accept/reject loop + line search) with closures
+  for residual and Jacobian. Mild regularization on `(cx, cy)` is
+  implemented by augmenting the residual vector with two extra rows
+  (`√μ·cx`, `√μ·cy`) — same cost shape as before, no special LM
+  features needed. The polynomial fit is already a *linear* LS via
+  `DynMatrix::solve_qr` and stays unchanged.
 - **Direct `num-traits` dep removed.** tetra3's own code never used
   `num_traits`; it was pulled in transitively via `numeris` regardless.
   Manifest cleanup only.

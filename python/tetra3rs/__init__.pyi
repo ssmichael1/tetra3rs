@@ -814,14 +814,20 @@ class SolverDatabase:
         ...
 
 class RadialDistortion:
-    """Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+    """Brown-Conrady radial+tangential distortion model.
 
-    Coordinates are in pixels relative to the optical center (image center).
+    ``x_d = x · (1 + k1·r² + k2·r⁴ + k3·r⁶) + 2·p1·x·y + p2·(r² + 2·x²)``
+    ``y_d = y · (1 + k1·r² + k2·r⁴ + k3·r⁶) + p1·(r² + 2·y²) + 2·p2·x·y``
+
+    Coordinates are in pixels relative to the optical center (image center
+    minus CRPIX). Tangential coefficients ``p1, p2`` default to 0 — set them
+    to model lens decentering, sensor tilt, or off-axis CCD placement.
     Supports ``pickle`` serialization.
 
     Example::
 
         d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+        d = tetra3rs.RadialDistortion(k1=-7e-9, p1=5e-7, p2=-3e-7)
         x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
     """
 
@@ -834,6 +840,8 @@ class RadialDistortion:
         k1: float = 0.0,
         k2: float = 0.0,
         k3: float = 0.0,
+        p1: float = 0.0,
+        p2: float = 0.0,
     ) -> None: ...
     @property
     def k1(self) -> float:
@@ -848,6 +856,16 @@ class RadialDistortion:
     @property
     def k3(self) -> float:
         """Third radial coefficient."""
+        ...
+
+    @property
+    def p1(self) -> float:
+        """First tangential / decentering coefficient."""
+        ...
+
+    @property
+    def p2(self) -> float:
+        """Second tangential / decentering coefficient."""
         ...
 
     def distort(self, x: float, y: float) -> tuple[float, float]:

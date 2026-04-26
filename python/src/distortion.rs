@@ -18,12 +18,20 @@ pub(crate) fn extract_distortion(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Disto
     }
 }
 
-/// Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+/// Brown-Conrady radial+tangential distortion model.
 ///
-/// Coordinates are in pixels relative to the optical center (image center).
+/// ```text
+/// x_d = x · (1 + k1·r² + k2·r⁴ + k3·r⁶) + 2·p1·x·y + p2·(r² + 2·x²)
+/// y_d = y · (1 + k1·r² + k2·r⁴ + k3·r⁶) + p1·(r² + 2·y²) + 2·p2·x·y
+/// ```
+///
+/// Coordinates are in pixels relative to the optical center (image center
+/// minus CRPIX). Tangential coefficients ``p1, p2`` default to 0 — set them
+/// to model lens decentering, sensor tilt, or off-axis CCD placement.
 ///
 /// Example:
 ///     d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+///     d = tetra3rs.RadialDistortion(k1=-7e-9, p1=5e-7, p2=-3e-7)
 ///     x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
 #[pyclass(name = "RadialDistortion", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
@@ -33,17 +41,19 @@ pub(crate) struct PyRadialDistortion {
 
 #[pymethods]
 impl PyRadialDistortion {
-    /// Create a radial distortion model.
+    /// Create a Brown-Conrady distortion model.
     ///
     /// Args:
     ///     k1: First radial coefficient (barrel < 0, pincushion > 0). Default 0.
     ///     k2: Second radial coefficient. Default 0.
     ///     k3: Third radial coefficient. Default 0.
+    ///     p1: First tangential / decentering coefficient. Default 0.
+    ///     p2: Second tangential / decentering coefficient. Default 0.
     #[new]
-    #[pyo3(signature = (k1 = 0.0, k2 = 0.0, k3 = 0.0))]
-    fn new(k1: f64, k2: f64, k3: f64) -> Self {
+    #[pyo3(signature = (k1 = 0.0, k2 = 0.0, k3 = 0.0, p1 = 0.0, p2 = 0.0))]
+    fn new(k1: f64, k2: f64, k3: f64, p1: f64, p2: f64) -> Self {
         Self {
-            inner: RadialDistortion::new(k1, k2, k3),
+            inner: RadialDistortion::with_tangential(k1, k2, k3, p1, p2),
         }
     }
 
@@ -60,6 +70,16 @@ impl PyRadialDistortion {
     #[getter]
     fn k3(&self) -> f64 {
         self.inner.k3
+    }
+
+    #[getter]
+    fn p1(&self) -> f64 {
+        self.inner.p1
+    }
+
+    #[getter]
+    fn p2(&self) -> f64 {
+        self.inner.p2
     }
 
     /// Forward distortion: ideal → distorted.
@@ -88,10 +108,17 @@ impl PyRadialDistortion {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e})",
-            self.inner.k1, self.inner.k2, self.inner.k3
-        )
+        if self.inner.p1 == 0.0 && self.inner.p2 == 0.0 {
+            format!(
+                "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e})",
+                self.inner.k1, self.inner.k2, self.inner.k3
+            )
+        } else {
+            format!(
+                "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e}, p1={:.3e}, p2={:.3e})",
+                self.inner.k1, self.inner.k2, self.inner.k3, self.inner.p1, self.inner.p2
+            )
+        }
     }
 }
 

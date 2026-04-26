@@ -22,8 +22,8 @@ use crate::solver::wcs_refine;
 use crate::solver::{SolveResult, SolveStatus, SolverDatabase};
 
 use super::fit::{
-    build_id_lookup, compute_corrected_rmse, fit_polynomial_sigma_clip, fit_radial_sigma_clip,
-    MatchedPoint,
+    build_id_lookup, compute_corrected_rmse, fit_polynomial_sigma_clip,
+    fit_radial_centered_sigma_clip, MatchedPoint,
 };
 use super::polynomial::{num_coeffs, PolynomialDistortion};
 use super::radial::RadialDistortion;
@@ -226,7 +226,13 @@ fn single_image_calibrate(
         .find(|sr| sr.status == SolveStatus::MatchFound)
         .map_or(false, |sr| sr.parity_flip);
 
-    let (crpix, distortion) = extract_crpix(fit_result.model);
+    // Polynomial: extract crpix from polynomial order-0 terms.
+    // Radial: fit_result.crpix already carries the fitted optical-center
+    //         offset (jointly fit with k1/k2/k3 via Gauss-Newton).
+    let (crpix, distortion) = match fit_result.crpix {
+        Some(c) => (c, fit_result.model),
+        None => extract_crpix(fit_result.model),
+    };
 
     let cam = CameraModel {
         focal_length_px: image_width as f64 / fov_rad as f64,
@@ -301,8 +307,13 @@ fn multi_image_calibrate(
         parity_flip,
     );
 
-    // Current distortion model (starts as identity)
+    // Current distortion model (starts as identity). For polynomial fits the
+    // crpix offset is absorbed into the polynomial's order-0 terms and stays
+    // [0, 0] until extracted at the end. For centered radial fits, the crpix
+    // is fit jointly with the radial coefficients each iteration; subsequent
+    // Phase-1 wcs_refines need it to undistort centroids correctly.
     let mut current_distortion = Distortion::None;
+    let mut current_crpix = [0.0_f64, 0.0];
     let mut last_rmse = f64::MAX;
     let mut last_rmse_before = 0.0_f64;
 
@@ -368,13 +379,19 @@ fn multi_image_calibrate(
                 1.0 / f
             };
 
-            // Preprocess centroids: undistort with current distortion, apply parity
+            // Preprocess centroids: subtract crpix → undistort → re-add crpix → parity.
+            // For polynomial models, current_crpix is [0, 0] (offset is in the
+            // polynomial's order-0 terms). For centered radial, current_crpix
+            // carries the optical-axis offset so the radial undistort sees
+            // optical-axis-centered coordinates.
             let centroids_px: Vec<(f64, f64)> = cents
                 .iter()
                 .map(|c| {
-                    let cx = c.x as f64;
-                    let cy = c.y as f64;
+                    let cx = c.x as f64 - current_crpix[0];
+                    let cy = c.y as f64 - current_crpix[1];
                     let (ux, uy) = current_distortion.undistort(cx, cy);
+                    let ux = ux + current_crpix[0];
+                    let uy = uy + current_crpix[1];
                     (parity_sign * ux, uy)
                 })
                 .collect();
@@ -505,7 +522,13 @@ fn multi_image_calibrate(
         );
 
         // ── Phase 3: Global model fit ──
-        let (dist, mask, iters) = match config.model {
+        // Polynomial: fit absorbs optical-center offset into the order-0
+        // (constant) terms; current_crpix stays [0, 0] until extract_crpix
+        // pulls it out at the end.
+        // Radial: nonlinear LS jointly fits (cx, cy, k1, k2, k3); the fitted
+        // (cx, cy) becomes current_crpix and the radial coefficients stay
+        // pure (k1, k2, k3).
+        let (dist, fit_crpix, mask, iters) = match config.model {
             DistortionModelType::Polynomial { order } => {
                 let fit = fit_polynomial_sigma_clip(&all_points, order, scale, &fit_config);
                 let model = PolynomialDistortion::new(
@@ -516,17 +539,51 @@ fn multi_image_calibrate(
                     fit.ap_coeffs,
                     fit.bp_coeffs,
                 );
-                (Distortion::Polynomial(model), fit.mask, fit.iterations)
+                (
+                    Distortion::Polynomial(model),
+                    [0.0, 0.0],
+                    fit.mask,
+                    fit.iterations,
+                )
             }
             DistortionModelType::Radial => {
-                let fit = fit_radial_sigma_clip(&all_points, &fit_config);
-                let model = RadialDistortion::new(fit.k1, fit.k2, fit.k3);
-                (Distortion::Radial(model), fit.mask, fit.iterations)
+                let fit = fit_radial_centered_sigma_clip(&all_points, &fit_config);
+                let model =
+                    RadialDistortion::with_tangential(fit.k1, fit.k2, fit.k3, fit.p1, fit.p2);
+                (
+                    Distortion::Radial(model),
+                    [fit.cx, fit.cy],
+                    fit.mask,
+                    fit.iterations,
+                )
             }
         };
 
         let n_inliers = mask.iter().filter(|&&m| m).count();
-        let rmse_after = compute_corrected_rmse(&all_points, &mask, &dist);
+        // Compute RMSE in the appropriate frame:
+        // - polynomial absorbs crpix internally, so call the existing helper
+        // - radial centers on fit_crpix, so shift before calling distort
+        let rmse_after = if fit_crpix == [0.0, 0.0] {
+            compute_corrected_rmse(&all_points, &mask, &dist)
+        } else {
+            // Centered radial: distort on (x_ideal - cx, y_ideal - cy)
+            // and shift result back. Use a local helper closure.
+            let mut sum_sq = 0.0_f64;
+            let mut nn = 0usize;
+            for (i, p) in all_points.iter().enumerate() {
+                if !mask[i] {
+                    continue;
+                }
+                let (dx, dy) = dist.distort(p.x_ideal - fit_crpix[0], p.y_ideal - fit_crpix[1]);
+                let pred_x = dx + fit_crpix[0];
+                let pred_y = dy + fit_crpix[1];
+                let rx = p.x_obs - pred_x;
+                let ry = p.y_obs - pred_y;
+                sum_sq += rx * rx + ry * ry;
+                nn += 1;
+            }
+            if nn == 0 { 0.0 } else { (sum_sq / nn as f64).sqrt() }
+        };
         let rmse_before = compute_corrected_rmse(&all_points, &mask, &Distortion::None);
 
         debug!(
@@ -538,6 +595,7 @@ fn multi_image_calibrate(
         final_mask = mask;
         final_n_points = all_points.len();
         current_distortion = dist;
+        current_crpix = fit_crpix;
         last_rmse_before = rmse_before;
 
         // Check convergence
@@ -559,8 +617,14 @@ fn multi_image_calibrate(
         }
     }
 
-    // Build final CameraModel — extract crpix from polynomial order-0 terms
-    let (crpix, distortion) = extract_crpix(current_distortion);
+    // Build final CameraModel.
+    // Polynomial: extract crpix from order-0 terms via extract_crpix.
+    // Radial: current_crpix already holds the fitted optical-center offset,
+    //         and the distortion is pure (k1, k2, k3) — no extraction needed.
+    let (crpix, distortion) = match current_distortion {
+        Distortion::Polynomial(_) => extract_crpix(current_distortion),
+        _ => (current_crpix, current_distortion),
+    };
 
     let cam = CameraModel {
         focal_length_px: image_width as f64 / median_fov as f64,
