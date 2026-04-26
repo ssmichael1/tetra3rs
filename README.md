@@ -17,7 +17,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 > **Status: Alpha** — The core solver is based on well-vetted algorithms but has only been tested against a limited set of images. The API is not yet stable and may change between releases.  Having said that, I've made it work on both low-SNR images taken with a camera in my backyard and with high-star-density images from more-complex telescopes.
 
 > [!WARNING]
-> **0.6.0 is a breaking release.** The `.rkyv` solver database file format changed (sharded pattern catalog to support multiscale databases > 2 GB), and the Rust `SolverDatabase::pattern_catalog` field type changed from `Vec<PatternEntry>` to `PatternCatalog`. `.rkyv` files written by 0.5.x or earlier will not load under 0.6.0 — regenerate via `generate_from_gaia`. See [CHANGELOG.md](CHANGELOG.md) for the full list.
+> **Recent breaking releases.** The solver database serialization format moved from rkyv to [postcard](https://docs.rs/postcard) and the on-disk extension changed from `.rkyv` to `.bin`. Older `.rkyv` files will not load — regenerate via `generate_from_gaia`. The Rust `SolverDatabase::pattern_catalog` field is now a flat `PatternCatalog` (the rkyv-era sharding workaround was removed). See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 
 ## Features
@@ -28,10 +28,10 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Robust** — statistical verification via binomial false-positive probability
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates catalog star positions to any observation epoch
-- **Zero-copy deserialization** — databases serialize with [rkyv](https://github.com/rkyv/rkyv) for instant loading. The pattern catalog is sharded so databases of any size (including wide-FOV-range multiscale databases that exceed 2 GB) can be saved and loaded safely
-- **Centroid extraction** — detect stars from images with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement (requires `image` feature)
+- **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard) in a portable, lightweight format with no offset-size limit, so wide-FOV-range multiscale databases of any size load cleanly
+- **Centroid extraction** — detect stars from in-memory pixel data with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement. Accepts an already-decoded `image::DynamicImage` or a raw `&[f32]` pixel buffer (requires the `image` feature)
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
-- **Distortion calibration** — fit SIP polynomial or radial distortion models from one or more solved images via `calibrate_camera`
+- **Distortion calibration** — fit either a SIP polynomial or a Brown-Conrady radial `(k1, k2, k3)` distortion model from one or more solved images via `calibrate_camera`, with alternating per-image WCS refinement and global LS fit (the OpenCV / Zhang's-method shape for radial)
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
 - **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's barycentric velocity
 
@@ -62,7 +62,7 @@ pip install .
 
 
 > [!NOTE]
-> All Python objects (`SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`) support `pickle` serialization via zero-copy [rkyv](https://github.com/rkyv/rkyv).
+> All Python objects (`SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`) support `pickle` serialization via [postcard](https://docs.rs/postcard).
 
 ## Quick start
 
@@ -95,10 +95,10 @@ let config = GenerateDatabaseConfig {
 let db = SolverDatabase::generate_from_gaia("data/gaia_merged.bin", &config)?;
 
 // Save the database to disk for fast loading later
-db.save_to_file("data/my_database.rkyv")?;
+db.save_to_file("data/my_database.bin")?;
 
 // ... or load a previously saved database
-let db = SolverDatabase::load_from_file("data/my_database.rkyv")?;
+let db = SolverDatabase::load_from_file("data/my_database.bin")?;
 
 // Solve from image centroids (pixel coordinates, origin at image center)
 let centroids = vec![
@@ -225,7 +225,7 @@ result = db.solve_from_centroids(
 
 | Catalog | Format | Notes |
 |---------|--------|-------|
-| Gaia DR3 + Hipparcos | `.bin` (binary) or `.csv` | Default; merged catalog with proper motion. Binary format bundled in [`gaia-catalog`](https://pypi.org/project/gaia-catalog/) PyPI package |
+| Gaia DR3 + Hipparcos | `.bin` (binary, magic `GDR3`) | Default; merged catalog with proper motion. Bundled in [`gaia-catalog`](https://pypi.org/project/gaia-catalog/) PyPI package |
 | Hipparcos only | `hip2.dat` | Legacy; requires `hipparcos` feature flag |
 
 ## Tests

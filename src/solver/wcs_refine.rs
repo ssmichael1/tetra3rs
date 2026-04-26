@@ -973,7 +973,7 @@ mod tests {
         assert!(!parity);
         assert!((fov.to_degrees() - 10.0).abs() < 0.01, "FOV: {}", fov.to_degrees());
 
-        let bore_cam = rot.vecmul(&Vector3::from_array([0.0_f32, 1.0, 0.0]));
+        let bore_cam = rot * Vector3::from_array([0.0_f32, 1.0, 0.0]);
         assert!(bore_cam[2] > 0.99, "boresight z = {}", bore_cam[2]);
     }
 

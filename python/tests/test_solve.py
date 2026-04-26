@@ -25,7 +25,7 @@ class TestDatabaseGeneration:
         assert abs(skyview_db.max_fov_deg - 15.0) < 0.1
 
     def test_save_load_roundtrip(self, skyview_db):
-        with tempfile.NamedTemporaryFile(suffix=".rkyv", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
             path = f.name
         try:
             skyview_db.save_to_file(path)

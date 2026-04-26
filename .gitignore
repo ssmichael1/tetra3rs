@@ -8,6 +8,7 @@
 
 # Python build
 wheel/
+dist/
 *.egg-info/
 
 
@@ -34,6 +35,7 @@ wheel/
 /data/*.dat
 /data/*.rkyv
 *.csv
+*.npy
 
 # Backup files
 *.bak

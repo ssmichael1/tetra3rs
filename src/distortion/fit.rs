@@ -81,7 +81,12 @@ pub(super) struct MatchedPoint {
 
 /// Fit a radial distortion model (k1, k2, k3) from plate-solve results.
 ///
-/// Same interface as [`fit_polynomial_distortion`].
+/// Same interface as [`fit_polynomial_distortion`]. Uses iterative
+/// MAD-based sigma-clipping plus an optional fixed-pixel-threshold stage 2
+/// recovery step. Suitable when the dominant distortion is symmetric about
+/// the optical center (most photographic lenses); for cameras with
+/// significant tangential / decentering distortion (e.g. TESS), prefer
+/// [`fit_polynomial_distortion`].
 pub fn fit_radial_distortion(
     solve_results: &[&SolveResult],
     centroids: &[&[Centroid]],
@@ -111,33 +116,55 @@ pub fn fit_radial_distortion(
     }
 
     let n = points.len();
+    let fit = fit_radial_sigma_clip(&points, config);
+    let model = RadialDistortion::new(fit.k1, fit.k2, fit.k3);
 
-    // Stage 1: Iterative radial fit with sigma-clipping
+    // Compute before/after RMSE on the SAME inlier set for a fair comparison
+    let rmse_before = compute_corrected_rmse(&points, &fit.mask, &Distortion::None);
+    let rmse_after = compute_corrected_rmse(&points, &fit.mask, &Distortion::Radial(model.clone()));
+    let n_inliers = fit.mask.iter().filter(|&&m| m).count();
+
+    debug!(
+        "Radial fit: k1={:.3e}, k2={:.3e}, k3={:.3e}, inliers={}/{}, RMSE {:.3} → {:.3} px",
+        fit.k1, fit.k2, fit.k3, n_inliers, n, rmse_before, rmse_after
+    );
+
+    DistortionFitResult {
+        model: Distortion::Radial(model),
+        rmse_before_px: rmse_before,
+        rmse_after_px: rmse_after,
+        n_inliers,
+        n_outliers: n - n_inliers,
+        iterations: fit.iterations,
+        inlier_mask: fit.mask,
+    }
+}
+
+/// Result of a sigma-clipped radial fit.
+pub(super) struct RadialFitResult {
+    pub k1: f64,
+    pub k2: f64,
+    pub k3: f64,
+    pub mask: Vec<bool>,
+    pub iterations: u32,
+}
+
+/// Iterative MAD-based sigma-clipped radial fit on pre-pooled matched points.
+///
+/// Mirrors [`fit_polynomial_sigma_clip`] for the radial Brown-Conrady model.
+/// Reusable across single-image and multi-image calibration paths.
+pub(super) fn fit_radial_sigma_clip(
+    points: &[MatchedPoint],
+    config: &DistortionFitConfig,
+) -> RadialFitResult {
+    let n = points.len();
     let mut mask = vec![true; n];
     let mut iterations = 0u32;
-    let mut k1;
-    let mut k2;
-    let mut k3;
-
-    (k1, k2, k3) = fit_radial_ls(&points, &mask);
+    let (mut k1, mut k2, mut k3) = fit_radial_ls(points, &mask);
 
     for iter in 0..config.max_iterations {
         iterations = iter + 1;
-
-        let residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let r2 = p.x_ideal * p.x_ideal + p.y_ideal * p.y_ideal;
-                let r4 = r2 * r2;
-                let r6 = r2 * r4;
-                let scale = k1 * r2 + k2 * r4 + k3 * r6;
-                let dx_model = p.x_ideal * scale;
-                let dy_model = p.y_ideal * scale;
-                let rx = p.x_obs - p.x_ideal - dx_model;
-                let ry = p.y_obs - p.y_ideal - dy_model;
-                (rx * rx + ry * ry).sqrt()
-            })
-            .collect();
+        let residuals = radial_residuals(points, k1, k2, k3);
 
         let inlier_resids: Vec<f64> = residuals
             .iter()
@@ -145,7 +172,6 @@ pub fn fit_radial_distortion(
             .filter(|(_, &m)| m)
             .map(|(&r, _)| r)
             .collect();
-
         if inlier_resids.is_empty() {
             break;
         }
@@ -155,87 +181,112 @@ pub fn fit_radial_distortion(
         abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mad = percentile(&abs_devs, 0.5);
         let sigma = mad * 1.4826;
-
         if sigma < 1e-12 {
             break;
         }
 
         let threshold = config.sigma_clip * sigma;
         let new_mask: Vec<bool> = residuals.iter().map(|&r| r <= threshold).collect();
-
         let changed = mask.iter().zip(&new_mask).any(|(&a, &b)| a != b);
         mask = new_mask;
-
         if !changed {
             break;
         }
-
-        let n_inliers = mask.iter().filter(|&&m| m).count();
-        if n_inliers < 3 {
+        if mask.iter().filter(|&&m| m).count() < 3 {
             break;
         }
-
-        (k1, k2, k3) = fit_radial_ls(&points, &mask);
+        (k1, k2, k3) = fit_radial_ls(points, &mask);
     }
 
-    // Stage 2
+    // Stage 2: optional fixed-pixel-threshold recovery
     if let Some(threshold_px) = config.stage2_threshold_px {
-        let residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let r2 = p.x_ideal * p.x_ideal + p.y_ideal * p.y_ideal;
-                let r4 = r2 * r2;
-                let r6 = r2 * r4;
-                let scale = k1 * r2 + k2 * r4 + k3 * r6;
-                let dx_model = p.x_ideal * scale;
-                let dy_model = p.y_ideal * scale;
-                let rx = p.x_obs - p.x_ideal - dx_model;
-                let ry = p.y_obs - p.y_ideal - dy_model;
-                (rx * rx + ry * ry).sqrt()
-            })
-            .collect();
-
+        let residuals = radial_residuals(points, k1, k2, k3);
         let mask_s2: Vec<bool> = residuals.iter().map(|&r| r <= threshold_px).collect();
         let n_recovered = mask_s2
             .iter()
             .zip(&mask)
             .filter(|(&s2, &s1)| s2 && !s1)
             .count();
-
-        if n_recovered > 0 {
+        if n_recovered > 0 && mask_s2.iter().filter(|&&m| m).count() >= 3 {
             mask = mask_s2;
-            let n_inliers = mask.iter().filter(|&&m| m).count();
-            if n_inliers >= 3 {
-                (k1, k2, k3) = fit_radial_ls(&points, &mask);
-            }
+            (k1, k2, k3) = fit_radial_ls(points, &mask);
         }
     }
 
-    let model = RadialDistortion::new(k1, k2, k3);
-    // Compute before/after RMSE on the SAME inlier set for a fair comparison
-    let rmse_before = compute_corrected_rmse(&points, &mask, &Distortion::None);
-    let rmse_after = compute_corrected_rmse(&points, &mask, &Distortion::Radial(model.clone()));
-    let n_inliers = mask.iter().filter(|&&m| m).count();
-
-    debug!(
-        "Radial fit: k1={:.3e}, k2={:.3e}, k3={:.3e}, inliers={}/{}, RMSE {:.3} → {:.3} px",
-        k1, k2, k3, n_inliers, n, rmse_before, rmse_after
-    );
-
-    DistortionFitResult {
-        model: Distortion::Radial(model),
-        rmse_before_px: rmse_before,
-        rmse_after_px: rmse_after,
-        n_inliers,
-        n_outliers: n - n_inliers,
+    RadialFitResult {
+        k1,
+        k2,
+        k3,
+        mask,
         iterations,
-        inlier_mask: mask,
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Polynomial (SIP-like) distortion fitting
-// ═══════════════════════════════════════════════════════════════════════════
+/// Per-point Euclidean residual under the current radial model.
+fn radial_residuals(points: &[MatchedPoint], k1: f64, k2: f64, k3: f64) -> Vec<f64> {
+    points
+        .iter()
+        .map(|p| {
+            let r2 = p.x_ideal * p.x_ideal + p.y_ideal * p.y_ideal;
+            let r4 = r2 * r2;
+            let r6 = r2 * r4;
+            let scale = k1 * r2 + k2 * r4 + k3 * r6;
+            let dx_model = p.x_ideal * scale;
+            let dy_model = p.y_ideal * scale;
+            let rx = p.x_obs - p.x_ideal - dx_model;
+            let ry = p.y_obs - p.y_ideal - dy_model;
+            (rx * rx + ry * ry).sqrt()
+        })
+        .collect()
+}
+
+/// Solve `(k1, k2, k3)` from matched points using least squares.
+///
+/// Model: `x_obs - x_ideal = x_ideal · (k1·r² + k2·r⁴ + k3·r⁶)`
+///        `y_obs - y_ideal = y_ideal · (k1·r² + k2·r⁴ + k3·r⁶)`
+///
+/// Stacks both x and y equations into one system with 3 unknowns.
+fn fit_radial_ls(points: &[MatchedPoint], mask: &[bool]) -> (f64, f64, f64) {
+    let inlier_count: usize = mask.iter().filter(|&&m| m).count();
+
+    if inlier_count < 3 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let nrows = inlier_count * 2;
+    let mut a_mat = DynMatrix::<f64>::zeros(nrows, 3);
+    let mut b_vec = DynVector::<f64>::zeros(nrows);
+
+    let mut row = 0;
+    for (i, p) in points.iter().enumerate() {
+        if !mask[i] {
+            continue;
+        }
+        let r2 = p.x_ideal * p.x_ideal + p.y_ideal * p.y_ideal;
+        let r4 = r2 * r2;
+        let r6 = r2 * r4;
+
+        a_mat[(row, 0)] = p.x_ideal * r2;
+        a_mat[(row, 1)] = p.x_ideal * r4;
+        a_mat[(row, 2)] = p.x_ideal * r6;
+        b_vec[row] = p.x_obs - p.x_ideal;
+        row += 1;
+
+        a_mat[(row, 0)] = p.y_ideal * r2;
+        a_mat[(row, 1)] = p.y_ideal * r4;
+        a_mat[(row, 2)] = p.y_ideal * r6;
+        b_vec[row] = p.y_obs - p.y_ideal;
+        row += 1;
+    }
+
+    let coeffs = a_mat
+        .solve_qr(&b_vec)
+        .unwrap_or_else(|_| DynVector::zeros(3));
+
+    (coeffs[0], coeffs[1], coeffs[2])
+}
+
+// ── Polynomial (SIP-like) distortion fitting ────────────────────────────────
 
 /// Result of a sigma-clipped polynomial fit (forward + inverse).
 pub(super) struct PolyFitResult {
@@ -564,7 +615,7 @@ fn gather_matched_points(
 
             let sv = &database.star_vectors[star_idx];
             let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
-            let cam_v = rot.vecmul(&icrs_v);
+            let cam_v = rot * icrs_v;
 
             if cam_v[2] <= 0.0 {
                 continue;
@@ -587,55 +638,6 @@ fn gather_matched_points(
     }
 
     points
-}
-
-/// Solve the radial least-squares fit.
-///
-/// Model: x_obs - x_ideal = x_ideal · (k1·r² + k2·r⁴ + k3·r⁶)
-///        y_obs - y_ideal = y_ideal · (k1·r² + k2·r⁴ + k3·r⁶)
-///
-/// We stack both x and y equations into one system with 3 unknowns.
-fn fit_radial_ls(points: &[MatchedPoint], mask: &[bool]) -> (f64, f64, f64) {
-    let inlier_count: usize = mask.iter().filter(|&&m| m).count();
-
-    if inlier_count < 3 {
-        return (0.0, 0.0, 0.0);
-    }
-
-    // Each point contributes 2 rows (x and y equations)
-    let nrows = inlier_count * 2;
-    let mut a_mat = DynMatrix::<f64>::zeros(nrows, 3, 0.0);
-    let mut b_vec = DynVector::<f64>::zeros(nrows, 0.0);
-
-    let mut row = 0;
-    for (i, p) in points.iter().enumerate() {
-        if !mask[i] {
-            continue;
-        }
-        let r2 = p.x_ideal * p.x_ideal + p.y_ideal * p.y_ideal;
-        let r4 = r2 * r2;
-        let r6 = r2 * r4;
-
-        // x equation
-        a_mat[(row, 0)] = p.x_ideal * r2;
-        a_mat[(row, 1)] = p.x_ideal * r4;
-        a_mat[(row, 2)] = p.x_ideal * r6;
-        b_vec[row] = p.x_obs - p.x_ideal;
-        row += 1;
-
-        // y equation
-        a_mat[(row, 0)] = p.y_ideal * r2;
-        a_mat[(row, 1)] = p.y_ideal * r4;
-        a_mat[(row, 2)] = p.y_ideal * r6;
-        b_vec[row] = p.y_obs - p.y_ideal;
-        row += 1;
-    }
-
-    let coeffs = a_mat
-        .solve_qr(&b_vec)
-        .unwrap_or_else(|_| DynVector::zeros(3, 0.0));
-
-    (coeffs[0], coeffs[1], coeffs[2])
 }
 
 /// Compute RMS pixel residual (uncorrected) across all points.
@@ -706,9 +708,9 @@ pub(super) fn fit_poly_ls(
         return;
     }
 
-    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs, 0.0);
-    let mut bx_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
-    let mut by_vec = DynVector::<f64>::zeros(n_inliers, 0.0);
+    let mut a_mat = DynMatrix::<f64>::zeros(n_inliers, ncoeffs);
+    let mut bx_vec = DynVector::<f64>::zeros(n_inliers);
+    let mut by_vec = DynVector::<f64>::zeros(n_inliers);
 
     let mut row = 0;
     for (i, p) in points.iter().enumerate() {
@@ -771,18 +773,17 @@ mod tests {
 
         assert!(
             (k1 - true_k1).abs() < 1e-12,
-            "k1: fitted={:.6e}, true={:.6e}, diff={:.3e}",
+            "k1: fitted={:.6e}, true={:.6e}",
             k1,
             true_k1,
-            (k1 - true_k1).abs()
         );
         assert!(
             (k2 - true_k2).abs() < 1e-18,
-            "k2: fitted={:.6e}, true={:.6e}, diff={:.3e}",
+            "k2: fitted={:.6e}, true={:.6e}",
             k2,
             true_k2,
-            (k2 - true_k2).abs()
         );
         assert!(k3.abs() < 1e-18, "k3: fitted={:.3e}, expected ~0", k3);
     }
 }
+

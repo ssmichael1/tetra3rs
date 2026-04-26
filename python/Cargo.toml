@@ -10,10 +10,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tetra3 = { path = "..", features = ["image"] }
-pyo3 = { version = "0.28.1", features = ["extension-module", "anyhow"] }
+pyo3 = { version = "0.28.1", features = ["extension-module"] }
 numpy = "0.28.0"
-rkyv = { version = "0.8", features = ["bytecheck"] }
-numeris = { version = "0.4.0", features = ["std"] }
+postcard = { version = "1.0", features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+numeris = { version = "0.5.10", features = ["std"] }
 
 [build-dependencies]
 pyo3-build-config = "0.28.1"

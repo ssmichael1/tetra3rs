@@ -25,7 +25,6 @@ Python API documentation for tetra3rs, auto-generated from type stubs.
 |-------|-------------|
 | [`RadialDistortion`](distortion.md#tetra3rs.RadialDistortion) | Radial (k1, k2, k3) distortion model |
 | [`PolynomialDistortion`](distortion.md#tetra3rs.PolynomialDistortion) | SIP-like polynomial distortion model |
-| [`DistortionFitResult`](distortion.md#tetra3rs.DistortionFitResult) | Result of distortion fitting |
 
 ## Module-Level Functions
 

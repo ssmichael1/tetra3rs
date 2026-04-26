@@ -43,7 +43,6 @@ pip install -e .
 | `starcatalog/` | Catalog management, proper-motion propagation |
 | `catalogs/` | Gaia DR3 (+ optional Hipparcos). Merged catalog: Gaia primary, Hipparcos for G<4 |
 | `aberration/` | First-order stellar aberration (~20″); `earth_barycentric_velocity` convenience |
-| `rkyv_numeris/` | rkyv serialization shims for numeris types |
 
 Public re-exports in `src/lib.rs` — `CameraModel`, `SolveConfig`, `SolveResult`, `SolverDatabase`, `calibrate_camera`, `earth_barycentric_velocity`, etc.
 
@@ -61,7 +60,7 @@ Public re-exports in `src/lib.rs` — `CameraModel`, `SolveConfig`, `SolveResult
 
 - PyO3 0.28, setuptools-rust build backend
 - `crate-type = cdylib`, depends on root crate with `image` feature
-- All public types pickle via rkyv zero-copy: `SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`
+- All public types pickle via postcard: `SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`
 - Gaia catalog bundled via the `gaia-catalog` PyPI package — no manual download needed
 - Wheels: cibuildwheel, cp310–cp314, skips i686/musllinux
 
@@ -80,11 +79,11 @@ TESS images have significant optical distortion and SIP WCS. Science region trim
 
 Downloaded on first integration-test run from GCS (`tetra3rs-testvecs` bucket). Not in git.
 
-- `hipsolver_10_30.rkyv` (455M) — main solver database
-- `test_tess_db.rkyv` (144M), `test_skyview_db.rkyv` (38M)
+- `hipsolver_10_30.bin` (455M) — main solver database
+- `test_tess_db.bin` (144M), `test_skyview_db.bin` (38M)
 - `gaia_merged.bin` (17M) — binary Gaia+Hipparcos catalog
-- `gaia_merged.csv` (81M) — CSV form
-- TIFF/FITS/JPEG test images
+- `gaia_merged.csv` (81M) — CSV form (loaded by an in-tree hand-rolled parser; no `csv` crate dep)
+- FITS test images (skyview, TESS). TIFF/JPEG variants exist in the bucket but aren't exercised in CI — the library no longer ships file-format decoders, so callers must decode files themselves before calling `extract_centroids_from_image`.
 
 ## Scripts (`scripts/`)
 

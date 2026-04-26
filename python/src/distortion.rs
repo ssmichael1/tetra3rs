@@ -74,16 +74,15 @@ impl PyRadialDistortion {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = rkyv::from_bytes::<RadialDistortion, rkyv::rancor::Error>(data)
+        let inner = postcard::from_bytes::<RadialDistortion>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
@@ -106,7 +105,9 @@ impl PyRadialDistortion {
 /// This model captures radial, tangential, and cross-term distortion — suitable
 /// for cameras where the optical center is offset from the CCD center (e.g. TESS).
 ///
-/// Typically fitted from solve results via ``SolverDatabase.fit_polynomial_distortion()``.
+/// Typically produced by ``SolverDatabase.calibrate_camera()`` (the fitted polynomial
+/// is returned as part of the camera model's ``distortion`` field), or constructed
+/// directly from coefficient arrays.
 #[pyclass(name = "PolynomialDistortion", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyPolynomialDistortion {
@@ -203,16 +204,15 @@ impl PyPolynomialDistortion {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = rkyv::from_bytes::<PolynomialDistortion, rkyv::rancor::Error>(data)
+        let inner = postcard::from_bytes::<PolynomialDistortion>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }

@@ -74,16 +74,15 @@ impl PyCalibrateResult {
             n_outliers: b.n_outliers,
             iterations: b.iterations,
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ser)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(&ser)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let ser = rkyv::from_bytes::<CalibrateResult, rkyv::rancor::Error>(data)
+        let ser = postcard::from_bytes::<CalibrateResult>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             camera_model: PyCameraModel {

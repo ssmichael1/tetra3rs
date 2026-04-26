@@ -3,7 +3,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use tetra3::camera_model::CameraModel;
-use tetra3::distortion::calibrate::{calibrate_camera, CalibrateConfig};
+use tetra3::distortion::calibrate::{calibrate_camera, CalibrateConfig, DistortionModelType};
 use tetra3::solver::{GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 use tetra3::Centroid;
 
@@ -371,14 +371,14 @@ impl PySolverDatabase {
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
-        let bytes = slf.borrow().inner.to_rkyv_bytes();
+        let bytes = slf.borrow().inner.to_bytes();
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = rkyv::from_bytes::<SolverDatabase, rkyv::rancor::Error>(data)
+        let inner = postcard::from_bytes::<SolverDatabase>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
@@ -473,9 +473,19 @@ impl PySolverDatabase {
 
     /// Calibrate a camera model from one or more plate-solve results.
     ///
-    /// Fits a global CameraModel (focal length, optical center, polynomial distortion)
-    /// by alternating per-image constrained WCS refinement with a global linear
-    /// least-squares fit. Distortion terms start at order 2 (SIP convention).
+    /// Fits a global CameraModel (focal length, optical center, distortion)
+    /// by alternating per-image constrained WCS refinement with a global
+    /// least-squares fit.
+    ///
+    /// The distortion model is selected by ``model``:
+    ///
+    /// - ``"polynomial"`` (default) — SIP-like polynomial of the given
+    ///   ``order``. Captures arbitrary 2D distortion including tangential
+    ///   and decentering terms; preferred for off-axis CCDs (e.g. TESS).
+    /// - ``"radial"`` — Brown-Conrady ``(k1, k2, k3)`` radial distortion.
+    ///   Three parameters total — well-conditioned with few matches and the
+    ///   standard model in computer-vision camera calibration. Assumes
+    ///   distortion is symmetric about the optical center.
     ///
     /// Args:
     ///     solve_results: A SolveResult or list of SolveResult objects.
@@ -484,7 +494,10 @@ impl PySolverDatabase {
     ///     image_height: Image height in pixels.
     ///     image_shape: Image shape as (height, width) tuple (numpy convention).
     ///         Can be used instead of image_width/image_height.
-    ///     order: Polynomial distortion order (2-6). Default 4.
+    ///     model: Distortion model to fit — ``"polynomial"`` or ``"radial"``.
+    ///         Default ``"polynomial"``.
+    ///     order: Polynomial distortion order (2-6). Ignored unless
+    ///         ``model="polynomial"``. Default 4.
     ///     max_iterations: Maximum outer iterations. Default 10.
     ///     sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
     ///     convergence_threshold_px: Stop when max update < this (pixels). Default 0.01.
@@ -498,6 +511,7 @@ impl PySolverDatabase {
         image_width = None,
         image_height = None,
         image_shape = None,
+        model = "polynomial",
         order = 4,
         max_iterations = 10,
         sigma_clip = 3.0,
@@ -511,16 +525,29 @@ impl PySolverDatabase {
         image_width: Option<u32>,
         image_height: Option<u32>,
         image_shape: Option<(u32, u32)>,
+        model: &str,
         order: u32,
         max_iterations: u32,
         sigma_clip: f64,
         convergence_threshold_px: f64,
     ) -> PyResult<PyCalibrateResult> {
-        if order < 2 || order > 6 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "polynomial order must be in [2, 6]",
-            ));
-        }
+        let model_type = match model {
+            "polynomial" => {
+                if !(2..=6).contains(&order) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "polynomial order must be in [2, 6]",
+                    ));
+                }
+                DistortionModelType::Polynomial { order }
+            }
+            "radial" => DistortionModelType::Radial,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "model must be 'polynomial' or 'radial', got '{}'",
+                    other
+                )));
+            }
+        };
 
         // Resolve image dimensions: image_shape=(h, w) or image_width + image_height
         let (img_width, img_height) = match (image_shape, image_width, image_height) {
@@ -544,11 +571,10 @@ impl PySolverDatabase {
         let cent_refs: Vec<&[Centroid]> = cent_vec.iter().map(|v| v.as_slice()).collect();
 
         let config = CalibrateConfig {
-            polynomial_order: order,
+            model: model_type,
             max_iterations,
             sigma_clip,
             convergence_threshold_px,
-            ..CalibrateConfig::default()
         };
 
         let result = calibrate_camera(

@@ -31,7 +31,7 @@
 /// Forward distortion (ideal → distorted) is the explicit polynomial.
 /// Inverse distortion (distorted → ideal) is computed by Newton iteration
 /// on the forward polynomial — see [`Self::undistort`].
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PolynomialDistortion {
     /// Polynomial order (2..=6 typically).
     pub order: u32,

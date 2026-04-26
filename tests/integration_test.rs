@@ -101,7 +101,7 @@ fn test_generate_and_solve() {
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
         let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-        let cam_v = rot.vecmul(&icrs_v);
+        let cam_v = rot * icrs_v;
 
         if cam_v[2] > 0.01 {
             let cx_rad = cam_v[0] / cam_v[2]; // radians from boresight
@@ -248,7 +248,7 @@ fn generate_centroids_with_noise(
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
         let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-        let cam_v = rot.vecmul(&icrs_v);
+        let cam_v = rot * icrs_v;
 
         if cam_v[2] > 0.01 {
             let cx_rad = cam_v[0] / cam_v[2];
@@ -1091,24 +1091,26 @@ fn test_tracking_with_attitude_hint() {
     );
 }
 
-/// Regression test for issue #13: multiscale databases that produce a pattern
-/// table larger than rkyv's 32-bit offset limit (~2 GB) should save and load
-/// successfully under the sharded `PatternCatalog` layout.
+/// Regression test for issue #13: multiscale databases that produce very
+/// large pattern tables should save and load successfully.
 ///
-/// This test is expensive: it generates a multiscale database covering several
-/// FOV octaves, which typically produces tens of millions of unique patterns
-/// and requires multi-GB RAM. Marked `#[ignore]` so it only runs when
-/// explicitly requested:
+/// Originally exercised the sharded `PatternCatalog` workaround for rkyv's
+/// 32-bit offset limit. After the postcard migration the offset limit is
+/// gone, so this test simply verifies a multi-octave database round-trips.
+///
+/// This test is expensive: it generates a multiscale database covering
+/// several FOV octaves, which typically produces tens of millions of unique
+/// patterns and requires multi-GB RAM. Marked `#[ignore]` so it only runs
+/// when explicitly requested:
 ///
 /// ```sh
-/// cargo test --release --test integration_test test_multiscale_sharded_database -- --ignored --nocapture
+/// cargo test --release --test integration_test test_multiscale_database -- --ignored --nocapture
 /// ```
 #[test]
 #[ignore = "slow: generates a multi-GB pattern catalog; run with --ignored"]
-fn test_multiscale_sharded_database() {
+fn test_multiscale_database() {
     let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
-    // FOV range chosen to exceed the old 2 GB single-Vec limit — covers 0.5° to 5°.
     let config = GenerateDatabaseConfig {
         max_fov_deg: 5.0,
         min_fov_deg: Some(0.5),
@@ -1128,20 +1130,12 @@ fn test_multiscale_sharded_database() {
         .expect("multiscale database generation");
 
     let total_slots = db.pattern_catalog.len();
-    let n_shards = db.pattern_catalog.shards.len();
     println!(
-        "  {} pattern slots across {} shard(s) ({} patterns stored)",
-        total_slots, n_shards, db.props.num_patterns
-    );
-    assert!(
-        n_shards >= 2,
-        "expected ≥2 shards for this FOV range to exercise the sharding path \
-         (got {} slots in {} shard)",
-        total_slots,
-        n_shards
+        "  {} pattern slots ({} patterns stored)",
+        total_slots, db.props.num_patterns
     );
 
-    let tmp_path = std::env::temp_dir().join("tetra3rs_multiscale_test.rkyv");
+    let tmp_path = std::env::temp_dir().join("tetra3rs_multiscale_test.bin");
     println!("Saving to {}…", tmp_path.display());
     db.save_to_file(tmp_path.to_str().unwrap())
         .expect("save_to_file");
@@ -1150,7 +1144,6 @@ fn test_multiscale_sharded_database() {
     let loaded = SolverDatabase::load_from_file(tmp_path.to_str().unwrap())
         .expect("load_from_file");
     assert_eq!(loaded.pattern_catalog.len(), total_slots);
-    assert_eq!(loaded.pattern_catalog.shards.len(), n_shards);
     assert_eq!(loaded.props.num_patterns, db.props.num_patterns);
 
     std::fs::remove_file(tmp_path).ok();

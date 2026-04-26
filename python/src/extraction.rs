@@ -7,7 +7,7 @@ use tetra3::centroid_extraction::CentroidExtractionConfig;
 use crate::centroid::PyCentroid;
 
 /// Serializable mirror of PyExtractionResult for pickle support.
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ExtractionResultSer {
     centroids: Vec<tetra3::Centroid>,
     image_width: u32,
@@ -140,16 +140,15 @@ impl PyExtractionResult {
             threshold: b.threshold,
             num_blobs_raw: b.num_blobs_raw as u64,
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ser)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(&ser)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let ser = rkyv::from_bytes::<ExtractionResultSer, rkyv::rancor::Error>(data)
+        let ser = postcard::from_bytes::<ExtractionResultSer>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let centroids = ser
             .centroids

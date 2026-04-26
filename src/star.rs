@@ -1,9 +1,9 @@
-use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// A "Generic" star type that will be used for star matching
 /// The star RA & Dec assume proper motion has already been applied to the observation epoch.
 /// The magnitude is a generic "brightness" value that can be used for filtering, but the exact meaning is catalog-dependent.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Star {
     pub id: i64,
     pub ra_rad: f32,
