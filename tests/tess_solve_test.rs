@@ -448,6 +448,7 @@ fn test_tess_fits_solve() {
             use_8_connectivity: true,
             local_bg_block_size: Some(128),
             max_elongation: Some(30.0),
+            matched_filter_sigma: None,
         };
 
         let extraction = tetra3::extract_centroids_from_raw(
@@ -624,6 +625,7 @@ fn test_tess_distortion_fit_and_center_accuracy() {
             use_8_connectivity: true,
             local_bg_block_size: Some(128),
             max_elongation: Some(30.0),
+            matched_filter_sigma: None,
         };
 
         let extraction = tetra3::extract_centroids_from_raw(
@@ -837,6 +839,7 @@ fn test_tess_multi_image_calibration() {
         use_8_connectivity: true,
         local_bg_block_size: Some(16),
         max_elongation: Some(6.0),
+        matched_filter_sigma: None,
     };
 
     struct ImageData {
