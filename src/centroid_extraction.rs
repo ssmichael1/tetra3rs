@@ -25,6 +25,10 @@
 use crate::centroid::Centroid;
 use anyhow::{Context, Result};
 use image::GenericImageView;
+use numeris::imageproc::{
+    connected_components_with_label_buffer, Component, Connectivity,
+};
+use numeris::DynMatrix;
 
 /// Configuration for centroid extraction from an image.
 #[derive(Debug, Clone)]
@@ -245,9 +249,25 @@ fn extract_from_gray(
     let threshold = bg_mean + config.sigma_threshold * bg_sigma;
 
     // ── Step 3: threshold and label blobs ──
-    let mask: Vec<bool> = gray.iter().map(|&v| v > threshold).collect();
-    let labels = label_connected_components(&mask, width, height, config.use_8_connectivity);
-    let num_labels = *labels.iter().max().unwrap_or(&0) as usize;
+    // Build a u8 mask in a column-major DynMatrix as numeris's CCL expects
+    // a `MatrixRef`. Foreground = 1, background = 0.
+    let w = width as usize;
+    let h = height as usize;
+    let mut mask = DynMatrix::<u8>::zeros(h, w);
+    for r in 0..h {
+        for c in 0..w {
+            if gray[r * w + c] > threshold {
+                mask[(r, c)] = 1;
+            }
+        }
+    }
+    let connectivity = if config.use_8_connectivity {
+        Connectivity::Eight
+    } else {
+        Connectivity::Four
+    };
+    let (labels, components) =
+        connected_components_with_label_buffer(&mask, connectivity, 0u8);
 
     // ── Step 4: compute centroids ──
     // Use the local-background-subtracted image for centroid weighting so that
@@ -261,7 +281,7 @@ fn extract_from_gray(
     let raw_centroids = compute_blob_centroids(
         &gray,
         &labels,
-        num_labels,
+        &components,
         width,
         height,
         bg_for_centroids,
@@ -498,115 +518,6 @@ fn estimate_background(
     (median, sigma)
 }
 
-/// Label connected components in a binary mask using two-pass union-find.
-fn label_connected_components(
-    mask: &[bool],
-    width: u32,
-    height: u32,
-    use_8_connectivity: bool,
-) -> Vec<u32> {
-    let w = width as usize;
-    let h = height as usize;
-    let n = w * h;
-
-    let mut labels = vec![0u32; n];
-    let mut parent: Vec<u32> = Vec::new();
-    let mut next_label = 1u32;
-
-    // Find root with path compression
-    fn find(parent: &mut Vec<u32>, mut x: u32) -> u32 {
-        while parent[x as usize] != x {
-            parent[x as usize] = parent[parent[x as usize] as usize];
-            x = parent[x as usize];
-        }
-        x
-    }
-
-    // Union two labels
-    fn union(parent: &mut Vec<u32>, a: u32, b: u32) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            // Merge higher into lower to keep labels stable
-            if ra < rb {
-                parent[rb as usize] = ra;
-            } else {
-                parent[ra as usize] = rb;
-            }
-        }
-    }
-
-    // Reserve index 0 as background
-    parent.push(0);
-
-    // First pass: assign provisional labels
-    for row in 0..h {
-        for col in 0..w {
-            let idx = row * w + col;
-            if !mask[idx] {
-                continue;
-            }
-
-            // Collect labeled neighbors
-            let mut neighbor_labels = Vec::with_capacity(4);
-
-            // Left
-            if col > 0 && labels[idx - 1] > 0 {
-                neighbor_labels.push(labels[idx - 1]);
-            }
-            // Above
-            if row > 0 && labels[idx - w] > 0 {
-                neighbor_labels.push(labels[idx - w]);
-            }
-
-            if use_8_connectivity {
-                // Above-left
-                if row > 0 && col > 0 && labels[idx - w - 1] > 0 {
-                    neighbor_labels.push(labels[idx - w - 1]);
-                }
-                // Above-right
-                if row > 0 && col + 1 < w && labels[idx - w + 1] > 0 {
-                    neighbor_labels.push(labels[idx - w + 1]);
-                }
-            }
-
-            if neighbor_labels.is_empty() {
-                // New label
-                parent.push(next_label);
-                labels[idx] = next_label;
-                next_label += 1;
-            } else {
-                // Use minimum label
-                let min_label = *neighbor_labels.iter().min().unwrap();
-                labels[idx] = min_label;
-                // Union all neighbor labels
-                for &nl in &neighbor_labels {
-                    union(&mut parent, min_label, nl);
-                }
-            }
-        }
-    }
-
-    // Second pass: flatten labels
-    // Build a mapping from root -> sequential label
-    let mut root_map = std::collections::HashMap::new();
-    let mut seq = 1u32;
-
-    for label in labels.iter_mut() {
-        if *label > 0 {
-            let root = find(&mut parent, *label);
-            let mapped = root_map.entry(root).or_insert_with(|| {
-                let s = seq;
-                seq += 1;
-                s
-            });
-            *label = *mapped;
-        }
-    }
-
-    labels
-}
-
 /// Raw pixel-coordinate centroid with mass and covariance.
 struct RawCentroid {
     x_px: f32,
@@ -618,11 +529,14 @@ struct RawCentroid {
 
 /// Compute intensity-weighted centroids for each labeled blob.
 ///
-/// For each blob that passes size and elongation filters:
+/// Consumes [`numeris::imageproc::Component`]s for area / bbox / geometric
+/// moments, plus the row-major labels buffer for per-pixel masking. For each
+/// blob that passes size and elongation filters:
 /// 1. A local background is estimated from the median of non-blob pixels in a
 ///    5-pixel annulus around the blob's bounding box.
-/// 2. Intensity-weighted moments are re-accumulated with the local background
-///    subtracted, yielding a center-of-mass (CoM) position.
+/// 2. Intensity-weighted moments are accumulated with the local background
+///    subtracted, yielding a center-of-mass (CoM) position. Peak pixel is
+///    tracked in the same pass.
 /// 3. A 2D quadratic is fit to the 3×3 neighborhood around the peak pixel to
 ///    interpolate the sub-pixel intensity maximum. The quadratic position is
 ///    used only when it agrees with the CoM (within 0.5 px); otherwise the CoM
@@ -630,126 +544,91 @@ struct RawCentroid {
 ///
 /// When `max_elongation` is set in config, blobs with elongation ratio
 /// (major/minor axis) exceeding the threshold are rejected as non-stellar.
+/// The elongation test uses **intensity-weighted** second moments (with the
+/// global background subtracted), matching the original behavior — geometric
+/// moments admit a slightly different set of marginal blobs (saturated stars
+/// with large halos, etc.), which destabilizes downstream calibration on
+/// dense fields like TESS.
 fn compute_blob_centroids(
     gray: &[f32],
     labels: &[u32],
-    num_labels: usize,
+    components: &[Component],
     width: u32,
     height: u32,
     bg_level: f32,
     config: &CentroidExtractionConfig,
 ) -> Vec<RawCentroid> {
     let w = width as usize;
-
-    // Accumulators for each label: intensity-weighted moments.
-    // Moments are computed relative to a reference pixel (ref_col, ref_row)
-    // within each blob to avoid floating-point bias from large absolute
-    // coordinates. The first pixel encountered sets the reference.
-    struct BlobAccum {
-        sum_x: f64,
-        sum_y: f64,
-        sum_intensity: f64,
-        // Second-order moments for elongation / covariance
-        sum_xx: f64,
-        sum_yy: f64,
-        sum_xy: f64,
-        pixel_count: usize,
-        // Reference pixel: moments are relative to this origin
-        ref_col: usize,
-        ref_row: usize,
-        // Bounding box for compactness check
-        min_col: usize,
-        max_col: usize,
-        min_row: usize,
-        max_row: usize,
-        // Peak pixel tracking
-        peak_col: usize,
-        peak_row: usize,
-        peak_val: f32,
-    }
-
-    let mut accums: Vec<BlobAccum> = (0..=num_labels)
-        .map(|_| BlobAccum {
-            sum_x: 0.0,
-            sum_y: 0.0,
-            sum_intensity: 0.0,
-            sum_xx: 0.0,
-            sum_yy: 0.0,
-            sum_xy: 0.0,
-            pixel_count: 0,
-            ref_col: 0,
-            ref_row: 0,
-            min_col: usize::MAX,
-            max_col: 0,
-            min_row: usize::MAX,
-            max_row: 0,
-            peak_col: 0,
-            peak_row: 0,
-            peak_val: f32::NEG_INFINITY,
-        })
-        .collect();
-
-    for (idx, (&label, &pixel_val)) in labels.iter().zip(gray.iter()).enumerate() {
-        if label == 0 {
-            continue;
-        }
-        let col = idx % w;
-        let row = idx / w;
-        let intensity = (pixel_val - bg_level).max(0.0) as f64;
-
-        let acc = &mut accums[label as usize];
-
-        // Set reference pixel on first encounter
-        if acc.pixel_count == 0 {
-            acc.ref_col = col;
-            acc.ref_row = row;
-        }
-
-        // Accumulate moments relative to reference pixel (signed — blob pixels
-        // can be in any direction from the first pixel encountered)
-        let dx = col as f64 - acc.ref_col as f64;
-        let dy = row as f64 - acc.ref_row as f64;
-        acc.sum_x += dx * intensity;
-        acc.sum_y += dy * intensity;
-        acc.sum_xx += dx * dx * intensity;
-        acc.sum_yy += dy * dy * intensity;
-        acc.sum_xy += dx * dy * intensity;
-        acc.sum_intensity += intensity;
-        acc.pixel_count += 1;
-        acc.min_col = acc.min_col.min(col);
-        acc.max_col = acc.max_col.max(col);
-        acc.min_row = acc.min_row.min(row);
-        acc.max_row = acc.max_row.max(row);
-        if pixel_val > acc.peak_val {
-            acc.peak_val = pixel_val;
-            acc.peak_col = col;
-            acc.peak_row = row;
-        }
-    }
-
     let h = height as usize;
+    let bg_level_f64 = bg_level as f64;
 
-    accums
-        .into_iter()
+    components
+        .iter()
         .enumerate()
-        .skip(1) // skip label 0 (background)
-        .filter_map(|(blob_label, acc)| {
-            if acc.pixel_count < config.min_pixels
-                || acc.pixel_count > config.max_pixels
-                || acc.sum_intensity <= 0.0
-            {
+        .filter_map(|(idx, comp)| {
+            let blob_label = (idx + 1) as u32;
+            let pixel_count = comp.area as usize;
+            if pixel_count < config.min_pixels || pixel_count > config.max_pixels {
                 return None;
             }
 
-            // --- Initial CoM for elongation filter (uses global bg) ---
-            let dx_bar = acc.sum_x / acc.sum_intensity;
-            let dy_bar = acc.sum_y / acc.sum_intensity;
-            let cxx = acc.sum_xx / acc.sum_intensity - dx_bar * dx_bar;
-            let cyy = acc.sum_yy / acc.sum_intensity - dy_bar * dy_bar;
-            let cxy = acc.sum_xy / acc.sum_intensity - dx_bar * dy_bar;
+            // Bounding box (numeris uses (row, col) with inclusive max).
+            let min_row = comp.bbox_min.0 as usize;
+            let max_row = comp.bbox_max.0 as usize;
+            let min_col = comp.bbox_min.1 as usize;
+            let max_col = comp.bbox_max.1 as usize;
 
-            // Elongation filter
+            // Reference pixel = bbox top-left, to keep moments numerically stable.
+            let ref_col = min_col;
+            let ref_row = min_row;
+
+            // --- Pass 1: intensity-weighted moments with global bg + peak ---
+            let mut sum_x = 0.0_f64;
+            let mut sum_y = 0.0_f64;
+            let mut sum_xx = 0.0_f64;
+            let mut sum_yy = 0.0_f64;
+            let mut sum_xy = 0.0_f64;
+            let mut sum_i = 0.0_f64;
+            let mut peak_val = f32::NEG_INFINITY;
+            let mut peak_col: usize = ref_col;
+            let mut peak_row: usize = ref_row;
+
+            for r in min_row..=max_row {
+                let row_off = r * w;
+                for c in min_col..=max_col {
+                    let i = row_off + c;
+                    if labels[i] != blob_label {
+                        continue;
+                    }
+                    let raw = gray[i];
+                    if raw > peak_val {
+                        peak_val = raw;
+                        peak_col = c;
+                        peak_row = r;
+                    }
+                    let intensity = (raw as f64 - bg_level_f64).max(0.0);
+                    let dx = c as f64 - ref_col as f64;
+                    let dy = r as f64 - ref_row as f64;
+                    sum_x += dx * intensity;
+                    sum_y += dy * intensity;
+                    sum_xx += dx * dx * intensity;
+                    sum_yy += dy * dy * intensity;
+                    sum_xy += dx * dy * intensity;
+                    sum_i += intensity;
+                }
+            }
+
+            if sum_i <= 0.0 {
+                return None;
+            }
+
+            // Elongation filter on intensity-weighted moments
             if let Some(max_elong) = config.max_elongation {
+                let dx_bar = sum_x / sum_i;
+                let dy_bar = sum_y / sum_i;
+                let cxx = sum_xx / sum_i - dx_bar * dx_bar;
+                let cyy = sum_yy / sum_i - dy_bar * dy_bar;
+                let cxy = sum_xy / sum_i - dx_bar * dy_bar;
                 let trace = cxx + cyy;
                 let det = cxx * cyy - cxy * cxy;
                 let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
@@ -764,18 +643,18 @@ fn compute_blob_centroids(
             // --- Per-blob local background from annulus ---
             // Expand bounding box by margin, collect non-blob pixels
             const ANNULUS_MARGIN: usize = 5;
-            let r0 = acc.min_row.saturating_sub(ANNULUS_MARGIN);
-            let r1 = (acc.max_row + ANNULUS_MARGIN + 1).min(h);
-            let c0 = acc.min_col.saturating_sub(ANNULUS_MARGIN);
-            let c1 = (acc.max_col + ANNULUS_MARGIN + 1).min(w);
+            let r0 = min_row.saturating_sub(ANNULUS_MARGIN);
+            let r1 = (max_row + ANNULUS_MARGIN + 1).min(h);
+            let c0 = min_col.saturating_sub(ANNULUS_MARGIN);
+            let c1 = (max_col + ANNULUS_MARGIN + 1).min(w);
 
             let mut annulus_vals: Vec<f32> = Vec::new();
             for r in r0..r1 {
                 let row_off = r * w;
                 for c in c0..c1 {
-                    let idx = row_off + c;
-                    if labels[idx] == 0 {
-                        annulus_vals.push(gray[idx]);
+                    let i = row_off + c;
+                    if labels[i] == 0 {
+                        annulus_vals.push(gray[i]);
                     }
                 }
             }
@@ -793,31 +672,30 @@ fn compute_blob_centroids(
                 }
             };
 
-            // --- Re-accumulate moments with local background correction ---
-            let ref_col = acc.ref_col;
-            let ref_row = acc.ref_row;
-            let mut sum_x = 0.0_f64;
-            let mut sum_y = 0.0_f64;
-            let mut sum_xx = 0.0_f64;
-            let mut sum_yy = 0.0_f64;
-            let mut sum_xy = 0.0_f64;
-            let mut sum_i = 0.0_f64;
+            // --- Pass 2: re-accumulate intensity-weighted moments with local bg ---
+            sum_x = 0.0;
+            sum_y = 0.0;
+            sum_xx = 0.0;
+            sum_yy = 0.0;
+            sum_xy = 0.0;
+            sum_i = 0.0;
 
-            for r in acc.min_row..=acc.max_row {
+            for r in min_row..=max_row {
                 let row_off = r * w;
-                for c in acc.min_col..=acc.max_col {
-                    let idx = row_off + c;
-                    if labels[idx] as usize == blob_label {
-                        let intensity = (gray[idx] as f64 - local_bg).max(0.0);
-                        let dx = c as f64 - ref_col as f64;
-                        let dy = r as f64 - ref_row as f64;
-                        sum_x += dx * intensity;
-                        sum_y += dy * intensity;
-                        sum_xx += dx * dx * intensity;
-                        sum_yy += dy * dy * intensity;
-                        sum_xy += dx * dy * intensity;
-                        sum_i += intensity;
+                for c in min_col..=max_col {
+                    let i = row_off + c;
+                    if labels[i] != blob_label {
+                        continue;
                     }
+                    let intensity = (gray[i] as f64 - local_bg).max(0.0);
+                    let dx = c as f64 - ref_col as f64;
+                    let dy = r as f64 - ref_row as f64;
+                    sum_x += dx * intensity;
+                    sum_y += dy * intensity;
+                    sum_xx += dx * dx * intensity;
+                    sum_yy += dy * dy * intensity;
+                    sum_xy += dx * dy * intensity;
+                    sum_i += intensity;
                 }
             }
 
@@ -837,9 +715,9 @@ fn compute_blob_centroids(
             let mut final_x = xbar;
             let mut final_y = ybar;
 
-            let pc = acc.peak_col;
-            let pr = acc.peak_row;
-            if acc.pixel_count >= 5 && pc >= 1 && pr >= 1 && pc + 1 < w && pr + 1 < h {
+            let pc = peak_col;
+            let pr = peak_row;
+            if pixel_count >= 5 && pc >= 1 && pr >= 1 && pc + 1 < w && pr + 1 < h {
                 // Build 3x3 grid of background-subtracted values around peak
                 let effective_bg = local_bg;
                 let v = |dy: isize, dx: isize| -> f64 {
@@ -896,27 +774,6 @@ mod tests {
         let (mean, sigma) = estimate_background(&pixels, 100, 100, &config);
         assert!((mean - 100.0).abs() < 1.0);
         assert!(sigma < 1.0);
-    }
-
-    #[test]
-    fn test_connected_components_4conn() {
-        // 5x5 image with two separate blobs
-        let mask = vec![
-            false, true, true, false, false, // row 0
-            false, true, false, false, false, // row 1
-            false, false, false, false, false, // row 2
-            false, false, false, true, true, // row 3
-            false, false, false, true, false, // row 4
-        ];
-        let labels = label_connected_components(&mask, 5, 5, false);
-        // Blob 1: (0,1), (0,2), (1,1)
-        assert_eq!(labels[1], labels[2]);
-        assert_eq!(labels[1], labels[6]);
-        // Blob 2: (3,3), (3,4), (4,3)
-        assert_eq!(labels[18], labels[19]);
-        assert_eq!(labels[18], labels[23]);
-        // Different blobs
-        assert_ne!(labels[1], labels[18]);
     }
 
     #[test]

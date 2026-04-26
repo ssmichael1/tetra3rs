@@ -101,7 +101,7 @@ fn test_generate_and_solve() {
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
         let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-        let cam_v = rot.vecmul(&icrs_v);
+        let cam_v = rot * icrs_v;
 
         if cam_v[2] > 0.01 {
             let cx_rad = cam_v[0] / cam_v[2]; // radians from boresight
@@ -248,7 +248,7 @@ fn generate_centroids_with_noise(
     for &idx in &nearby {
         let sv = &db.star_vectors[idx];
         let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-        let cam_v = rot.vecmul(&icrs_v);
+        let cam_v = rot * icrs_v;
 
         if cam_v[2] > 0.01 {
             let cx_rad = cam_v[0] / cam_v[2];

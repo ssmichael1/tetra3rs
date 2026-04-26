@@ -498,6 +498,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "numeris"
+version = "0.5.11"
+dependencies = [
+ "num-complex",
+ "num-traits",
+]
+
+[[package]]
 name = "numpy"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -964,7 +972,7 @@ dependencies = [
  "csv",
  "image",
  "num-traits",
- "numeris",
+ "numeris 0.5.11",
  "rand",
  "rand_distr",
  "rkyv",
@@ -977,7 +985,7 @@ dependencies = [
 name = "tetra3-python"
 version = "0.6.1"
 dependencies = [
- "numeris",
+ "numeris 0.4.0",
  "numpy",
  "pyo3",
  "pyo3-build-config",
