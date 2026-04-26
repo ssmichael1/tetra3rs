@@ -90,8 +90,8 @@ let config = GenerateDatabaseConfig {
 let db = SolverDatabase::generate_from_gaia("data/gaia_merged.bin", &config)?;
 
 // Save and reload
-db.save_to_file("data/my_database.rkyv")?;
-let db = SolverDatabase::load_from_file("data/my_database.rkyv")?;
+db.save_to_file("data/my_database.bin")?;
+let db = SolverDatabase::load_from_file("data/my_database.bin")?;
 
 // Solve from image centroids (pixel coordinates, origin at image center)
 let centroids = vec![

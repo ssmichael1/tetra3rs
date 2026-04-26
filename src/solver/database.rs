@@ -72,7 +72,7 @@ impl SolverDatabase {
     pub fn generate_from_hipparcos(
         catalog_path: &str,
         config: &GenerateDatabaseConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         use crate::catalogs::hipparcos::load_hipparcos_catalog_from_file;
         use crate::star::star_from_hipparcos;
 
@@ -86,42 +86,25 @@ impl SolverDatabase {
             .collect();
 
         let default_pm_year = 1991.25; // Hipparcos reference epoch
-        Self::generate_from_star_list(stars, config, default_pm_year)
+        Ok(Self::generate_from_star_list(stars, config, default_pm_year))
     }
 
-    /// Generate a solver database from a Gaia catalog file (CSV or binary).
+    /// Generate a solver database from a Gaia binary catalog file.
     ///
-    /// Accepts either:
-    /// - A CSV file (`.csv`) with columns:
-    ///   `source_id,ra,dec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag,parallax,pmra,pmdec`
-    /// - A binary file (`.bin`) in the compact GDR3 format from the `gaia-catalog` package.
+    /// Expects a `.bin` file in the compact GDR3 format from the `gaia-catalog`
+    /// package (header magic `GDR3`).
     ///
-    /// Negative source_ids indicate Hipparcos gap-fill stars from the merged catalog.
+    /// Negative source_ids indicate Hipparcos gap-fill stars from the merged
+    /// catalog.
     pub fn generate_from_gaia(
         catalog_path: &str,
         config: &GenerateDatabaseConfig,
-    ) -> anyhow::Result<Self> {
-        use crate::catalogs::gaia::{load_gaia_binary, read_gaia_csv};
+    ) -> crate::Result<Self> {
+        use crate::catalogs::gaia::load_gaia_binary;
         use crate::star::star_from_gaia;
 
         info!("Loading Gaia catalog from {}", catalog_path);
-        let gaia_stars = if catalog_path.ends_with(".csv") {
-            read_gaia_csv(catalog_path)?
-        } else if catalog_path.ends_with(".bin") {
-            load_gaia_binary(catalog_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load Gaia binary: {}", e))?
-        } else {
-            // Auto-detect by reading the first 4 bytes
-            let magic = std::fs::read(catalog_path)
-                .map(|b| if b.len() >= 4 { b[0..4].to_vec() } else { vec![] })
-                .unwrap_or_default();
-            if magic == b"GDR3" {
-                load_gaia_binary(catalog_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to load Gaia binary: {}", e))?
-            } else {
-                read_gaia_csv(catalog_path)?
-            }
-        };
+        let gaia_stars = load_gaia_binary(catalog_path)?;
         info!("Loaded {} Gaia entries", gaia_stars.len());
 
         let stars: Vec<Star> = gaia_stars
@@ -130,7 +113,7 @@ impl SolverDatabase {
             .collect();
 
         let default_pm_year = 2016.0; // Gaia DR3 reference epoch
-        Self::generate_from_star_list(stars, config, default_pm_year)
+        Ok(Self::generate_from_star_list(stars, config, default_pm_year))
     }
 
     /// Core database generation from a pre-converted list of generic stars.
@@ -141,7 +124,7 @@ impl SolverDatabase {
         mut stars: Vec<Star>,
         config: &GenerateDatabaseConfig,
         default_pm_year: f64,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let max_fov = config.max_fov_deg.to_radians();
         let min_fov = config
             .min_fov_deg
@@ -374,13 +357,13 @@ impl SolverDatabase {
             patterns_per_lattice_field: config.patterns_per_lattice_field,
         };
 
-        Ok(SolverDatabase {
+        SolverDatabase {
             star_catalog,
             star_vectors,
             star_catalog_ids,
             pattern_catalog,
             props,
-        })
+        }
     }
 }
 
@@ -411,26 +394,23 @@ fn compute_magnitude_cutoff(stars: &[Star], min_fov: f32, verification_stars_per
 // ── Serialization ───────────────────────────────────────────────────────────
 
 impl SolverDatabase {
-    /// Serialize the database to bytes using rkyv.
-    pub fn to_rkyv_bytes(&self) -> Vec<u8> {
-        rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .expect("rkyv serialization failed")
-            .to_vec()
+    /// Serialize the database to bytes using postcard.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("postcard serialization failed")
     }
 
-    /// Save the database to a file using rkyv.
-    pub fn save_to_file(&self, path: &str) -> anyhow::Result<()> {
-        let bytes = self.to_rkyv_bytes();
+    /// Save the database to a file using postcard.
+    pub fn save_to_file(&self, path: &str) -> crate::Result<()> {
+        let bytes = self.to_bytes();
         std::fs::write(path, &bytes)?;
         info!("Saved database to {} ({} bytes)", path, bytes.len());
         Ok(())
     }
 
-    /// Load a database from an rkyv file.
-    pub fn load_from_file(path: &str) -> anyhow::Result<Self> {
+    /// Load a database from a postcard file.
+    pub fn load_from_file(path: &str) -> crate::Result<Self> {
         let bytes = std::fs::read(path)?;
-        let db = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
-            .map_err(|e| anyhow::anyhow!("rkyv deserialization failed: {}", e))?;
+        let db = postcard::from_bytes::<Self>(&bytes)?;
         info!(
             "Loaded database: {} stars, {} patterns",
             db.star_catalog.len(),

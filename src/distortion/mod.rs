@@ -17,16 +17,19 @@
 //! 1. **Provided** to the solver via [`SolveConfig::distortion`](crate::SolveConfig) if the
 //!    distortion is already known (e.g. from a calibration procedure or FITS header).
 //!
-//! 2. **Fitted** from solve results using [`fit_radial_distortion`] or
-//!    [`fit_polynomial_distortion`]. These functions perform iterative robust
-//!    fitting with sigma-clipping to reject mismatched stars.
+//! 2. **Fitted** from one or more solve results — either through
+//!    [`calibrate_camera`] (which fits a SIP polynomial model and returns a
+//!    fully-populated [`CameraModel`]) or directly via
+//!    [`fit::fit_radial_distortion`] for the simpler `(k1, k2, k3)` model.
+//!    Both fitters use iterative robust sigma-clipping to reject
+//!    mismatched stars.
 
 pub mod calibrate;
 pub mod fit;
 pub mod polynomial;
 pub mod radial;
 
-pub use calibrate::{calibrate_camera, CalibrateConfig, CalibrateResult};
+pub use calibrate::{calibrate_camera, CalibrateConfig, CalibrateResult, DistortionModelType};
 pub use polynomial::PolynomialDistortion;
 pub use radial::RadialDistortion;
 
@@ -35,7 +38,7 @@ pub use radial::RadialDistortion;
 /// An enum-based distortion model that supports radial and polynomial
 /// distortion correction. All coordinates are in pixels relative to
 /// the optical center (typically the image center).
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Distortion {
     /// No distortion correction.
     None,

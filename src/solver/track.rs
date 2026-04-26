@@ -141,7 +141,7 @@ impl SolverDatabase {
         let mut projected: Vec<(usize, f32, f32)> = Vec::with_capacity(candidate_vecs.len());
         for (local_i, sv) in candidate_vecs.iter().enumerate() {
             let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-            let cam_v = r_hint.vecmul(&icrs_v);
+            let cam_v = r_hint * icrs_v;
             if cam_v[2] > 0.0 {
                 let cx = cam_v[0] / cam_v[2];
                 let cy = cam_v[1] / cam_v[2];
@@ -193,7 +193,7 @@ impl SolverDatabase {
         let match_radius_rad = config.match_radius * fov_rad;
         let image_center_icrs = rotation_matrix
             .transpose()
-            .vecmul(&Vector3::from_array([0.0, 0.0, 1.0]));
+            * Vector3::from_array([0.0, 0.0, 1.0]);
         let verify_inds = self
             .star_catalog
             .query_indices_from_uvec(image_center_icrs, fov_diagonal / 2.0);
@@ -206,7 +206,7 @@ impl SolverDatabase {
                 None => *raw,
             };
             let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-            let cam_v = rotation_matrix.vecmul(&icrs_v);
+            let cam_v = rotation_matrix * icrs_v;
             if cam_v[2] > 0.0 {
                 verify_positions.push((cat_idx, cam_v[0] / cam_v[2], cam_v[1] / cam_v[2]));
             }
@@ -299,7 +299,7 @@ impl SolverDatabase {
             let norm = (ix * ix + iy * iy + iz * iz).sqrt();
             let img_v = refined_rotation
                 .transpose()
-                .vecmul(&Vector3::from_array([ix / norm, iy / norm, iz / norm]));
+                * Vector3::from_array([ix / norm, iy / norm, iz / norm]);
             let sv = &self.star_vectors[cat_star_idx];
             let cat_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
             let cross = img_v.cross(&cat_v);

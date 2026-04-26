@@ -114,7 +114,7 @@ class CameraModel:
         ...
 
     def save_to_file(self, path: str) -> None:
-        """Save the camera model to a file (rkyv binary format).
+        """Save the camera model to a file (postcard binary format).
 
         Args:
             path: File path to write to.
@@ -123,7 +123,7 @@ class CameraModel:
 
     @staticmethod
     def load_from_file(path: str) -> "CameraModel":
-        """Load a camera model from a file (rkyv binary format).
+        """Load a camera model from a file (postcard binary format).
 
         Args:
             path: File path to read from.
@@ -769,6 +769,7 @@ class SolverDatabase:
         image_width: Optional[int] = None,
         image_height: Optional[int] = None,
         image_shape: Optional[tuple[int, int]] = None,
+        model: str = "polynomial",
         order: int = 4,
         max_iterations: int = 10,
         sigma_clip: float = 3.0,
@@ -776,9 +777,19 @@ class SolverDatabase:
     ) -> CalibrateResult:
         """Calibrate a camera model from one or more plate-solve results.
 
-        Fits a global CameraModel (focal length, optical center, polynomial distortion)
-        by alternating per-image constrained WCS refinement with a global linear
-        least-squares fit. Distortion terms start at order 2 (SIP convention).
+        Fits a global CameraModel (focal length, optical center, distortion) by
+        alternating per-image constrained WCS refinement with a global
+        least-squares fit.
+
+        The distortion model is selected by ``model``:
+
+        - ``"polynomial"`` (default) — SIP-like polynomial of the given
+          ``order``. Captures arbitrary 2D distortion including tangential
+          and decentering terms; preferred for off-axis CCDs (e.g. TESS).
+        - ``"radial"`` — Brown-Conrady ``(k1, k2, k3)``. Three parameters
+          total — well-conditioned with few matches and the standard model
+          in computer-vision camera calibration. Assumes distortion is
+          symmetric about the optical center.
 
         Args:
             solve_results: A SolveResult or list of SolveResult objects.
@@ -787,7 +798,10 @@ class SolverDatabase:
             image_height: Image height in pixels.
             image_shape: Image shape as (height, width) tuple (numpy convention).
                 Can be used instead of image_width/image_height.
-            order: Polynomial distortion order (2-6). Default 4.
+            model: Distortion model — ``"polynomial"`` or ``"radial"``.
+                Default ``"polynomial"``.
+            order: Polynomial distortion order (2-6). Ignored unless
+                ``model="polynomial"``. Default 4.
             max_iterations: Maximum outer iterations. Default 10.
             sigma_clip: Sigma threshold for outlier rejection. Default 3.0.
             convergence_threshold_px: Stop when RMSE change < this (pixels).
@@ -799,80 +813,38 @@ class SolverDatabase:
         """
         ...
 
-    def fit_radial_distortion(
-        self,
-        solve_results: Union[SolveResult, list[SolveResult]],
-        centroids: Union[
-            list[Centroid],
-            npt.NDArray[np.float64],
-            list[Union[list[Centroid], npt.NDArray[np.float64]]],
-        ],
-        image_width: int,
-        sigma_clip: float = 3.0,
-        max_iterations: int = 20,
-        stage2_threshold_px: Optional[float] = 5.0,
-    ) -> DistortionFitResult:
-        """Fit a radial distortion model (k1, k2, k3) from solve results.
-
-        Args:
-            solve_results: A SolveResult or list of SolveResult objects.
-            centroids: Matching centroids.
-            image_width: Image width in pixels.
-            sigma_clip: Sigma threshold for outlier rejection.
-            max_iterations: Maximum sigma-clip iterations.
-            stage2_threshold_px: Loose pixel threshold for second-stage
-                recovery. None to disable.
-
-        Returns:
-            DistortionFitResult with the fitted radial model and statistics.
-        """
-        ...
-
-    def fit_polynomial_distortion(
-        self,
-        solve_results: Union[SolveResult, list[SolveResult]],
-        centroids: Union[
-            list[Centroid],
-            npt.NDArray[np.float64],
-            list[Union[list[Centroid], npt.NDArray[np.float64]]],
-        ],
-        image_width: int,
-        order: int = 4,
-        sigma_clip: float = 3.0,
-        max_iterations: int = 20,
-        stage2_threshold_px: Optional[float] = 5.0,
-    ) -> DistortionFitResult:
-        """Fit a polynomial (SIP-like) distortion model from solve results.
-
-        This model captures arbitrary 2D distortion including radial, tangential,
-        and cross-terms — suitable for wide-field cameras like TESS where the
-        optical center is offset from the CCD center.
-
-        Args:
-            solve_results: A SolveResult or list of SolveResult objects.
-            centroids: Matching centroids.
-            image_width: Image width in pixels.
-            order: Polynomial order (2-6). Default 4.
-            sigma_clip: Sigma threshold for outlier rejection.
-            max_iterations: Maximum sigma-clip iterations.
-            stage2_threshold_px: Loose pixel threshold for second-stage
-                recovery. None to disable.
-
-        Returns:
-            DistortionFitResult with the fitted polynomial model and statistics.
-        """
-        ...
-
 class RadialDistortion:
-    """Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+    """Brown-Conrady radial+tangential distortion model.
 
-    Coordinates are in pixels relative to the optical center (image center).
+    ``x_d = x · (1 + k1·r² + k2·r⁴ + k3·r⁶) + 2·p1·x·y + p2·(r² + 2·x²)``
+    ``y_d = y · (1 + k1·r² + k2·r⁴ + k3·r⁶) + p1·(r² + 2·y²) + 2·p2·x·y``
+
+    Coordinates are in pixels relative to the optical center (image center
+    minus CRPIX). Tangential coefficients ``p1, p2`` default to 0 — set them
+    to model lens decentering, sensor tilt, or off-axis CCD placement.
     Supports ``pickle`` serialization.
 
     Example::
 
         d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+        d = tetra3rs.RadialDistortion(k1=-7e-9, p1=5e-7, p2=-3e-7)
         x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
+
+    References:
+      - Conrady, A. E. (1919). "Decentred Lens-Systems."
+        *Monthly Notices of the Royal Astronomical Society*, 79(5): 384-390.
+        — Original derivation of the tangential / decentering form.
+        https://doi.org/10.1093/mnras/79.5.384
+      - Brown, D. C. (1966). "Decentering Distortion of Lenses."
+        *Photogrammetric Engineering*, 32(3): 444-462. — Modernized form.
+      - Brown, D. C. (1971). "Close-Range Camera Calibration."
+        *Photogrammetric Engineering*, 37(8): 855-866. — Calibration procedure.
+      - Zhang, Z. (2000). "A Flexible New Technique for Camera Calibration."
+        *IEEE TPAMI*, 22(11): 1330-1334. — Multi-image planar calibration
+        (the standard method, used in OpenCV ``calibrateCamera``).
+        https://doi.org/10.1109/34.888718
+      - OpenCV documentation for the equivalent ``(k1, k2, k3, p1, p2)``
+        formulation: https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
     """
 
     def __reduce__(self) -> tuple: ...
@@ -884,6 +856,8 @@ class RadialDistortion:
         k1: float = 0.0,
         k2: float = 0.0,
         k3: float = 0.0,
+        p1: float = 0.0,
+        p2: float = 0.0,
     ) -> None: ...
     @property
     def k1(self) -> float:
@@ -898,6 +872,16 @@ class RadialDistortion:
     @property
     def k3(self) -> float:
         """Third radial coefficient."""
+        ...
+
+    @property
+    def p1(self) -> float:
+        """First tangential / decentering coefficient."""
+        ...
+
+    @property
+    def p2(self) -> float:
+        """Second tangential / decentering coefficient."""
         ...
 
     def distort(self, x: float, y: float) -> tuple[float, float]:
@@ -923,10 +907,26 @@ class PolynomialDistortion:
 
     Total coefficients per axis: (order+1)(order+2)/2.
 
-    Typically fitted from solve results via
-    ``SolverDatabase.fit_polynomial_distortion()``, or constructed directly
-    from coefficient arrays (e.g. extracted from a FITS WCS SIP model).
-    Supports ``pickle`` serialization.
+    Typically constructed by `SolverDatabase.calibrate_camera()` (which fits
+    the polynomial internally and returns it via the camera model), or
+    directly from coefficient arrays (e.g. extracted from a FITS WCS SIP
+    model). Supports ``pickle`` serialization.
+
+    References:
+      - Shupe, D. L.; Moshir, M.; Li, J.; Makovoz, D.; Narron, R.;
+        Hook, R. N. (2005). "The SIP Convention for Representing
+        Distortion in FITS Image Headers." *Astronomical Data Analysis
+        Software and Systems XIV*, ASP Conference Series, 347: 491.
+        — Original SIP specification.
+        https://www.adass.org/adass/proceedings/adass04/reprints/P3-1-3.pdf
+      - FITS WCS SIP convention registry entry:
+        https://fits.gsfc.nasa.gov/registry/sip.html
+
+    The convention here is SIP-like — same A_pq, B_pq polynomial basis on
+    normalized pixel coordinates. Standard SIP starts at order 2 (the
+    linear part is absorbed into the WCS CD matrix); this implementation
+    also includes order 0 / 1 terms so a single fit can absorb optical-
+    center offset and residual scale/rotation from the matched-points data.
     """
 
     def __reduce__(self) -> tuple: ...
@@ -998,48 +998,6 @@ class PolynomialDistortion:
 
     def undistort(self, x: float, y: float) -> tuple[float, float]:
         """Inverse distortion: distorted → ideal."""
-        ...
-
-class DistortionFitResult:
-    """Result of a distortion fitting procedure.
-
-    Returned by ``SolverDatabase.fit_radial_distortion`` or
-    ``SolverDatabase.fit_polynomial_distortion``.
-    """
-
-    @property
-    def model(self) -> Optional[Union[RadialDistortion, PolynomialDistortion]]:
-        """The fitted distortion model."""
-        ...
-
-    @property
-    def rmse_before_px(self) -> float:
-        """RMS pixel residual before distortion correction."""
-        ...
-
-    @property
-    def rmse_after_px(self) -> float:
-        """RMS pixel residual after distortion correction."""
-        ...
-
-    @property
-    def n_inliers(self) -> int:
-        """Number of inlier matches in the final fit."""
-        ...
-
-    @property
-    def n_outliers(self) -> int:
-        """Number of rejected outliers."""
-        ...
-
-    @property
-    def iterations(self) -> int:
-        """Number of sigma-clip iterations performed."""
-        ...
-
-    @property
-    def inlier_mask(self) -> npt.NDArray[np.bool_]:
-        """Boolean inlier mask (True = inlier, False = outlier)."""
         ...
 
 def extract_centroids(

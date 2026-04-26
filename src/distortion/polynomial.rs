@@ -25,13 +25,35 @@
 //! are stored normalized: internally the (x, y) inputs are divided by a
 //! `scale` factor (typically half the image width) before evaluating the
 //! polynomial, so the coefficients stay in a numerically well-conditioned range.
+//!
+//! # References
+//!
+//! - **Shupe, D. L.; Moshir, M.; Li, J.; Makovoz, D.; Narron, R.; Hook, R. N.**
+//!   (2005). "The SIP Convention for Representing Distortion in FITS
+//!   Image Headers." *Astronomical Data Analysis Software and Systems
+//!   XIV*, ASP Conference Series, 347: 491. — The original SIP
+//!   specification. <https://www.adass.org/adass/proceedings/adass04/reprints/P3-1-3.pdf>
+//! - **FITS WCS SIP convention registry entry**:
+//!   <https://fits.gsfc.nasa.gov/registry/sip.html>
+//!
+//! The convention used here is SIP-like — same `A_pq`, `B_pq` polynomial
+//! basis on normalized pixel coordinates `(u, v) = (x/s, y/s)`. Standard
+//! SIP starts at order 2 (the linear part is absorbed into the WCS
+//! `CD` matrix); this implementation also includes order 0 / 1 terms so a
+//! single fit can absorb optical-center offset and residual scale/rotation
+//! from the matched-points data.
 
 /// SIP-like polynomial distortion model.
 ///
 /// Forward distortion (ideal → distorted) is the explicit polynomial.
 /// Inverse distortion (distorted → ideal) is computed by Newton iteration
 /// on the forward polynomial — see [`Self::undistort`].
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+///
+/// # References
+///
+/// - Shupe et al. (2005). *ASP Conf. Ser.* 347: 491. (SIP convention.)
+/// - See the [module-level docs](self) for full citations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PolynomialDistortion {
     /// Polynomial order (2..=6 typically).
     pub order: u32,

@@ -1,3 +1,4 @@
+use crate::error::{Error, Result};
 use std::path::Path;
 
 #[allow(dead_code)]
@@ -13,56 +14,13 @@ pub struct GaiaStar {
     pub pmdec: Option<f32>,
 }
 
-#[allow(dead_code)]
-pub fn read_gaia_csv<P: AsRef<Path>>(file: P) -> anyhow::Result<Vec<GaiaStar>> {
-    let mut rdr = csv::Reader::from_path(file)?;
-    rdr.records()
-        .into_iter()
-        .skip(1)
-        .map(|result| {
-            let record = result?;
-            let source_id: i64 = record.get(0).unwrap_or("").parse().unwrap_or(0);
-            let ra: f32 = record.get(1).unwrap_or("").parse().unwrap_or(0.0);
-            let dec: f32 = record.get(2).unwrap_or("").parse().unwrap_or(0.0);
-            let phot_g_mean_mag: f32 = record.get(3).unwrap_or("").parse().unwrap_or(0.0);
-            let phot_bp_mean_mag: f32 = record.get(4).unwrap_or("").parse().unwrap_or(0.0);
-            let phot_rp_mean_mag: f32 = record.get(5).unwrap_or("").parse().unwrap_or(0.0);
-            let parallax: Option<f32> = match record.get(6) {
-                Some(s) if !s.is_empty() => s.parse().ok(),
-                _ => None,
-            };
-            let pmra: Option<f32> = match record.get(7) {
-                Some(s) if !s.is_empty() => s.parse().ok(),
-                _ => None,
-            };
-            let pmdec: Option<f32> = match record.get(8) {
-                Some(s) if !s.is_empty() => s.parse().ok(),
-                _ => None,
-            };
-
-            Ok(GaiaStar {
-                source_id,
-                ra_deg: ra,
-                dec_deg: dec,
-                phot_g_mean_mag,
-                phot_bp_mean_mag,
-                phot_rp_mean_mag,
-                parallax,
-                pmra,
-                pmdec,
-            })
-        })
-        .collect::<Result<Vec<GaiaStar>, csv::Error>>()
-        .map_err(|e| e.into())
-}
-
 /// Load a Gaia catalog from the binary format.
 ///
 /// Binary format spec:
 /// - Header: magic "GDR3" (4 bytes) + version (u32 LE, value 1) + num_stars (u64 LE)
 /// - Per star (36 bytes): source_id (i64 LE) + ra (f64 LE) + dec (f64 LE) + mag (f32 LE) + pmra (f32 LE) + pmdec (f32 LE)
 #[allow(dead_code)]
-pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>, Box<dyn std::error::Error>> {
+pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(path)?;
@@ -71,13 +29,18 @@ pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>, Box<dy
 
     // Validate magic
     if &header[0..4] != b"GDR3" {
-        return Err("Invalid magic: expected GDR3".into());
+        return Err(Error::InvalidCatalog(
+            "Gaia binary: expected magic 'GDR3'".into(),
+        ));
     }
 
     // Validate version
     let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
     if version != 1 {
-        return Err(format!("Unsupported version: {}, expected 1", version).into());
+        return Err(Error::InvalidCatalog(format!(
+            "Gaia binary: unsupported version {}, expected 1",
+            version
+        )));
     }
 
     let num_stars = u64::from_le_bytes(header[8..16].try_into().unwrap()) as usize;
@@ -112,17 +75,4 @@ pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>, Box<dy
     }
 
     Ok(stars)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore]
-    fn load_gaia_catalog() {
-        let fname = "data/gaia_bright_stars.csv";
-        let stars = read_gaia_csv(fname).expect("Failed to read Gaia catalog file");
-        assert!(!stars.is_empty());
-    }
 }

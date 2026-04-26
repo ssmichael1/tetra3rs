@@ -143,16 +143,15 @@ impl PyCentroid {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = rkyv::from_bytes::<tetra3::Centroid, rkyv::rancor::Error>(data)
+        let inner = postcard::from_bytes::<tetra3::Centroid>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }

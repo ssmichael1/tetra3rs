@@ -15,11 +15,11 @@
 use std::f32::consts::{PI, TAU};
 
 use numeris::Vector3;
-use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::Star;
 
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StarCatalog {
     pub nside: u32,
     pub n_lat: u32,

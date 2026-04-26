@@ -19,6 +19,8 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::distortion::Distortion;
 
 /// Camera intrinsics model.
@@ -26,7 +28,7 @@ use crate::distortion::Distortion;
 /// Encapsulates focal length, sensor dimensions, optical center offset, parity,
 /// and lens distortion into a single struct that maps between pixel and
 /// tangent-plane coordinates.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraModel {
     /// Focal length in pixels: `f = (width/2) / tan(fov/2)`.
     pub focal_length_px: f64,
@@ -112,20 +114,17 @@ impl CameraModel {
         (dx + self.crpix[0], dy + self.crpix[1])
     }
 
-    /// Save the camera model to a file using rkyv.
-    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))?;
+    /// Save the camera model to a file using postcard.
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
+        let bytes = postcard::to_allocvec(self)?;
         std::fs::write(&path, &bytes)?;
         Ok(())
     }
 
-    /// Load a camera model from an rkyv file.
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+    /// Load a camera model from a postcard file.
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let bytes = std::fs::read(&path)?;
-        let cam = rkyv::from_bytes::<Self, rkyv::rancor::Error>(&bytes)
-            .map_err(|e| anyhow::anyhow!("rkyv deserialization failed: {}", e))?;
-        Ok(cam)
+        Ok(postcard::from_bytes::<Self>(&bytes)?)
     }
 }
 
@@ -305,7 +304,7 @@ mod tests {
             distortion: Distortion::Radial(RadialDistortion::new(-0.1, 0.05, 0.0)),
         };
 
-        let tmp = std::env::temp_dir().join("test_camera_model.rkyv");
+        let tmp = std::env::temp_dir().join("test_camera_model.bin");
         cam.save_to_file(&tmp).unwrap();
 
         let loaded = CameraModel::load_from_file(&tmp).unwrap();

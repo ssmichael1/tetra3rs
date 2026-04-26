@@ -1,5 +1,176 @@
 # Changelog
 
+## 0.7.0
+
+### Breaking changes
+
+- **Serialization format changed from rkyv to [postcard](https://docs.rs/postcard).**
+  Existing `.rkyv` databases saved by 0.6.x or earlier will fail to load.
+  Regenerate via `SolverDatabase::generate_from_gaia(...)` (Rust) or
+  `generate_from_gaia(...)` (Python). The same applies to any `.rkyv`
+  `CameraModel` files saved with `CameraModel::save_to_file`. First-use
+  regeneration is automatic for Python users whose databases live in the
+  `gaia-catalog` package cache.
+- **File-extension convention changed from `.rkyv` to `.bin`** in docs and
+  examples. Existing user files keep working under any extension; the
+  rename is cosmetic.
+- **Pickle format changed.** Pickled `tetra3rs` objects (`SolverDatabase`,
+  `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`,
+  `Centroid`, `RadialDistortion`, `PolynomialDistortion`) now round-trip
+  through postcard. Pickles produced by 0.6.x will not unpickle.
+- **`SolverDatabase::pattern_catalog` is now a flat `Vec<PatternEntry>`-backed
+  `PatternCatalog`** — the 0.6.0 sharding workaround for rkyv's 2 GB
+  relative-offset limit is gone (postcard has no such limit). Public
+  access via `.get(idx)` / `.get_mut(idx)` / `.len()` / `.is_empty()` is
+  unchanged; the `PatternCatalog::SHARD_SIZE` constant and the
+  `shards: Vec<Vec<PatternEntry>>` field are removed.
+- **`SolverDatabase::to_rkyv_bytes` renamed to `SolverDatabase::to_bytes`.**
+
+### New features
+
+- **Lighter dependency footprint.** Around 10 crates removed from the build
+  (`rkyv`, `rkyv_derive`, `bytecheck`, `bytecheck_derive`, `munge`,
+  `munge_macro`, `ptr_meta`, `ptr_meta_derive`, `rancor`, `rend`,
+  `simdutf8`) in exchange for 3 (`postcard`, `serde`, `serde_derive`).
+- **Database files are portable.** postcard has a published wire-format
+  spec, so a database written on one platform can be read by any
+  postcard implementation — no longer Rust-locked.
+
+### Other changes
+
+- **`numeris` bumped to 0.5.11** for native serde support
+  (`Matrix<T, M, N>`, `Quaternion<T>`), `imageproc` connected-component
+  labelling, and `optim::least_squares_lm_dyn` (Levenberg-Marquardt on
+  dynamic-size residual vectors — used by the new Brown-Conrady fit).
+  The 0.4 → 0.5 bump was a minor API change at call sites:
+  `Matrix::vecmul(&v)` is now the `*` operator (`m * v`), and
+  `DynMatrix::zeros(rows, cols, fill)` / `DynVector::zeros(n, fill)`
+  lost their fill argument (`zeros(rows, cols)` / `zeros(n)`). All
+  internal call sites are updated.
+- **`csv` dependency dropped.** The Gaia DR3 CSV reader
+  (`catalogs::gaia::read_gaia_csv`) is now a hand-rolled ~30-line parser
+  for the fixed 9-column unquoted schema produced by
+  `scripts/download_gaia_catalog.py`. The CSV path through
+  `SolverDatabase::generate_from_gaia` continues to work as before, just
+  without the `csv`/`csv-core`/`bstr`/`aho-corasick`/`regex-automata`
+  transitive tree.
+- **Latent bug fix in CSV catalog loading.** The previous `csv::Reader`
+  call had a stray `.skip(1)` after the header was already auto-skipped,
+  silently dropping the brightest star from any CSV-loaded Gaia catalog.
+  The new parser only skips the header line, so CSV-loaded catalogs now
+  correctly include all stars. Binary (`.bin`) catalogs were never
+  affected.
+- **Public Rust function `extract_centroids(path, &config)` removed.**
+  This was a 5-line convenience wrapper around `image::open(path)?` +
+  `extract_centroids_from_image(...)`. Removing it lets the `image` dep
+  drop its `jpeg` / `png` / `tiff` format features, killing a sizeable
+  decoder dep tree (`zune-jpeg`, `png`, `tiff`, `fdeflate`, `weezl`,
+  `moxcms`, `byteorder-lite`, `half`, `color_quant`, …). Callers who
+  want file-path convenience should decode the file themselves with
+  whichever `image` feature flags they need, then call
+  [`extract_centroids_from_image`]. The Python
+  `tetra3rs.extract_centroids(numpy_array, ...)` API is unchanged — it
+  goes through `extract_centroids_from_raw` and never used the file path.
+- **Connected-component labelling delegated to
+  [`numeris::imageproc`](https://docs.rs/numeris).** The hand-rolled
+  two-pass union-find in `centroid_extraction.rs` (~110 lines) is
+  replaced by `numeris::imageproc::connected_components_with_label_buffer`,
+  which also supplies per-blob area and bounding box. The
+  `imageproc` feature on numeris is activated only when tetra3's
+  `image` feature is on (`image = ["dep:image", "numeris/imageproc"]`),
+  so non-image users don't pay for it. Intensity-weighted centroiding
+  with per-blob local-background annulus refinement remains in tetra3.
+- **`tracing-subscriber` moved from `[dependencies]` to
+  `[dev-dependencies]`.** Library code emits log events via the
+  lightweight `tracing` macros; configuring a subscriber is the
+  application's job, not the library's. Downstream crates depending on
+  `tetra3` no longer compile `tracing-subscriber` and its ~10
+  transitive crates (`matchers`, `regex-automata`, `regex-syntax`,
+  `nu-ansi-term`, `sharded-slab`, `lazy_static`, `smallvec`,
+  `thread_local`, `tracing-log`).
+- **`anyhow` replaced with a typed `tetra3::Error` enum.** All public
+  functions that previously returned `anyhow::Result<T>` now return
+  `tetra3::Result<T>` (alias for `Result<T, tetra3::Error>`). The
+  `Error` enum has four variants — `Io`, `Postcard`, `InvalidCatalog`,
+  `InvalidInput` — letting callers `match` on specific failure modes
+  instead of receiving an opaque trait object. Implements `Display`,
+  `std::error::Error`, and `From<std::io::Error>` /
+  `From<postcard::Error>`. Built with `thiserror` (already in the dep
+  tree via `postcard → cobs`, so no net dep added). The `anyhow` crate
+  is dropped.
+- **`SolverDatabase::generate_from_star_list` is now infallible** —
+  signature changed from `anyhow::Result<Self>` to `Self`. The function
+  never had any error sources; the `Result` wrapper was vestigial.
+- **CSV catalog input dropped from `generate_from_gaia`.** The function
+  previously branched on file extension / magic bytes between `.csv`
+  and `.bin` paths; the `.csv` branch is gone. Callers must supply a
+  `.bin` Gaia binary catalog (the format the bundled `gaia-catalog`
+  package ships). The `read_gaia_csv` helper and its in-tree CSV
+  parser are removed.
+- **Stale Python `.pyi` stubs cleaned up.** The type stubs previously
+  advertised `SolverDatabase.fit_radial_distortion()` /
+  `.fit_polynomial_distortion()` methods that had no matching PyO3
+  bindings (the stubs had drifted). Removed. The Rust functions
+  `tetra3::distortion::fit::fit_radial_distortion` and
+  `tetra3::distortion::fit::fit_polynomial_distortion` remain
+  available as standalone Rust API.
+- **`calibrate_camera` is now model-agnostic.** It can fit either a SIP
+  polynomial (the existing default) or a full Brown-Conrady distortion
+  model (radial `k1, k2, k3` + tangential `p1, p2`, plus an
+  optical-axis offset `(cx, cy)` jointly fit). Selected via
+  `CalibrateConfig::model: DistortionModelType { Polynomial { order } | Radial }`.
+  Both models go through the same alternating per-image
+  WCS-refinement + global-fit pipeline. Python: pass `model="radial"`
+  (or `"polynomial"`, the default) to
+  `SolverDatabase.calibrate_camera()`.
+  Breaking: the Rust `CalibrateConfig::polynomial_order: u32` field is
+  replaced by `model: DistortionModelType`; callers need to update
+  construction to
+  `CalibrateConfig { model: DistortionModelType::Polynomial { order: 4 }, .. }`.
+- **`RadialDistortion` extended to full Brown-Conrady** — the struct
+  now carries `p1, p2` tangential / decentering coefficients in
+  addition to `k1, k2, k3`. Setting `p1 = p2 = 0` reduces to pure
+  radial Brown-Conrady (the historical default). New constructor
+  `RadialDistortion::with_tangential(k1, k2, k3, p1, p2)`;
+  `RadialDistortion::new(k1, k2, k3)` keeps the same signature and
+  sets `p1 = p2 = 0`. `distort` and `undistort` use the full forward
+  model; the inverse uses 2D Newton iteration on the forward
+  Jacobian. Python `tetra3rs.RadialDistortion(...)` accepts `p1, p2`
+  kwargs and exposes them as properties.
+  Breaking: pickle format changes (struct gained two fields). Rebuild
+  any persisted radial distortion models.
+- **Centered radial fit (`fit_radial_centered_sigma_clip`) uses
+  numeris's nonlinear LS.** The 7-parameter joint fit
+  `(cx, cy, k1, k2, k3, p1, p2)` dispatches to
+  `numeris::optim::least_squares_lm_dyn` (Levenberg-Marquardt on
+  dynamic-size residuals). Replaces ~250 lines of hand-rolled LM
+  (normal equations + accept/reject loop + line search) with closures
+  for residual and Jacobian. Mild regularization on `(cx, cy)` is
+  implemented by augmenting the residual vector with two extra rows
+  (`√μ·cx`, `√μ·cy`) — same cost shape as before, no special LM
+  features needed. The polynomial fit is already a *linear* LS via
+  `DynMatrix::solve_qr` and stays unchanged.
+- **Direct `num-traits` dep removed.** tetra3's own code never used
+  `num_traits`; it was pulled in transitively via `numeris` regardless.
+  Manifest cleanup only.
+
+### Notes on performance
+
+postcard is not zero-copy, so loading a database now does an actual
+deserialization pass instead of validating an archived layout in place.
+In practice this is a non-regression: prior versions also fully
+deserialized via `rkyv::from_bytes` rather than using zero-copy
+`rkyv::access`, so nothing in the existing code path was benefiting from
+zero-copy. If you need true mmap-style loading for very large databases
+in the future, that's a separate change to consider.
+
+### Internal
+
+- `src/rkyv_numeris.rs` removed entirely. With numeris 0.5.10's native
+  serde implementations of `Matrix<T, M, N>` and `Quaternion<T>`,
+  `Option<Matrix2<f32>>` and `Option<Quaternion<f32>>` fields derive
+  `Serialize` / `Deserialize` directly — no adapter shims needed.
+
 ## 0.6.1
 
 ### Fixes

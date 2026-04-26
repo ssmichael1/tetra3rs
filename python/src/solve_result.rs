@@ -276,16 +276,15 @@ impl PySolveResult {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let result = rkyv::from_bytes::<SolveResult, rkyv::rancor::Error>(data)
+        let result = postcard::from_bytes::<SolveResult>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self::from_result(result))
     }

@@ -28,10 +28,9 @@
 //! - **Robust** — statistical verification via binomial false-positive probability
 //! - **Multiscale** — supports a range of field-of-view scales in a single database
 //! - **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
-//! - **Zero-copy deserialization** — databases serialize with [rkyv](https://docs.rs/rkyv)
-//!   for instant loading. The pattern catalog is stored as a sharded
-//!   [`solver::PatternCatalog`] so databases of any size — including wide-FOV-range
-//!   multiscale databases that exceed 2 GB — can be saved and loaded safely.
+//! - **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard)
+//!   in a portable, lightweight binary format with no offset-size limit, so
+//!   wide-FOV-range multiscale databases of any size load cleanly.
 //! - **Centroid extraction** — detect stars from images with local background subtraction,
 //!   connected-component labeling, and quadratic sub-pixel peak refinement (`image` feature)
 //! - **Camera model** — unified [`CameraModel`] struct (focal length, optical center, parity,
@@ -62,8 +61,8 @@
 //! let db = SolverDatabase::generate_from_gaia("data/gaia_merged.bin", &config).unwrap();
 //!
 //! // Save for fast loading later, or load a previously saved database
-//! db.save_to_file("data/my_database.rkyv").unwrap();
-//! let db = SolverDatabase::load_from_file("data/my_database.rkyv").unwrap();
+//! db.save_to_file("data/my_database.bin").unwrap();
+//! let db = SolverDatabase::load_from_file("data/my_database.bin").unwrap();
 //!
 //! // Solve from image centroids (pixel coordinates, origin at image center)
 //! let centroids = vec![
@@ -180,21 +179,22 @@ mod centroid;
 #[cfg(feature = "image")]
 pub mod centroid_extraction;
 pub mod distortion;
-pub mod rkyv_numeris;
+pub mod error;
 pub mod solver;
 pub mod star;
 pub mod starcatalog;
 
 pub use camera_model::CameraModel;
 pub use centroid::*;
+pub use error::{Error, Result};
 #[cfg(feature = "image")]
 pub use centroid_extraction::{
-    extract_centroids, extract_centroids_from_image, extract_centroids_from_raw,
-    CentroidExtractionConfig, CentroidExtractionResult,
+    extract_centroids_from_image, extract_centroids_from_raw, CentroidExtractionConfig,
+    CentroidExtractionResult,
 };
 pub use distortion::{
-    calibrate_camera, CalibrateConfig, CalibrateResult, Distortion, PolynomialDistortion,
-    RadialDistortion,
+    calibrate_camera, CalibrateConfig, CalibrateResult, Distortion, DistortionModelType,
+    PolynomialDistortion, RadialDistortion,
 };
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,

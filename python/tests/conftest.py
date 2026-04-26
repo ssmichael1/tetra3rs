@@ -257,7 +257,7 @@ def gaia_catalog_path():
 @pytest.fixture(scope="session")
 def skyview_db(gaia_catalog_path):
     """Load (or generate and cache) a database suitable for 10deg SkyView images."""
-    cache_path = os.path.join(DATA_DIR, "test_skyview_db.rkyv")
+    cache_path = os.path.join(DATA_DIR, "test_skyview_db.bin")
     if os.path.exists(cache_path):
         return tetra3rs.SolverDatabase.load_from_file(cache_path)
     db = tetra3rs.SolverDatabase.generate_from_gaia(
@@ -308,7 +308,7 @@ TESS_SECTORS = [1, 2, 3, 4, 5, 6, 13, 14, 15, 17]
 @pytest.fixture(scope="session")
 def tess_db(gaia_catalog_path):
     """Load (or generate and cache) a database suitable for TESS ~12deg FOV images."""
-    cache_path = os.path.join(DATA_DIR, "test_tess_db.rkyv")
+    cache_path = os.path.join(DATA_DIR, "test_tess_db.bin")
     if os.path.exists(cache_path):
         return tetra3rs.SolverDatabase.load_from_file(cache_path)
     db = tetra3rs.SolverDatabase.generate_from_gaia(

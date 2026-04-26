@@ -18,11 +18,10 @@ pub mod solve;
 pub mod track;
 pub mod wcs_refine;
 
-use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::camera_model::CameraModel;
 use crate::distortion::Distortion;
-use crate::rkyv_numeris::AsQuatArray;
 use crate::{Quaternion, StarCatalog};
 
 // ── Pattern hash table entry ────────────────────────────────────────────────
@@ -31,7 +30,7 @@ use crate::{Quaternion, StarCatalog};
 ///
 /// Packing star indices, largest-edge angle, and key hash into one struct
 /// means a single cache-line fetch per quadratic-probe step instead of three.
-#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct PatternEntry {
     /// Indices into the star catalog for the 4 stars in this pattern.
@@ -71,81 +70,47 @@ impl PatternEntry {
     }
 }
 
-// ── Pattern catalog (sharded hash table) ────────────────────────────────────
+// ── Pattern catalog (flat hash table) ───────────────────────────────────────
 
-/// Pattern hash table with sharded backing storage.
+/// Pattern hash table backed by a single flat `Vec<PatternEntry>`.
 ///
-/// The table is logically one flat array of [`PatternEntry`] slots addressed
-/// by index `0..total_len`, but physically split into shards of up to
-/// [`Self::SHARD_SIZE`] entries each.
-///
-/// **Why shards?** rkyv 0.8's default archive format uses 32-bit relative
-/// offsets (2 GB range). A single `Vec<PatternEntry>` holding ≥90 M entries
-/// (~2.2 GB at 24 B/entry) overflows that offset during serialization,
-/// causing databases covering wide FOV ranges (e.g. 0.5°–5°) to crash in
-/// `save_to_file`. Splitting the storage into shards means each shard
-/// serializes as an independent region with its own in-range offset, letting
-/// the aggregate table grow to any size while keeping the default rkyv ABI.
-///
-/// Probe logic is unchanged in spirit — `idx / SHARD_SIZE` picks the shard,
-/// `idx % SHARD_SIZE` picks the slot within. The outer `Vec<Vec<...>>` is a
-/// few pointers and stays permanently in L1 cache, so the extra indirection
-/// is measurement-noise.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+/// Open addressing with quadratic probing; empty slots have
+/// `star_indices == [0, 0, 0, 0]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternCatalog {
-    /// Total number of entries (sum of all shard lengths).
-    pub total_len: u64,
-    /// Shards. Every shard except possibly the last is exactly
-    /// [`Self::SHARD_SIZE`] entries long; the last shard holds the remainder.
-    pub shards: Vec<Vec<PatternEntry>>,
+    pub entries: Vec<PatternEntry>,
 }
 
 impl PatternCatalog {
-    /// Entries per shard. Chosen so each shard is ~770 MB (32 M × 24 B),
-    /// well under rkyv's 2 GB offset limit. A power of two so the per-probe
-    /// division and modulo compile to shift + mask.
-    pub const SHARD_SIZE: usize = 1 << 25; // 33 554 432
-
     /// Allocate a catalog of `capacity` empty entries.
     pub fn with_capacity(capacity: usize) -> Self {
-        let n_full = capacity / Self::SHARD_SIZE;
-        let remainder = capacity % Self::SHARD_SIZE;
-        let mut shards = Vec::with_capacity(n_full + usize::from(remainder > 0));
-        for _ in 0..n_full {
-            shards.push(vec![PatternEntry::EMPTY; Self::SHARD_SIZE]);
-        }
-        if remainder > 0 {
-            shards.push(vec![PatternEntry::EMPTY; remainder]);
-        }
         Self {
-            total_len: capacity as u64,
-            shards,
+            entries: vec![PatternEntry::EMPTY; capacity],
         }
     }
 
-    /// Total number of slots (equal to the `capacity` passed to
-    /// [`Self::with_capacity`]).
+    /// Total number of slots.
     #[inline]
     pub fn len(&self) -> usize {
-        self.total_len as usize
+        self.entries.len()
     }
 
     /// Returns `true` if the catalog has no slots.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.total_len == 0
+        self.entries.is_empty()
     }
 
     /// Immutable access to slot `idx`. Panics if `idx >= len()`.
     #[inline]
     pub fn get(&self, idx: usize) -> &PatternEntry {
-        &self.shards[idx / Self::SHARD_SIZE][idx % Self::SHARD_SIZE]
+        &self.entries[idx]
     }
 
     /// Mutable access to slot `idx`. Panics if `idx >= len()`.
     #[inline]
     pub fn get_mut(&mut self, idx: usize) -> &mut PatternEntry {
-        &mut self.shards[idx / Self::SHARD_SIZE][idx % Self::SHARD_SIZE]
+        &mut self.entries[idx]
     }
 }
 
@@ -154,11 +119,9 @@ mod pattern_catalog_tests {
     use super::*;
 
     #[test]
-    fn small_catalog_single_shard() {
+    fn small_catalog() {
         let mut cat = PatternCatalog::with_capacity(100);
         assert_eq!(cat.len(), 100);
-        assert_eq!(cat.shards.len(), 1);
-        assert_eq!(cat.shards[0].len(), 100);
 
         *cat.get_mut(42) = PatternEntry::new([1, 2, 3, 4], 0.5, 0xabcd);
         let e = cat.get(42);
@@ -173,18 +136,17 @@ mod pattern_catalog_tests {
         let cat = PatternCatalog::with_capacity(0);
         assert_eq!(cat.len(), 0);
         assert!(cat.is_empty());
-        assert_eq!(cat.shards.len(), 0);
     }
 
     #[test]
-    fn rkyv_roundtrip_small() {
+    fn postcard_roundtrip_small() {
         let mut cat = PatternCatalog::with_capacity(1024);
         *cat.get_mut(0) = PatternEntry::new([10, 20, 30, 40], 0.1, 0x1111);
         *cat.get_mut(1023) = PatternEntry::new([1, 2, 3, 4], 0.9, 0xffff);
 
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cat).expect("serialize");
+        let bytes = postcard::to_allocvec(&cat).expect("serialize");
         let restored: PatternCatalog =
-            rkyv::from_bytes::<PatternCatalog, rkyv::rancor::Error>(&bytes).expect("deserialize");
+            postcard::from_bytes(&bytes).expect("deserialize");
 
         assert_eq!(restored.len(), 1024);
         assert_eq!(restored.get(0).star_indices, [10, 20, 30, 40]);
@@ -196,7 +158,7 @@ mod pattern_catalog_tests {
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
 
 /// Outcome of a plate-solve attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SolveStatus {
     /// A valid match was found.
     MatchFound,
@@ -211,7 +173,7 @@ pub enum SolveStatus {
 // ── Database properties ─────────────────────────────────────────────────────
 
 /// Metadata describing how a solver database was built.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseProperties {
     /// Number of quantization bins per edge-ratio dimension.
     /// Computed as round(0.25 / pattern_max_error).
@@ -240,11 +202,11 @@ pub struct DatabaseProperties {
 
 // ── The solver database ─────────────────────────────────────────────────────
 
-/// Complete solver database, serializable with rkyv.
+/// Complete solver database, serializable with postcard.
 ///
 /// Contains a spatial star catalog (brightness-sorted), precomputed unit vectors,
 /// and a pattern hash table for fast geometric matching.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolverDatabase {
     /// Spatial star catalog. Stars are sorted brightest-first so that
     /// index order equals brightness order.
@@ -258,7 +220,6 @@ pub struct SolverDatabase {
     pub star_catalog_ids: Vec<i64>,
 
     /// Pattern hash table (open addressing, quadratic probing).
-    /// Sharded for rkyv compatibility — see [`PatternCatalog`].
     /// Each slot packs the 4 star indices, largest edge angle, and a 16-bit
     /// key hash prefilter into a single cache-friendly struct. Empty slots
     /// have `star_indices == [0, 0, 0, 0]`.
@@ -460,12 +421,11 @@ impl SolveConfig {
 // ── Solve result ────────────────────────────────────────────────────────────
 
 /// Result of a plate-solve attempt.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveResult {
     /// Quaternion rotating ICRS vectors to camera-frame vectors.
     /// Camera frame: +X right, +Y down, +Z boresight.
     /// Usage: `camera_vec = qicrs2cam * icrs_vec`
-    #[rkyv(with = rkyv::with::Map<AsQuatArray>)]
     pub qicrs2cam: Option<Quaternion>,
     /// Estimated field of view (radians).
     pub fov_rad: Option<f32>,

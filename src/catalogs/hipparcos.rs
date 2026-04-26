@@ -78,7 +78,7 @@ pub fn load_hipparcos_catalog(data: &str) -> Vec<HipparcosStar> {
 
 pub fn load_hipparcos_catalog_from_file<P: AsRef<std::path::Path>>(
     path: P,
-) -> anyhow::Result<Vec<HipparcosStar>> {
+) -> crate::Result<Vec<HipparcosStar>> {
     let data = std::fs::read_to_string(path)?;
     Ok(load_hipparcos_catalog(&data))
 }

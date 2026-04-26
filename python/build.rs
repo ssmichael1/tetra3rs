@@ -1,32 +1,33 @@
 fn main() {
     pyo3_build_config::add_extension_module_link_args();
 
-    // Embed git hash at compile time (falls back to "unknown" for sdist builds)
-    let git_hash = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+    // Embed git hash + dirty flag at compile time. Falls back to "unknown"
+    // for sdist builds (no .git directory available).
+    let hash = run_git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    let dirty = run_git(&["status", "--porcelain"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let revision = if dirty {
+        format!("{hash}-dirty")
+    } else {
+        hash
+    };
 
-    println!("cargo:rustc-env=TETRA3RS_GIT_HASH={git_hash}");
+    println!("cargo:rustc-env=TETRA3RS_GIT_HASH={revision}");
 
-    // Re-run if HEAD changes (new commit)
-    if let Ok(git_dir) = std::process::Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-    {
-        if git_dir.status.success() {
-            if let Ok(path) = String::from_utf8(git_dir.stdout) {
-                let head = format!("{}/HEAD", path.trim());
-                println!("cargo:rerun-if-changed={head}");
-            }
-        }
+    // Re-run when HEAD changes (new commits, branch switches) and when the
+    // index changes (staging — covers most edits that affect the dirty
+    // flag without requiring a full re-run on every working-tree write).
+    if let Some(git_dir) = run_git(&["rev-parse", "--git-dir"]) {
+        println!("cargo:rerun-if-changed={git_dir}/HEAD");
+        println!("cargo:rerun-if-changed={git_dir}/index");
     }
+}
+
+fn run_git(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8(output.stdout).ok()?.trim().to_string())
 }

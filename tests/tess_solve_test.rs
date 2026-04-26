@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use tetra3::{
-    CalibrateConfig, CentroidExtractionConfig, GenerateDatabaseConfig, SolveConfig, SolveStatus,
-    SolverDatabase,
+    CalibrateConfig, CentroidExtractionConfig, DistortionModelType, GenerateDatabaseConfig,
+    SolveConfig, SolveStatus, SolverDatabase,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -678,7 +678,7 @@ fn test_tess_distortion_fit_and_center_accuracy() {
             sci_width,
             sci_height,
             &CalibrateConfig {
-                polynomial_order: 4,
+                model: DistortionModelType::Polynomial { order: 4 },
                 ..CalibrateConfig::default()
             },
         );
@@ -1012,7 +1012,9 @@ fn test_tess_multi_image_calibration() {
             sci_width,
             sci_height,
             &CalibrateConfig {
-                polynomial_order: pcfg.calibration_order,
+                model: DistortionModelType::Polynomial {
+                    order: pcfg.calibration_order,
+                },
                 ..CalibrateConfig::default()
             },
         );

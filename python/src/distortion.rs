@@ -18,13 +18,36 @@ pub(crate) fn extract_distortion(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<Disto
     }
 }
 
-/// Radial lens distortion model: r_d = r × (1 + k1·r² + k2·r⁴ + k3·r⁶).
+/// Brown-Conrady radial+tangential distortion model.
 ///
-/// Coordinates are in pixels relative to the optical center (image center).
+/// ```text
+/// x_d = x · (1 + k1·r² + k2·r⁴ + k3·r⁶) + 2·p1·x·y + p2·(r² + 2·x²)
+/// y_d = y · (1 + k1·r² + k2·r⁴ + k3·r⁶) + p1·(r² + 2·y²) + 2·p2·x·y
+/// ```
+///
+/// Coordinates are in pixels relative to the optical center (image center
+/// minus CRPIX). Tangential coefficients ``p1, p2`` default to 0 — set them
+/// to model lens decentering, sensor tilt, or off-axis CCD placement.
 ///
 /// Example:
 ///     d = tetra3rs.RadialDistortion(k1=-7e-9, k2=2e-15)
+///     d = tetra3rs.RadialDistortion(k1=-7e-9, p1=5e-7, p2=-3e-7)
 ///     x_undistorted, y_undistorted = d.undistort(100.0, 200.0)
+///
+/// References:
+///   * Conrady, A. E. (1919). "Decentred Lens-Systems."
+///     *Monthly Notices of the Royal Astronomical Society*, 79(5): 384-390.
+///     — Original derivation of the tangential / decentering form.
+///     https://doi.org/10.1093/mnras/79.5.384
+///   * Brown, D. C. (1966). "Decentering Distortion of Lenses."
+///     *Photogrammetric Engineering*, 32(3): 444-462. — Modernized form.
+///   * Brown, D. C. (1971). "Close-Range Camera Calibration."
+///     *Photogrammetric Engineering*, 37(8): 855-866. — Calibration procedure.
+///   * Zhang, Z. (2000). "A Flexible New Technique for Camera Calibration."
+///     *IEEE TPAMI*, 22(11): 1330-1334. — Multi-image planar calibration.
+///     https://doi.org/10.1109/34.888718
+///   * OpenCV documentation for the equivalent ``(k1, k2, k3, p1, p2)``
+///     formulation: https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html
 #[pyclass(name = "RadialDistortion", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyRadialDistortion {
@@ -33,17 +56,19 @@ pub(crate) struct PyRadialDistortion {
 
 #[pymethods]
 impl PyRadialDistortion {
-    /// Create a radial distortion model.
+    /// Create a Brown-Conrady distortion model.
     ///
     /// Args:
     ///     k1: First radial coefficient (barrel < 0, pincushion > 0). Default 0.
     ///     k2: Second radial coefficient. Default 0.
     ///     k3: Third radial coefficient. Default 0.
+    ///     p1: First tangential / decentering coefficient. Default 0.
+    ///     p2: Second tangential / decentering coefficient. Default 0.
     #[new]
-    #[pyo3(signature = (k1 = 0.0, k2 = 0.0, k3 = 0.0))]
-    fn new(k1: f64, k2: f64, k3: f64) -> Self {
+    #[pyo3(signature = (k1 = 0.0, k2 = 0.0, k3 = 0.0, p1 = 0.0, p2 = 0.0))]
+    fn new(k1: f64, k2: f64, k3: f64, p1: f64, p2: f64) -> Self {
         Self {
-            inner: RadialDistortion::new(k1, k2, k3),
+            inner: RadialDistortion::with_tangential(k1, k2, k3, p1, p2),
         }
     }
 
@@ -62,6 +87,16 @@ impl PyRadialDistortion {
         self.inner.k3
     }
 
+    #[getter]
+    fn p1(&self) -> f64 {
+        self.inner.p1
+    }
+
+    #[getter]
+    fn p2(&self) -> f64 {
+        self.inner.p2
+    }
+
     /// Forward distortion: ideal → distorted.
     fn distort(&self, x: f64, y: f64) -> (f64, f64) {
         self.inner.distort(x, y)
@@ -74,25 +109,31 @@ impl PyRadialDistortion {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = rkyv::from_bytes::<RadialDistortion, rkyv::rancor::Error>(data)
+        let inner = postcard::from_bytes::<RadialDistortion>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e})",
-            self.inner.k1, self.inner.k2, self.inner.k3
-        )
+        if self.inner.p1 == 0.0 && self.inner.p2 == 0.0 {
+            format!(
+                "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e})",
+                self.inner.k1, self.inner.k2, self.inner.k3
+            )
+        } else {
+            format!(
+                "RadialDistortion(k1={:.3e}, k2={:.3e}, k3={:.3e}, p1={:.3e}, p2={:.3e})",
+                self.inner.k1, self.inner.k2, self.inner.k3, self.inner.p1, self.inner.p2
+            )
+        }
     }
 }
 
@@ -106,7 +147,19 @@ impl PyRadialDistortion {
 /// This model captures radial, tangential, and cross-term distortion — suitable
 /// for cameras where the optical center is offset from the CCD center (e.g. TESS).
 ///
-/// Typically fitted from solve results via ``SolverDatabase.fit_polynomial_distortion()``.
+/// Typically produced by ``SolverDatabase.calibrate_camera()`` (the fitted polynomial
+/// is returned as part of the camera model's ``distortion`` field), or constructed
+/// directly from coefficient arrays.
+///
+/// References:
+///   * Shupe, D. L.; Moshir, M.; Li, J.; Makovoz, D.; Narron, R.;
+///     Hook, R. N. (2005). "The SIP Convention for Representing Distortion
+///     in FITS Image Headers." *Astronomical Data Analysis Software and
+///     Systems XIV*, ASP Conference Series, 347: 491. — Original SIP
+///     specification.
+///     https://www.adass.org/adass/proceedings/adass04/reprints/P3-1-3.pdf
+///   * FITS WCS SIP convention registry entry:
+///     https://fits.gsfc.nasa.gov/registry/sip.html
 #[pyclass(name = "PolynomialDistortion", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyPolynomialDistortion {
@@ -203,16 +256,15 @@ impl PyPolynomialDistortion {
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
         let inner = &slf.borrow().inner;
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-            .to_vec();
+        let bytes = postcard::to_allocvec(inner)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = rkyv::from_bytes::<PolynomialDistortion, rkyv::rancor::Error>(data)
+        let inner = postcard::from_bytes::<PolynomialDistortion>(data)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
