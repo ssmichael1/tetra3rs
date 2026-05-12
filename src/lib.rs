@@ -47,6 +47,23 @@
 //!   Images (~12° FOV, significant optical distortion). Multi-image calibration across
 //!   10 TESS sectors achieves sub-arcsec agreement with FITS WCS solutions
 //!
+//! ## Star catalog
+//!
+//! Solving requires a merged Gaia DR3 + Hipparcos catalog (`gaia_merged.bin`).
+//! A pre-built G < 10 catalog (~17 MB) is hosted at
+//! `https://storage.googleapis.com/tetra3rs-testvecs/gaia_merged.bin`. For
+//! custom magnitude limits, two scripts in `scripts/` produce byte-compatible
+//! output:
+//!
+//! - `download_gaia_catalog.py` — ESA TAP server (canonical Gaia source;
+//!   capped at G ≈ 11.5 by the server's 3,000,000-row anonymous output limit)
+//! - `download_gaia_flatiron.py` — Flatiron Institute flathub (full Gaia DR3,
+//!   needed for G > 11.5)
+//!
+//! Both merge in Hipparcos 2 bright stars (G < 4) where Gaia saturates. See
+//! the [Star Catalog docs](https://tetra3rs.dev/getting-started/catalog/) for
+//! setup details.
+//!
 //! ## Example
 //!
 //! ```no_run

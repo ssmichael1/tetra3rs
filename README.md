@@ -94,14 +94,19 @@ tetra3rs uses a merged Gaia DR3 + Hipparcos catalog. The merged catalog uses Gai
 
 **Python:** The catalog is bundled in the [`gaia-catalog`](https://pypi.org/project/gaia-catalog/) package (installed automatically with `tetra3rs`). No manual download needed — just call `generate_from_gaia()` with no arguments.
 
-**Rust:** Download the pre-built binary catalog:
+**Rust:** Download the pre-built binary catalog (G < 10, ~17 MB):
 
 ```sh
 mkdir -p data
 curl -o data/gaia_merged.bin "https://storage.googleapis.com/tetra3rs-testvecs/gaia_merged.bin"
 ```
 
-Or generate your own with a custom magnitude limit using `scripts/download_gaia_catalog.py`.
+Or generate your own with a custom magnitude limit. Two scripts live in `scripts/`:
+
+- `download_gaia_catalog.py` — ESA Gaia Archive TAP server. Canonical Gaia source, but the server enforces a hard 3,000,000-row output limit per async job for anonymous users, so bulk queries top out at G ≈ 11.5.
+- `download_gaia_flatiron.py` — Flatiron Institute's [flathub](https://github.com/flatironinstitute/flathub) service. Serves the full Gaia DR3 catalog without the faint-end cap; use this if you need G > 11.5. flathub is not on PyPI — install it from the upstream repo.
+
+Both produce byte-compatible output and share the Hipparcos bright-star merge. See the [Star Catalog](https://tetra3rs.dev/getting-started/catalog/) docs page for setup, CLI flags, and the on-disk format.
 
 ### Example
 
@@ -285,10 +290,6 @@ The test suite includes:
 ```sh
 cargo test --test tess_solve_test --features image -- --nocapture
 ```
-
-## Roadmap (not in order)
-
-- **Deeper Gaia catalog** — support fainter limiting magnitudes for narrow-FOV cameras
 
 ## Credits
 

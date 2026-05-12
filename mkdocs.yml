@@ -81,6 +81,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - Installation: getting-started/installation.md
+      - Star Catalog: getting-started/catalog.md
       - Quick Start: getting-started/quickstart.md
   - Concepts:
       - Algorithm Overview: concepts/algorithm.md
