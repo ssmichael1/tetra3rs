@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **Faint-magnitude Gaia downloads via Flatiron flathub (issue #30).**
+  New script `scripts/download_gaia_flatiron.py` queries the Flatiron
+  Institute's [flathub](https://flathub.flatironinstitute.org/) service
+  to pull Gaia DR3 past G ≈ 11.5. ESA TAP's anonymous async output is
+  capped at a hard 3,000,000 rows per job (server-side, advertised in
+  `/capabilities`), so the existing `scripts/download_gaia_catalog.py`
+  effectively tops out at G ≈ 11.5 (G < 12 is 3.09M rows, just over the
+  cap). flathub has no such cap and serves the full Gaia DR3 catalog.
+  Both scripts share the Hipparcos-2 bright-star merge and produce
+  byte-compatible `.bin` / `.csv` output, so the new downloader is a
+  drop-in when fainter limits are needed. flathub is not on PyPI —
+  install from the [upstream repo](https://github.com/flatironinstitute/flathub/tree/prod/py).
+
+### Other
+
+- New [Star Catalog](https://tetra3rs.dev/getting-started/catalog/)
+  documentation page covering the pre-built download, both `scripts/`
+  downloaders (including the ESA TAP 3M-row cap and account-registration
+  workaround), the Hipparcos bright-star merge, and the on-disk format.
+  Signposted from the README, the installation page, and the `tetra3`
+  crate top-level doc.
+
 ## 0.7.1
 
 ### New features
