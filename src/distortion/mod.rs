@@ -19,18 +19,18 @@
 //!
 //! 2. **Fitted** from one or more solve results — either through
 //!    [`calibrate_camera`] (which fits a SIP polynomial model and returns a
-//!    fully-populated [`CameraModel`]) or directly via
-//!    [`fit::fit_radial_distortion`] for the simpler `(k1, k2, k3)` model.
+//!    fully-populated [`CameraModel`]) or directly via the internal radial
+//!    fitter for the simpler `(k1, k2, k3)` model.
 //!    Both fitters use iterative robust sigma-clipping to reject
 //!    mismatched stars.
 
-pub mod calibrate;
-pub mod fit;
-pub mod polynomial;
-pub mod radial;
+pub(crate) mod calibrate;
+pub(crate) mod fit;
+pub(crate) mod polynomial;
+pub(crate) mod radial;
 
 pub use calibrate::{calibrate_camera, CalibrateConfig, CalibrateResult, DistortionModelType};
-pub use polynomial::PolynomialDistortion;
+pub use polynomial::{num_coeffs, PolynomialDistortion};
 pub use radial::RadialDistortion;
 
 /// Lens distortion model.

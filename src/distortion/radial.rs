@@ -45,7 +45,7 @@
 /// - Conrady, A. E. (1919). *MNRAS* 79: 384.
 /// - Brown, D. C. (1966). *Photogrammetric Engineering* 32: 444.
 /// - Zhang, Z. (2000). *IEEE TPAMI* 22(11): 1330.
-/// - See the [module-level docs](self) for full citations.
+/// - See the [`distortion` module docs](crate::distortion) for full citations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RadialDistortion {
     /// First radial coefficient (barrel < 0, pincushion > 0).
@@ -158,15 +158,6 @@ impl RadialDistortion {
             }
         }
         (x, y)
-    }
-
-    /// Returns `true` if all coefficients are zero (no distortion).
-    pub fn is_zero(&self) -> bool {
-        self.k1 == 0.0
-            && self.k2 == 0.0
-            && self.k3 == 0.0
-            && self.p1 == 0.0
-            && self.p2 == 0.0
     }
 }
 

@@ -193,8 +193,8 @@ pub use centroid_extraction::{
     CentroidExtractionResult,
 };
 pub use distortion::{
-    calibrate_camera, CalibrateConfig, CalibrateResult, Distortion, DistortionModelType,
-    PolynomialDistortion, RadialDistortion,
+    calibrate_camera, num_coeffs, CalibrateConfig, CalibrateResult, Distortion,
+    DistortionModelType, PolynomialDistortion, RadialDistortion,
 };
 pub use solver::{
     DatabaseProperties, GenerateDatabaseConfig, SolveConfig, SolveResult, SolveStatus,

@@ -222,7 +222,11 @@ impl SolverDatabase {
                     star_vectors[star_ind][1],
                     star_vectors[star_ind][2],
                 ]);
-                let nearby = star_catalog.query_indices_from_uvec(dir, pattern_stars_separation);
+                let nearby = star_catalog.query_indices_from_uvec_cached(
+                    dir,
+                    pattern_stars_separation,
+                    &star_vectors,
+                );
                 let occupied = nearby.iter().any(|&idx| keep_for_patterns[idx]);
                 if !occupied {
                     keep_for_patterns[star_ind] = true;
@@ -246,7 +250,8 @@ impl SolverDatabase {
             for center in &lattice_points {
                 // Find pattern stars within this lattice field
                 let center_v = numeris::Vector3::from_array([center[0], center[1], center[2]]);
-                let field_stars_all = star_catalog.query_indices_from_uvec(center_v, fov_angle);
+                let field_stars_all =
+                    star_catalog.query_indices_from_uvec_cached(center_v, fov_angle, &star_vectors);
 
                 // Keep only pattern-eligible stars, in brightness order
                 let field_pattern_stars: Vec<usize> = field_stars_all

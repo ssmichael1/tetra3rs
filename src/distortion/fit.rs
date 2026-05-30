@@ -70,10 +70,6 @@ pub struct DistortionFitResult {
     pub n_outliers: usize,
     /// Number of sigma-clip iterations performed.
     pub iterations: u32,
-    /// Per-match inlier mask (true = inlier, false = outlier).
-    /// Matches are ordered as they appear across all solve results
-    /// (solve_results\[0\] matches first, then \[1\], etc.).
-    pub inlier_mask: Vec<bool>,
 }
 
 // ── Data structures for internal use ────────────────────────────────────────
@@ -137,7 +133,6 @@ pub fn fit_radial_distortion(
             n_inliers: 0,
             n_outliers: 0,
             iterations: 0,
-            inlier_mask: Vec::new(),
         };
     }
 
@@ -175,7 +170,6 @@ pub fn fit_radial_distortion(
         n_inliers,
         n_outliers: n - n_inliers,
         iterations: fit.iterations,
-        inlier_mask: fit.mask,
     }
 }
 
@@ -270,11 +264,7 @@ pub(super) fn fit_radial_centered_sigma_clip(
         if inlier_resids.is_empty() {
             break;
         }
-        let median = percentile(&inlier_resids, 0.5);
-        let mut abs_devs: Vec<f64> = inlier_resids.iter().map(|&r| (r - median).abs()).collect();
-        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mad = percentile(&abs_devs, 0.5);
-        let sigma = mad * 1.4826;
+        let sigma = mad_sigma(&inlier_resids);
         if sigma < 1e-12 {
             break;
         }
@@ -468,7 +458,7 @@ fn centered_radial_residuals(
 /// Like [`compute_corrected_rmse`] but applies an optional crpix shift
 /// before the distortion model evaluates. Used for centered radial where
 /// the model is anchored at `(cx, cy)` rather than the geometric origin.
-fn compute_corrected_rmse_centered(
+pub(super) fn compute_corrected_rmse_centered(
     points: &[MatchedPoint],
     mask: &[bool],
     distortion: &Distortion,
@@ -563,6 +553,40 @@ pub(super) struct PolyFitResult {
     pub iterations: u32,
 }
 
+/// Per-point radial residual (in pixels) of the forward SIP polynomial model.
+///
+/// For each matched point: evaluate the forward polynomial at the normalized
+/// ideal coordinates `(u, v) = (x_ideal, y_ideal) / scale`, then return the
+/// Euclidean distance between the observed offset and the modeled offset.
+fn poly_point_residuals(
+    points: &[MatchedPoint],
+    pairs: &[(u32, u32)],
+    scale: f64,
+    a_coeffs: &[f64],
+    b_coeffs: &[f64],
+) -> Vec<f64> {
+    points
+        .iter()
+        .map(|p| {
+            let u = p.x_ideal / scale;
+            let v = p.y_ideal / scale;
+            let dx_model: f64 = pairs
+                .iter()
+                .enumerate()
+                .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
+                .sum();
+            let dy_model: f64 = pairs
+                .iter()
+                .enumerate()
+                .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
+                .sum();
+            let rx = p.x_obs - p.x_ideal - dx_model * scale;
+            let ry = p.y_obs - p.y_ideal - dy_model * scale;
+            (rx * rx + ry * ry).sqrt()
+        })
+        .collect()
+}
+
 /// Fit a polynomial distortion model with iterative sigma-clipping.
 ///
 /// This is the core fitting loop extracted for reuse by multi-image calibration.
@@ -596,26 +620,7 @@ pub(super) fn fit_polynomial_sigma_clip(
         iterations = iter + 1;
 
         // Compute residuals using current model
-        let residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let u = p.x_ideal / scale;
-                let v = p.y_ideal / scale;
-                let dx_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let dy_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let rx = p.x_obs - p.x_ideal - dx_model * scale;
-                let ry = p.y_obs - p.y_ideal - dy_model * scale;
-                (rx * rx + ry * ry).sqrt()
-            })
-            .collect();
+        let residuals = poly_point_residuals(points, &pairs, scale, &a_coeffs, &b_coeffs);
 
         // MAD-based robust clipping
         let inlier_resids: Vec<f64> = residuals
@@ -629,11 +634,7 @@ pub(super) fn fit_polynomial_sigma_clip(
             break;
         }
 
-        let median = percentile(&inlier_resids, 0.5);
-        let mut abs_devs: Vec<f64> = inlier_resids.iter().map(|&r| (r - median).abs()).collect();
-        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mad = percentile(&abs_devs, 0.5);
-        let sigma = mad * 1.4826;
+        let sigma = mad_sigma(&inlier_resids);
 
         if sigma < 1e-12 {
             break;
@@ -663,26 +664,7 @@ pub(super) fn fit_polynomial_sigma_clip(
 
     // Stage 2: recover outliers below a threshold
     if let Some(threshold_px) = config.stage2_threshold_px {
-        let residuals: Vec<f64> = points
-            .iter()
-            .map(|p| {
-                let u = p.x_ideal / scale;
-                let v = p.y_ideal / scale;
-                let dx_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| a_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let dy_model: f64 = pairs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &(pp, qq))| b_coeffs[i] * u.powi(pp as i32) * v.powi(qq as i32))
-                    .sum();
-                let rx = p.x_obs - p.x_ideal - dx_model * scale;
-                let ry = p.y_obs - p.y_ideal - dy_model * scale;
-                (rx * rx + ry * ry).sqrt()
-            })
-            .collect();
+        let residuals = poly_point_residuals(points, &pairs, scale, &a_coeffs, &b_coeffs);
 
         let mask_s2: Vec<bool> = residuals.iter().map(|&r| r <= threshold_px).collect();
         let n_recovered = mask_s2
@@ -766,7 +748,6 @@ pub fn fit_polynomial_distortion(
             n_inliers: 0,
             n_outliers: 0,
             iterations: 0,
-            inlier_mask: Vec::new(),
         };
     }
 
@@ -789,7 +770,6 @@ pub fn fit_polynomial_distortion(
             n_inliers: n,
             n_outliers: 0,
             iterations: 0,
-            inlier_mask: vec![true; n],
         };
     }
 
@@ -819,7 +799,6 @@ pub fn fit_polynomial_distortion(
         n_inliers,
         n_outliers: n - n_inliers,
         iterations: fit.iterations,
-        inlier_mask: fit.mask,
     }
 }
 
@@ -882,30 +861,48 @@ fn gather_matched_points(
             };
 
             let sv = &database.star_vectors[star_idx];
-            let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
-            let cam_v = rot * icrs_v;
-
-            if cam_v[2] <= 0.0 {
-                continue;
-            }
-
-            // Project to pixel coordinates
-            let x_ideal = parity_sign * (cam_v[0] as f64) / (cam_v[2] as f64) / (pixel_scale as f64);
-            let y_ideal = (cam_v[1] as f64) / (cam_v[2] as f64) / (pixel_scale as f64);
-
             let x_obs = cents[cent_idx].x as f64;
             let y_obs = cents[cent_idx].y as f64;
-
-            points.push(MatchedPoint {
-                x_obs,
-                y_obs,
-                x_ideal,
-                y_ideal,
-            });
+            if let Some(mp) =
+                project_to_matched_point(rot, sv, parity_sign, pixel_scale as f64, x_obs, y_obs)
+            {
+                points.push(mp);
+            }
         }
     }
 
     points
+}
+
+/// Project a catalog star (ICRS unit vector `sv`) through `rot` into ideal
+/// pinhole pixel coordinates and pair it with an observed centroid `(x_obs,
+/// y_obs)`.
+///
+/// Returns `None` when the star projects behind the camera (`cam_z ≤ 0`).
+/// `parity_sign` is `-1.0` when the image x-axis is flipped; `pixel_scale` is
+/// radians per pixel (`1/focal_length_px`). Shared by the single-image gather
+/// and the multi-image calibration Phase 2.
+pub(super) fn project_to_matched_point(
+    rot: Matrix3<f32>,
+    sv: &[f32; 3],
+    parity_sign: f64,
+    pixel_scale: f64,
+    x_obs: f64,
+    y_obs: f64,
+) -> Option<MatchedPoint> {
+    let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
+    let cam_v = rot * icrs_v;
+    if cam_v[2] <= 0.0 {
+        return None;
+    }
+    let x_ideal = parity_sign * (cam_v[0] as f64) / (cam_v[2] as f64) / pixel_scale;
+    let y_ideal = (cam_v[1] as f64) / (cam_v[2] as f64) / pixel_scale;
+    Some(MatchedPoint {
+        x_obs,
+        y_obs,
+        x_ideal,
+        y_ideal,
+    })
 }
 
 /// Compute RMS pixel residual (uncorrected) across all points.
@@ -956,6 +953,17 @@ pub(super) fn percentile(sorted: &[f64], p: f64) -> f64 {
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let idx = (p * (values.len() - 1) as f64).round() as usize;
     values[idx.min(values.len() - 1)]
+}
+
+/// MAD-derived σ estimate (`1.4826 · MAD`) of a residual slice.
+///
+/// Uses the [`percentile`] helper (which sorts internally) for both the median
+/// and the median-absolute-deviation, matching the legacy fit convention.
+fn mad_sigma(inlier_resids: &[f64]) -> f64 {
+    let median = percentile(inlier_resids, 0.5);
+    let abs_devs: Vec<f64> = inlier_resids.iter().map(|&r| (r - median).abs()).collect();
+    let mad = percentile(&abs_devs, 0.5);
+    mad * 1.4826
 }
 
 /// Fit the forward polynomial (ideal → distorted) by least-squares.

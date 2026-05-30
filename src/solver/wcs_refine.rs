@@ -115,6 +115,7 @@ pub fn cd_from_theta(theta: f64, pixel_scale: f64, parity_flip: bool) -> [[f64; 
 /// Decompose a CD matrix into rotation angle, pixel scale (x and y), and parity.
 ///
 /// Returns `(theta_rad, scale_x, scale_y, parity_flip)`.
+#[cfg(test)]
 pub fn decompose_cd(cd: &[[f64; 2]; 2]) -> (f64, f64, f64, bool) {
     let det = cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0];
     let parity_flip = det < 0.0;
@@ -256,6 +257,43 @@ fn predict_tanplane(px: f64, py: f64, cos_t: f64, sin_t: f64, ps: f64) -> (f64, 
     (xi, eta)
 }
 
+/// Decode a catalog star's ICRS unit vector into `(ra, dec)` in radians.
+#[inline]
+fn sv_to_radec(sv: &[f32; 3]) -> (f64, f64) {
+    let ra = (sv[1] as f64).atan2(sv[0] as f64);
+    let dec = (sv[2] as f64).asin();
+    (ra, dec)
+}
+
+/// Accumulate one matched star's contribution to the 3-parameter
+/// `[δθ, dξ₀, dη₀]` normal equations `AᵀA x = Aᵀb`.
+///
+/// Jacobian rows are `ξ: [∂ξ/∂θ, 1, 0]` and `η: [∂η/∂θ, 0, 1]`, with
+/// `∂ξ/∂θ = ps·(-sinθ·px − cosθ·py)` and `∂η/∂θ = ps·(cosθ·px − sinθ·py)`.
+#[inline]
+fn accumulate_normal_equations(
+    ata: &mut [[f64; 3]; 3],
+    atb: &mut [f64; 3],
+    px: f64,
+    py: f64,
+    cos_t: f64,
+    sin_t: f64,
+    ps: f64,
+    r_xi: f64,
+    r_eta: f64,
+) {
+    let j_xi_theta = ps * (-sin_t * px - cos_t * py);
+    let j_eta_theta = ps * (cos_t * px - sin_t * py);
+    let jxi = [j_xi_theta, 1.0, 0.0];
+    let jeta = [j_eta_theta, 0.0, 1.0];
+    for i in 0..3 {
+        for j in 0..3 {
+            ata[i][j] += jxi[i] * jxi[j] + jeta[i] * jeta[j];
+        }
+        atb[i] += jxi[i] * r_xi + jeta[i] * r_eta;
+    }
+}
+
 /// Predict pixel coords from tangent-plane coords (inverse of predict_tanplane).
 ///
 /// `px = (1/ps)·(cos θ · ξ + sin θ · η)`
@@ -282,13 +320,27 @@ pub struct WcsRefineResult {
     pub matches: Vec<(usize, usize)>,
     /// RMSE of angular residuals in radians.
     pub rmse_rad: f64,
-    /// 90th-percentile angular residual in radians.
-    pub p90e_rad: f64,
-    /// Maximum angular residual in radians.
-    pub max_err_rad: f64,
 }
 
 // ── Main refinement entry point ─────────────────────────────────────────────
+
+/// MAD → σ scale factor for a Gaussian distribution.
+const MAD_SCALE: f64 = 1.4826;
+
+/// Robust statistics of a residual list: the median residual and the
+/// MAD-derived standard-deviation estimate (`MAD_SCALE · MAD`).
+///
+/// Both the median and the median-absolute-deviation use the simple midpoint of
+/// the sorted values (`v[len / 2]`) — the refinement's existing convention.
+fn residual_median_sigma(residuals: &[(usize, f64)]) -> (f64, f64) {
+    let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
+    res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = res_vals[res_vals.len() / 2];
+    let mut abs_devs: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
+    abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mad = abs_devs[abs_devs.len() / 2];
+    (median, MAD_SCALE * mad)
+}
 
 /// Constrained iterative WCS TAN-projection refinement.
 ///
@@ -329,7 +381,6 @@ pub fn wcs_refine(
     max_iterations: u32,
 ) -> WcsRefineResult {
     // ── Constants ────────────────────────────────────────────────────────
-    const MAD_SCALE: f64 = 1.4826; // MAD → σ for Gaussian
     const CLIP_NSIGMA: f64 = 3.0;
     const CONVERGENCE_RAD: f64 = 1e-12; // tangent-plane offset convergence
 
@@ -396,8 +447,7 @@ pub fn wcs_refine(
 
             for &(cent_idx, cat_idx) in &current_matches {
                 let sv = &star_vectors[cat_idx];
-                let star_ra = (sv[1] as f64).atan2(sv[0] as f64);
-                let star_dec = (sv[2] as f64).asin();
+                let (star_ra, star_dec) = sv_to_radec(sv);
 
                 let Some((xi_cat, eta_cat)) = tan_project(star_ra, star_dec, crval_ra, crval_dec) else {
                     continue;
@@ -410,24 +460,9 @@ pub fn wcs_refine(
                 let r_xi = xi_cat - xi_pred;
                 let r_eta = eta_cat - eta_pred;
 
-                // Jacobian rows:
-                // ξ row: [∂ξ/∂θ, 1, 0] where ∂ξ/∂θ = ps·(-sin θ · px - cos θ · py)
-                // η row: [∂η/∂θ, 0, 1] where ∂η/∂θ = ps·(cos θ · px - sin θ · py)
-                let j_xi_theta = ps * (-sin_t * px - cos_t * py);
-                let j_eta_theta = ps * (cos_t * px - sin_t * py);
-
-                // ξ row: J = [j_xi_theta, 1, 0]
-                let jxi = [j_xi_theta, 1.0, 0.0];
-                // η row: J = [j_eta_theta, 0, 1]
-                let jeta = [j_eta_theta, 0.0, 1.0];
-
-                // Accumulate AᵀA and Aᵀb
-                for i in 0..3 {
-                    for j in 0..3 {
-                        ata[i][j] += jxi[i] * jxi[j] + jeta[i] * jeta[j];
-                    }
-                    atb[i] += jxi[i] * r_xi + jeta[i] * r_eta;
-                }
+                accumulate_normal_equations(
+                    &mut ata, &mut atb, px, py, cos_t, sin_t, ps, r_xi, r_eta,
+                );
                 n_valid += 1;
             }
 
@@ -469,8 +504,7 @@ pub fn wcs_refine(
         let mut residuals: Vec<(usize, f64)> = Vec::with_capacity(current_matches.len());
         for (match_idx, &(cent_idx, cat_idx)) in current_matches.iter().enumerate() {
             let sv = &star_vectors[cat_idx];
-            let star_ra = (sv[1] as f64).atan2(sv[0] as f64);
-            let star_dec = (sv[2] as f64).asin();
+            let (star_ra, star_dec) = sv_to_radec(sv);
 
             if let Some((xi_cat, eta_cat)) = tan_project(star_ra, star_dec, crval_ra, crval_dec) {
                 let (px, py) = centroids_px[cent_idx];
@@ -482,17 +516,19 @@ pub fn wcs_refine(
             }
         }
 
+        // Robust residual statistics (median, MAD-derived σ), computed once per
+        // iteration and reused by both Phase C clipping and Phase D's adaptive
+        // match radius.
+        let mad_stats = if residuals.len() >= 6 {
+            Some(residual_median_sigma(&residuals))
+        } else {
+            None
+        };
+
         // ── Phase C: MAD-based outlier rejection ────────────────────────
         let mut n_rejected = 0usize;
 
-        if residuals.len() >= 6 {
-            let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
-            res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let median = res_vals[res_vals.len() / 2];
-            let mut abs_devs: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
-            abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let mad = abs_devs[abs_devs.len() / 2];
-            let sigma_est = MAD_SCALE * mad;
+        if let Some((median, sigma_est)) = mad_stats {
             let clip_threshold = median + CLIP_NSIGMA * sigma_est;
 
             let old_len = current_matches.len();
@@ -527,17 +563,8 @@ pub fn wcs_refine(
             // Pixel radius for matching
             let radius_px = match_radius_rad as f64 / ps;
 
-            // Adaptive radius from MAD if available
-            let adaptive_radius_px = if residuals.len() >= 6 {
-                let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
-                res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let mad = {
-                    let median = res_vals[res_vals.len() / 2];
-                    let mut ad: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
-                    ad.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    ad[ad.len() / 2]
-                };
-                let sigma_est = MAD_SCALE * mad;
+            // Adaptive radius from the MAD σ computed above (reused, not recomputed).
+            let adaptive_radius_px = if let Some((_, sigma_est)) = mad_stats {
                 (5.0 * sigma_est / ps).max(2.5).min(radius_px)
             } else {
                 radius_px
@@ -564,8 +591,7 @@ pub fn wcs_refine(
             let mut predicted: Vec<(usize, f64, f64)> = Vec::new();
             for &cat_idx in &nearby_indices {
                 let sv = &star_vectors[cat_idx];
-                let sra = (sv[1] as f64).atan2(sv[0] as f64);
-                let sdec = (sv[2] as f64).asin();
+                let (sra, sdec) = sv_to_radec(sv);
                 if let Some((xi, eta)) = tan_project(sra, sdec, crval_ra, crval_dec) {
                     let (pred_x, pred_y) = predict_pixel(xi, eta, cos_t, sin_t, inv_ps);
                     predicted.push((cat_idx, pred_x, pred_y));
@@ -618,8 +644,7 @@ pub fn wcs_refine(
         let mut residuals: Vec<(usize, f64)> = Vec::new();
         for (match_idx, &(cent_idx, cat_idx)) in current_matches.iter().enumerate() {
             let sv = &star_vectors[cat_idx];
-            let sra = (sv[1] as f64).atan2(sv[0] as f64);
-            let sdec = (sv[2] as f64).asin();
+            let (sra, sdec) = sv_to_radec(sv);
             if let Some((xi_cat, eta_cat)) = tan_project(sra, sdec, crval_ra, crval_dec) {
                 let (px, py) = centroids_px[cent_idx];
                 let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
@@ -633,13 +658,7 @@ pub fn wcs_refine(
             break;
         }
 
-        let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
-        res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = res_vals[res_vals.len() / 2];
-        let mut abs_devs: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
-        abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mad = abs_devs[abs_devs.len() / 2];
-        let sigma_est = MAD_SCALE * mad;
+        let (median, sigma_est) = residual_median_sigma(&residuals);
         let clip_threshold = median + CLIP_NSIGMA * sigma_est;
 
         let mut keep: Vec<(usize, usize)> = Vec::new();
@@ -671,25 +690,15 @@ pub fn wcs_refine(
             let mut atb = [0.0f64; 3];
             for &(cent_idx, cat_idx) in &current_matches {
                 let sv = &star_vectors[cat_idx];
-                let sra = (sv[1] as f64).atan2(sv[0] as f64);
-                let sdec = (sv[2] as f64).asin();
+                let (sra, sdec) = sv_to_radec(sv);
                 if let Some((xi_cat, eta_cat)) = tan_project(sra, sdec, crval_ra, crval_dec) {
                     let (px, py) = centroids_px[cent_idx];
                     let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
                     let r_xi = xi_cat - xi_pred;
                     let r_eta = eta_cat - eta_pred;
-
-                    let j_xi_theta = ps * (-sin_t * px - cos_t * py);
-                    let j_eta_theta = ps * (cos_t * px - sin_t * py);
-                    let jxi = [j_xi_theta, 1.0, 0.0];
-                    let jeta = [j_eta_theta, 0.0, 1.0];
-
-                    for i in 0..3 {
-                        for j in 0..3 {
-                            ata[i][j] += jxi[i] * jxi[j] + jeta[i] * jeta[j];
-                        }
-                        atb[i] += jxi[i] * r_xi + jeta[i] * r_eta;
-                    }
+                    accumulate_normal_equations(
+                        &mut ata, &mut atb, px, py, cos_t, sin_t, ps, r_xi, r_eta,
+                    );
                 }
             }
             if let Some(sol) = solve_3x3(&ata, &atb) {
@@ -708,8 +717,7 @@ pub fn wcs_refine(
     let mut final_residuals: Vec<f64> = Vec::with_capacity(current_matches.len());
     for &(cent_idx, cat_idx) in &current_matches {
         let sv = &star_vectors[cat_idx];
-        let sra = (sv[1] as f64).atan2(sv[0] as f64);
-        let sdec = (sv[2] as f64).asin();
+        let (sra, sdec) = sv_to_radec(sv);
         if let Some((xi_cat, eta_cat)) = tan_project(sra, sdec, crval_ra, crval_dec) {
             let (px, py) = centroids_px[cent_idx];
             let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
@@ -750,8 +758,6 @@ pub fn wcs_refine(
         theta_rad: theta,
         matches: current_matches,
         rmse_rad: rmse,
-        p90e_rad: p90e,
-        max_err_rad: max_err,
     }
 }
 

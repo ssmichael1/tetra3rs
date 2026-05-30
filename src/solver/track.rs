@@ -22,12 +22,9 @@ use tracing::debug;
 
 use crate::{Centroid, Quaternion};
 
-use super::solve::{aberration_correct, binomial_cdf, find_centroid_matches};
+use super::solve::{aberration_correct, binomial_cdf, elapsed_ms, find_centroid_matches, C_KM_S};
 use super::wcs_refine;
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
-
-/// Speed of light in km/s (duplicate of solve.rs C_KM_S; kept private here).
-const C_KM_S: f64 = 299_792.458;
 
 /// Minimum unique correspondences required to attempt the SVD step.
 const MIN_HINT_MATCHES: usize = 3;
@@ -83,9 +80,11 @@ impl SolverDatabase {
         let fov_diagonal = fov_rad * 1.42;
         let cone_radius =
             fov_diagonal / 2.0 + config.hint_uncertainty_rad + 2.0 * pixel_scale;
-        let nearby_inds = self
-            .star_catalog
-            .query_indices_from_uvec(boresight_icrs, cone_radius);
+        let nearby_inds = self.star_catalog.query_indices_from_uvec_cached(
+            boresight_icrs,
+            cone_radius,
+            &self.star_vectors,
+        );
 
         debug!(
             "Tracking: hint cone {:.3}° → {} catalog stars",
@@ -194,9 +193,11 @@ impl SolverDatabase {
         let image_center_icrs = rotation_matrix
             .transpose()
             * Vector3::from_array([0.0, 0.0, 1.0]);
-        let verify_inds = self
-            .star_catalog
-            .query_indices_from_uvec(image_center_icrs, fov_diagonal / 2.0);
+        let verify_inds = self.star_catalog.query_indices_from_uvec_cached(
+            image_center_icrs,
+            fov_diagonal / 2.0,
+            &self.star_vectors,
+        );
 
         let mut verify_positions: Vec<(usize, f32, f32)> = Vec::new();
         for &cat_idx in &verify_inds {
@@ -273,80 +274,16 @@ impl SolverDatabase {
             return SolveResult::failure(SolveStatus::NoMatch, elapsed_ms(t0));
         }
 
-        let (refined_rotation, refined_fov, _) = wcs_refine::wcs_to_rotation(
-            &wcs_result.cd_matrix,
-            wcs_result.crval_rad[0],
-            wcs_result.crval_rad[1],
-            config.image_width,
-        );
-
-        // ── Build matched IDs / residuals ──
-        // True pinhole pixel scale derived from the angular `refined_fov`.
-        let ps = {
-            let f = (config.image_width.max(1) as f32 / 2.0) / (refined_fov / 2.0).tan();
-            1.0 / f
-        };
-        let mut matched_cat_ids: Vec<i64> = Vec::with_capacity(wcs_result.matches.len());
-        let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(wcs_result.matches.len());
-        let mut angular_residuals: Vec<f32> = Vec::with_capacity(wcs_result.matches.len());
-        for &(cent_local_idx, cat_star_idx) in &wcs_result.matches {
-            matched_cat_ids.push(self.star_catalog_ids[cat_star_idx]);
-            matched_cent_inds.push(sorted_indices[cent_local_idx]);
-            let (px, py) = centroids_px[cent_local_idx];
-            let ix = px as f32 * ps;
-            let iy = py as f32 * ps;
-            let iz = 1.0f32;
-            let norm = (ix * ix + iy * iy + iz * iz).sqrt();
-            let img_v = refined_rotation
-                .transpose()
-                * Vector3::from_array([ix / norm, iy / norm, iz / norm]);
-            let sv = &self.star_vectors[cat_star_idx];
-            let cat_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-            let cross = img_v.cross(&cat_v);
-            let ang = cross.norm().atan2(img_v.dot(&cat_v));
-            angular_residuals.push(ang);
-        }
-        angular_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let rmse = if angular_residuals.is_empty() {
-            0.0
-        } else {
-            (angular_residuals.iter().map(|r| r * r).sum::<f32>() / angular_residuals.len() as f32)
-                .sqrt()
-        };
-        let p90e = if angular_residuals.is_empty() {
-            0.0
-        } else {
-            angular_residuals[(0.9 * (angular_residuals.len() - 1) as f32) as usize]
-        };
-        let max_err = angular_residuals.last().copied().unwrap_or(0.0);
-
-        let quat = Quaternion::from_rotation_matrix(&refined_rotation);
-
-        let mut result_cam = config.camera_model.clone();
-        let refined_f = (config.image_width as f64 / 2.0) / (refined_fov as f64 / 2.0).tan();
-        result_cam.focal_length_px = refined_f;
-        result_cam.parity_flip = parity_flip;
-
-        SolveResult {
-            qicrs2cam: Some(quat),
-            fov_rad: Some(refined_fov),
-            num_matches: Some(wcs_result.matches.len() as u32),
-            rmse_rad: Some(rmse),
-            p90e_rad: Some(p90e),
-            max_err_rad: Some(max_err),
-            prob: Some(prob_mismatch),
-            solve_time_ms: elapsed_ms(t0),
-            status: SolveStatus::MatchFound,
+        self.finalize_solve_result(
+            &wcs_result,
+            &self.star_vectors,
+            &sorted_indices,
+            &centroids_px,
+            config,
             parity_flip,
-            matched_catalog_ids: matched_cat_ids,
-            matched_centroid_indices: matched_cent_inds,
-            image_width: config.image_width,
-            image_height: config.image_height,
-            cd_matrix: Some(wcs_result.cd_matrix),
-            crval_rad: Some(wcs_result.crval_rad),
-            camera_model: Some(result_cam),
-            theta_rad: Some(wcs_result.theta_rad),
-        }
+            prob_mismatch,
+            t0,
+        )
     }
 }
 
@@ -399,8 +336,4 @@ fn wahba_svd_dynamic(
     let r = r64.cast::<f32>();
     let det_ok = r.det() > 0.0;
     (r, det_ok)
-}
-
-fn elapsed_ms(t0: Instant) -> f32 {
-    t0.elapsed().as_secs_f32() * 1000.0
 }

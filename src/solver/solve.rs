@@ -27,7 +27,7 @@ use super::wcs_refine;
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
 
 /// Speed of light in km/s.
-const C_KM_S: f64 = 299_792.458;
+pub(super) const C_KM_S: f64 = 299_792.458;
 
 /// Classical stellar aberration: true ICRS unit vector → apparent.
 ///
@@ -436,9 +436,14 @@ impl SolverDatabase {
                     // Find catalog stars within the diagonal FOV
                     let image_center_icrs =
                         rotation_matrix.transpose() * Vector3::from_array([0.0, 0.0, 1.0]);
-                    let nearby_inds = self
-                        .star_catalog
-                        .query_indices_from_uvec(image_center_icrs, fov_diagonal / 2.0);
+                    // Use the stored (un-aberrated) unit vectors as the query
+                    // cache: they are bit-identical to `Star::uvec()` and aligned
+                    // with the catalog, so the candidate set is unchanged.
+                    let nearby_inds = self.star_catalog.query_indices_from_uvec_cached(
+                        image_center_icrs,
+                        fov_diagonal / 2.0,
+                        &self.star_vectors,
+                    );
 
                     // Project catalog stars to camera frame
                     let mut nearby_cam_positions: Vec<(usize, f32, f32)> = Vec::new();
@@ -522,102 +527,123 @@ impl SolverDatabase {
                         continue;
                     }
 
-                    // Derive rotation, FOV, and parity from the refined WCS
-                    let (refined_rotation, refined_fov, _) =
-                        wcs_refine::wcs_to_rotation(
-                            &wcs_result.cd_matrix,
-                            wcs_result.crval_rad[0],
-                            wcs_result.crval_rad[1],
-                            config.image_width,
-                        );
-
-                    // Build matched catalog IDs, centroid indices, and angular residuals.
-                    // True pinhole pixel scale derived from the angular `refined_fov`.
-                    let ps = {
-                        let f = (config.image_width.max(1) as f32 / 2.0)
-                            / (refined_fov / 2.0).tan();
-                        1.0 / f
-                    };
-                    let mut matched_cat_ids: Vec<i64> =
-                        Vec::with_capacity(wcs_result.matches.len());
-                    let mut matched_cent_inds: Vec<usize> =
-                        Vec::with_capacity(wcs_result.matches.len());
-                    let mut angular_residuals: Vec<f32> =
-                        Vec::with_capacity(wcs_result.matches.len());
-                    for &(cent_local_idx, cat_star_idx) in &wcs_result.matches {
-                        matched_cat_ids.push(self.star_catalog_ids[cat_star_idx]);
-                        matched_cent_inds.push(sorted_indices[cent_local_idx]);
-                        // Compute angular residual using rotation matrix
-                        let (px, py) = centroids_px[cent_local_idx];
-                        let ix = px as f32 * ps;
-                        let iy = py as f32 * ps;
-                        let iz = 1.0f32;
-                        let norm = (ix * ix + iy * iy + iz * iz).sqrt();
-                        let img_v = refined_rotation.transpose()
-                            * Vector3::from_array([ix / norm, iy / norm, iz / norm]);
-                        let sv = &star_vectors[cat_star_idx];
-                        let cat_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
-                        let cross = img_v.cross(&cat_v);
-                        let ang = cross.norm().atan2(img_v.dot(&cat_v));
-                        angular_residuals.push(ang);
-                    }
-                    angular_residuals
-                        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let rmse = if angular_residuals.is_empty() {
-                        0.0
-                    } else {
-                        (angular_residuals.iter().map(|r| r * r).sum::<f32>()
-                            / angular_residuals.len() as f32)
-                            .sqrt()
-                    };
-                    let p90e = if angular_residuals.is_empty() {
-                        0.0
-                    } else {
-                        angular_residuals
-                            [(0.9 * (angular_residuals.len() - 1) as f32) as usize]
-                    };
-                    let max_err = angular_residuals.last().copied().unwrap_or(0.0);
-
-                    // Convert rotation to quaternion
-                    let quat = Quaternion::from_rotation_matrix(&refined_rotation);
-
-                    // Build result camera model with refined focal length, image
-                    // dimensions (always filled from config, even if the input
-                    // camera_model was a Default placeholder), and detected parity.
-                    let mut result_cam = config.camera_model.clone();
-                    let refined_f = (config.image_width as f64 / 2.0)
-                        / (refined_fov as f64 / 2.0).tan();
-                    result_cam.focal_length_px = refined_f;
-                    result_cam.image_width = config.image_width;
-                    result_cam.image_height = config.image_height;
-                    result_cam.parity_flip = parity_flip;
-
-                    return SolveResult {
-                        qicrs2cam: Some(quat),
-                        fov_rad: Some(refined_fov),
-                        num_matches: Some(wcs_result.matches.len() as u32),
-                        rmse_rad: Some(rmse),
-                        p90e_rad: Some(p90e),
-                        max_err_rad: Some(max_err),
-                        prob: Some(prob_mismatch * self.props.num_patterns as f64),
-                        solve_time_ms: elapsed_ms(t0),
-                        status: SolveStatus::MatchFound,
+                    return self.finalize_solve_result(
+                        &wcs_result,
+                        star_vectors,
+                        &sorted_indices,
+                        &centroids_px,
+                        config,
                         parity_flip,
-                        matched_catalog_ids: matched_cat_ids,
-                        matched_centroid_indices: matched_cent_inds,
-                        image_width: config.image_width,
-                        image_height: config.image_height,
-                        cd_matrix: Some(wcs_result.cd_matrix),
-                        crval_rad: Some(wcs_result.crval_rad),
-                        camera_model: Some(result_cam),
-                        theta_rad: Some(wcs_result.theta_rad),
-                    };
-
+                        prob_mismatch * self.props.num_patterns as f64,
+                        t0,
+                    );
                 }
             }
         }
 
         SolveResult::failure(status, elapsed_ms(t0))
+    }
+
+    /// Assemble a successful [`SolveResult`] from a completed WCS refinement.
+    ///
+    /// Shared by the lost-in-space (`solve_at_fov`) and tracking
+    /// (`solve_with_hint`) paths. `star_vectors` is the (possibly
+    /// aberration-corrected) catalog unit-vector slice; `prob` is the caller's
+    /// false-positive probability estimate. The match set, residual statistics,
+    /// quaternion, and camera model are derived from `wcs_result`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finalize_solve_result(
+        &self,
+        wcs_result: &wcs_refine::WcsRefineResult,
+        star_vectors: &[[f32; 3]],
+        sorted_indices: &[usize],
+        centroids_px: &[(f64, f64)],
+        config: &SolveConfig,
+        parity_flip: bool,
+        prob: f64,
+        t0: Instant,
+    ) -> SolveResult {
+        // Derive rotation, FOV, and parity from the refined WCS.
+        let (refined_rotation, refined_fov, _) = wcs_refine::wcs_to_rotation(
+            &wcs_result.cd_matrix,
+            wcs_result.crval_rad[0],
+            wcs_result.crval_rad[1],
+            config.image_width,
+        );
+
+        // Build matched catalog IDs, centroid indices, and angular residuals.
+        // True pinhole pixel scale derived from the angular `refined_fov`.
+        let ps = {
+            let f = (config.image_width.max(1) as f32 / 2.0) / (refined_fov / 2.0).tan();
+            1.0 / f
+        };
+        let mut matched_cat_ids: Vec<i64> = Vec::with_capacity(wcs_result.matches.len());
+        let mut matched_cent_inds: Vec<usize> = Vec::with_capacity(wcs_result.matches.len());
+        let mut angular_residuals: Vec<f32> = Vec::with_capacity(wcs_result.matches.len());
+        for &(cent_local_idx, cat_star_idx) in &wcs_result.matches {
+            matched_cat_ids.push(self.star_catalog_ids[cat_star_idx]);
+            matched_cent_inds.push(sorted_indices[cent_local_idx]);
+            // Compute angular residual using rotation matrix
+            let (px, py) = centroids_px[cent_local_idx];
+            let ix = px as f32 * ps;
+            let iy = py as f32 * ps;
+            let iz = 1.0f32;
+            let norm = (ix * ix + iy * iy + iz * iz).sqrt();
+            let img_v = refined_rotation.transpose()
+                * Vector3::from_array([ix / norm, iy / norm, iz / norm]);
+            let sv = &star_vectors[cat_star_idx];
+            let cat_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
+            let cross = img_v.cross(&cat_v);
+            let ang = cross.norm().atan2(img_v.dot(&cat_v));
+            angular_residuals.push(ang);
+        }
+        angular_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let rmse = if angular_residuals.is_empty() {
+            0.0
+        } else {
+            (angular_residuals.iter().map(|r| r * r).sum::<f32>() / angular_residuals.len() as f32)
+                .sqrt()
+        };
+        let p90e = if angular_residuals.is_empty() {
+            0.0
+        } else {
+            angular_residuals[(0.9 * (angular_residuals.len() - 1) as f32) as usize]
+        };
+        let max_err = angular_residuals.last().copied().unwrap_or(0.0);
+
+        // Convert rotation to quaternion
+        let quat = Quaternion::from_rotation_matrix(&refined_rotation);
+
+        // Build result camera model with refined focal length, image dimensions
+        // (always filled from config, even if the input camera_model was a
+        // Default placeholder), and detected parity.
+        let mut result_cam = config.camera_model.clone();
+        let refined_f = (config.image_width as f64 / 2.0) / (refined_fov as f64 / 2.0).tan();
+        result_cam.focal_length_px = refined_f;
+        result_cam.image_width = config.image_width;
+        result_cam.image_height = config.image_height;
+        result_cam.parity_flip = parity_flip;
+
+        SolveResult {
+            qicrs2cam: Some(quat),
+            fov_rad: Some(refined_fov),
+            num_matches: Some(wcs_result.matches.len() as u32),
+            rmse_rad: Some(rmse),
+            p90e_rad: Some(p90e),
+            max_err_rad: Some(max_err),
+            prob: Some(prob),
+            solve_time_ms: elapsed_ms(t0),
+            status: SolveStatus::MatchFound,
+            parity_flip,
+            matched_catalog_ids: matched_cat_ids,
+            matched_centroid_indices: matched_cent_inds,
+            image_width: config.image_width,
+            image_height: config.image_height,
+            cd_matrix: Some(wcs_result.cd_matrix),
+            crval_rad: Some(wcs_result.crval_rad),
+            camera_model: Some(result_cam),
+            theta_rad: Some(wcs_result.theta_rad),
+        }
     }
 }
 
@@ -651,7 +677,7 @@ fn build_fov_sweep(fov_estimate: f32, fov_max_error: Option<f32>, match_radius: 
     values
 }
 
-fn elapsed_ms(t0: Instant) -> f32 {
+pub(super) fn elapsed_ms(t0: Instant) -> f32 {
     t0.elapsed().as_secs_f32() * 1000.0
 }
 

@@ -52,7 +52,7 @@
 /// # References
 ///
 /// - Shupe et al. (2005). *ASP Conf. Ser.* 347: 491. (SIP convention.)
-/// - See the [module-level docs](self) for full citations.
+/// - See the [`distortion` module docs](crate::distortion) for full citations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PolynomialDistortion {
     /// Polynomial order (2..=6 typically).
@@ -217,6 +217,7 @@ pub fn num_coeffs(order: u32) -> usize {
 ///   sum=1: (1,0)=1, (0,1)=2
 ///   sum=2: (2,0)=3, (1,1)=4, (0,2)=5
 ///   sum=3: (3,0)=6, (2,1)=7, (1,2)=8, (0,3)=9
+#[cfg(test)]
 pub fn coeff_index(p: u32, q: u32) -> usize {
     let s = p + q;
     // Base offset: number of terms for sums 0..(s-1) = s*(s+1)/2

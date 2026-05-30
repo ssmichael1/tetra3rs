@@ -11,12 +11,12 @@
 //!
 //! Reference: cedar-solve / tetra3 by Gustav Pettersson (ESA) and Steven Rosenthal.
 
-pub mod combinations;
-pub mod database;
-pub mod pattern;
-pub mod solve;
-pub mod track;
-pub mod wcs_refine;
+pub(crate) mod combinations;
+pub(crate) mod database;
+pub(crate) mod pattern;
+pub(crate) mod solve;
+pub(crate) mod track;
+pub(crate) mod wcs_refine;
 
 use serde::{Deserialize, Serialize};
 
@@ -543,8 +543,7 @@ impl SolveResult {
             // True pinhole pixel scale (1/f) from the angular FOV.
             let q = self.qicrs2cam.as_ref()?;
             let fov = self.fov_rad? as f64;
-            let f = (self.image_width.max(1) as f64 / 2.0) / (fov / 2.0).tan();
-            let pixel_scale = 1.0 / f;
+            let pixel_scale = pixel_scale_from_fov(self.image_width, fov);
 
             let ps = if self.parity_flip { -1.0 } else { 1.0 };
             let xr = ps * x * pixel_scale;
@@ -608,8 +607,7 @@ impl SolveResult {
             // True pinhole pixel scale (1/f) from the angular FOV.
             let q = self.qicrs2cam.as_ref()?;
             let fov = self.fov_rad? as f64;
-            let f = (self.image_width.max(1) as f64 / 2.0) / (fov / 2.0).tan();
-            let pixel_scale = 1.0 / f;
+            let pixel_scale = pixel_scale_from_fov(self.image_width, fov);
 
             let ra = ra_deg.to_radians();
             let dec = dec_deg.to_radians();
@@ -637,4 +635,12 @@ impl SolveResult {
             Some((ux, uy))
         }
     }
+}
+
+/// Pinhole pixel scale (radians per pixel) from an angular FOV and image width.
+///
+/// `pixel_scale = 1 / f`, with `f = (image_width / 2) / tan(fov / 2)`.
+fn pixel_scale_from_fov(image_width: u32, fov_rad: f64) -> f64 {
+    let f = (image_width.max(1) as f64 / 2.0) / (fov_rad / 2.0).tan();
+    1.0 / f
 }

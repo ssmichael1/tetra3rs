@@ -498,14 +498,22 @@ fn estimate_background(
         return (0.0, 0.0);
     }
 
-    values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = values.len();
 
-    // Median as robust background level
-    let median = if n % 2 == 0 {
-        (values[n / 2 - 1] + values[n / 2]) / 2.0
-    } else {
-        values[n / 2]
+    // Median as robust background level. Only the median (an order statistic) is
+    // needed, so partition in O(n) via select_nth instead of a full O(n log n)
+    // sort. For even n the median averages the two central order statistics:
+    // values[n/2] (the selected element) and values[n/2 - 1] (the max of the
+    // lower partition that select_nth leaves to its left).
+    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    let median = {
+        let (lower, nth, _) = values.select_nth_unstable_by(n / 2, cmp);
+        if n % 2 == 0 {
+            let prev = lower.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            (prev + *nth) / 2.0
+        } else {
+            *nth
+        }
     };
 
     // Estimate noise from pixels at or below the median (uncontaminated by stars).
@@ -587,6 +595,11 @@ fn compute_blob_centroids(
     let w = width as usize;
     let h = height as usize;
     let bg_level_f64 = bg_level as f64;
+
+    // Reused across blobs to avoid a fresh allocation per component (dense
+    // fields can have thousands). The closure is `FnMut`, so it may borrow and
+    // `clear()` this buffer each iteration.
+    let mut annulus_vals: Vec<f32> = Vec::new();
 
     components
         .iter()
@@ -674,7 +687,7 @@ fn compute_blob_centroids(
             let c0 = min_col.saturating_sub(ANNULUS_MARGIN);
             let c1 = (max_col + ANNULUS_MARGIN + 1).min(w);
 
-            let mut annulus_vals: Vec<f32> = Vec::new();
+            annulus_vals.clear();
             for r in r0..r1 {
                 let row_off = r * w;
                 for c in c0..c1 {
@@ -685,16 +698,21 @@ fn compute_blob_centroids(
                 }
             }
 
-            // Median of annulus (residual local background in bg-subtracted image)
+            // Median of annulus (residual local background in bg-subtracted image).
+            // select_nth partitions in O(n); for even length the lower central
+            // order statistic is the max of the partition left of the selected mid.
             let local_bg = if annulus_vals.is_empty() {
                 0.0_f64
             } else {
-                annulus_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-                let mid = annulus_vals.len() / 2;
-                if annulus_vals.len() % 2 == 0 {
-                    (annulus_vals[mid - 1] + annulus_vals[mid]) as f64 / 2.0
+                let m = annulus_vals.len();
+                let mid = m / 2;
+                let (lower, nth, _) =
+                    annulus_vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+                if m % 2 == 0 {
+                    let prev = lower.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    (prev + *nth) as f64 / 2.0
                 } else {
-                    annulus_vals[mid] as f64
+                    *nth as f64
                 }
             };
 

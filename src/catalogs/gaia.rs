@@ -1,15 +1,11 @@
 use crate::error::{Error, Result};
 use std::path::Path;
 
-#[allow(dead_code)]
 pub struct GaiaStar {
     pub source_id: i64,
     pub ra_deg: f32,
     pub dec_deg: f32,
     pub phot_g_mean_mag: f32,
-    pub phot_bp_mean_mag: f32,
-    pub phot_rp_mean_mag: f32,
-    pub parallax: Option<f32>,
     pub pmra: Option<f32>,
     pub pmdec: Option<f32>,
 }
@@ -19,7 +15,6 @@ pub struct GaiaStar {
 /// Binary format spec:
 /// - Header: magic "GDR3" (4 bytes) + version (u32 LE, value 1) + num_stars (u64 LE)
 /// - Per star (36 bytes): source_id (i64 LE) + ra (f64 LE) + dec (f64 LE) + mag (f32 LE) + pmra (f32 LE) + pmdec (f32 LE)
-#[allow(dead_code)]
 pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>> {
     use std::io::Read;
 
@@ -66,9 +61,6 @@ pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>> {
             ra_deg: ra as f32,
             dec_deg: dec as f32,
             phot_g_mean_mag: mag,
-            phot_bp_mean_mag: 0.0,
-            phot_rp_mean_mag: 0.0,
-            parallax: None,
             pmra: Some(pmra),
             pmdec: Some(pmdec),
         });

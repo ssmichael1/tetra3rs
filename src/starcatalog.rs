@@ -112,8 +112,43 @@ impl StarCatalog {
     /// Query stars around a (possibly non-unit) direction vector.
     ///
     /// `dir` is normalized internally; `radius_rad` is clamped to `[0, π]`.
-    /// Returns indices into the internal star storage.
+    /// Returns indices into the internal star storage. Each candidate star's
+    /// unit vector is recomputed from its `(ra, dec)` via trigonometry; for hot
+    /// paths that already hold precomputed unit vectors, prefer
+    /// [`query_indices_from_uvec_cached`](Self::query_indices_from_uvec_cached).
     pub fn query_indices_from_uvec(&self, dir: Vector3<f32>, radius_rad: f32) -> Vec<usize> {
+        self.query_impl(dir, radius_rad, None)
+    }
+
+    /// Same as [`query_indices_from_uvec`](Self::query_indices_from_uvec) but
+    /// reads each candidate star's unit vector from `unit_vectors` instead of
+    /// recomputing it via `sin`/`cos`.
+    ///
+    /// `unit_vectors` MUST be index-aligned with [`stars`](Self::stars) (i.e.
+    /// `unit_vectors[i]` is the unit vector of `stars()[i]`). When that holds,
+    /// the result is identical to `query_indices_from_uvec`, just without the
+    /// per-star trigonometry — a meaningful saving when this is called once per
+    /// catalog star (database generation) or per solve candidate.
+    pub(crate) fn query_indices_from_uvec_cached(
+        &self,
+        dir: Vector3<f32>,
+        radius_rad: f32,
+        unit_vectors: &[[f32; 3]],
+    ) -> Vec<usize> {
+        debug_assert_eq!(
+            unit_vectors.len(),
+            self.stars.len(),
+            "unit_vectors cache must be index-aligned with stars"
+        );
+        self.query_impl(dir, radius_rad, Some(unit_vectors))
+    }
+
+    fn query_impl(
+        &self,
+        dir: Vector3<f32>,
+        radius_rad: f32,
+        cache: Option<&[[f32; 3]]>,
+    ) -> Vec<usize> {
         if self.is_empty() {
             return Vec::new();
         }
@@ -147,13 +182,13 @@ impl StarCatalog {
 
             if lon_max - lon_min >= TAU {
                 for lon_bin in 0..self.n_lon {
-                    self.collect_cell_matches(lat_bin, lon_bin, dir, cos_radius, &mut out);
+                    self.collect_cell_matches(lat_bin, lon_bin, dir, cos_radius, cache, &mut out);
                 }
                 continue;
             }
 
             self.for_each_wrapped_lon_bin(lon_min, lon_max, |lon_bin| {
-                self.collect_cell_matches(lat_bin, lon_bin, dir, cos_radius, &mut out);
+                self.collect_cell_matches(lat_bin, lon_bin, dir, cos_radius, cache, &mut out);
             });
         }
 
@@ -179,6 +214,7 @@ impl StarCatalog {
         lon_bin: u32,
         dir: Vector3<f32>,
         cos_radius: f32,
+        cache: Option<&[[f32; 3]]>,
         out: &mut Vec<usize>,
     ) {
         let cell = (lat_bin * self.n_lon + lon_bin) as usize;
@@ -187,8 +223,10 @@ impl StarCatalog {
 
         for flat_idx in start..end {
             let star_idx = self.star_indices[flat_idx] as usize;
-            let star = &self.stars[star_idx];
-            let star_dir = star.uvec();
+            let star_dir = match cache {
+                Some(vectors) => Vector3::from_array(vectors[star_idx]),
+                None => self.stars[star_idx].uvec(),
+            };
             if dir.dot(&star_dir) >= cos_radius {
                 out.push(star_idx);
             }

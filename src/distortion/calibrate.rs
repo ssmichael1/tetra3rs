@@ -22,8 +22,9 @@ use crate::solver::wcs_refine;
 use crate::solver::{SolveResult, SolveStatus, SolverDatabase};
 
 use super::fit::{
-    build_id_lookup, compute_corrected_rmse, fit_polynomial_sigma_clip,
-    fit_radial_centered_sigma_clip, MatchedPoint,
+    build_id_lookup, compute_corrected_rmse, compute_corrected_rmse_centered,
+    fit_polynomial_sigma_clip, fit_radial_centered_sigma_clip, project_to_matched_point,
+    MatchedPoint,
 };
 use super::polynomial::{num_coeffs, PolynomialDistortion};
 use super::radial::RadialDistortion;
@@ -476,27 +477,15 @@ fn multi_image_calibrate(
 
             for &(cent_idx, cat_idx) in &ref_img.matches {
                 let sv = &database.star_vectors[cat_idx];
-                let icrs_v = numeris::Vector3::from_array([sv[0], sv[1], sv[2]]);
-                let cam_v = rot * icrs_v;
-
-                if cam_v[2] <= 0.0 {
-                    continue;
-                }
-
-                // Ideal position using global pixel scale (consistent across all images)
-                let x_ideal = parity_sign * (cam_v[0] as f64) / (cam_v[2] as f64) / global_pixel_scale;
-                let y_ideal = (cam_v[1] as f64) / (cam_v[2] as f64) / global_pixel_scale;
-
-                // Observed position: raw centroid (no undistortion applied)
+                // Observed position: raw centroid (no undistortion applied).
+                // Ideal position uses the global pixel scale (consistent across images).
                 let x_obs = cents[cent_idx].x as f64;
                 let y_obs = cents[cent_idx].y as f64;
-
-                all_points.push(MatchedPoint {
-                    x_obs,
-                    y_obs,
-                    x_ideal,
-                    y_ideal,
-                });
+                if let Some(mp) =
+                    project_to_matched_point(rot, sv, parity_sign, global_pixel_scale, x_obs, y_obs)
+                {
+                    all_points.push(mp);
+                }
             }
         }
 
@@ -566,23 +555,8 @@ fn multi_image_calibrate(
         let rmse_after = if fit_crpix == [0.0, 0.0] {
             compute_corrected_rmse(&all_points, &mask, &dist)
         } else {
-            // Centered radial: distort on (x_ideal - cx, y_ideal - cy)
-            // and shift result back. Use a local helper closure.
-            let mut sum_sq = 0.0_f64;
-            let mut nn = 0usize;
-            for (i, p) in all_points.iter().enumerate() {
-                if !mask[i] {
-                    continue;
-                }
-                let (dx, dy) = dist.distort(p.x_ideal - fit_crpix[0], p.y_ideal - fit_crpix[1]);
-                let pred_x = dx + fit_crpix[0];
-                let pred_y = dy + fit_crpix[1];
-                let rx = p.x_obs - pred_x;
-                let ry = p.y_obs - pred_y;
-                sum_sq += rx * rx + ry * ry;
-                nn += 1;
-            }
-            if nn == 0 { 0.0 } else { (sum_sq / nn as f64).sqrt() }
+            // Centered radial: distort on (x_ideal - cx, y_ideal - cy) and shift back.
+            compute_corrected_rmse_centered(&all_points, &mask, &dist, fit_crpix)
         };
         let rmse_before = compute_corrected_rmse(&all_points, &mask, &Distortion::None);
 

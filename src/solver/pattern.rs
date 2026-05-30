@@ -125,39 +125,10 @@ pub fn insert_pattern(
 
 // ── Pattern centroid ordering ───────────────────────────────────────────────
 
-/// Sort a pattern's star indices by each star's Euclidean distance from the
-/// pattern centroid (average position). This produces a canonical ordering
-/// that is invariant to the input star order, allowing image patterns to
-/// be matched against catalog patterns.
-pub fn sort_pattern_by_centroid_distance(
-    pattern: &mut [usize; PATTERN_SIZE],
-    vectors: &[[f32; 3]],
-) {
-    // Compute centroid (average of the 4 vectors).
-    let mut cx = 0.0f32;
-    let mut cy = 0.0f32;
-    let mut cz = 0.0f32;
-    for &idx in pattern.iter() {
-        let v = &vectors[idx];
-        cx += v[0];
-        cy += v[1];
-        cz += v[2];
-    }
-    cx /= PATTERN_SIZE as f32;
-    cy /= PATTERN_SIZE as f32;
-    cz /= PATTERN_SIZE as f32;
-
-    // Sort by squared distance from centroid (ascending).
-    pattern.sort_by(|&a, &b| {
-        let va = &vectors[a];
-        let vb = &vectors[b];
-        let da = (va[0] - cx).powi(2) + (va[1] - cy).powi(2) + (va[2] - cz).powi(2);
-        let db = (vb[0] - cx).powi(2) + (vb[1] - cy).powi(2) + (vb[2] - cz).powi(2);
-        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-    });
-}
-
-/// Same as above but operates on [u32; 4] with a separate vector lookup.
+/// Sort a pattern's star indices (`[u32; 4]`) by each star's Euclidean distance
+/// from the pattern centroid (average position). This produces a canonical
+/// ordering that is invariant to the input star order, allowing image patterns
+/// to be matched against catalog patterns.
 pub fn sort_u32_pattern_by_centroid_distance(
     pattern: &mut [u32; PATTERN_SIZE],
     star_vectors: &[[f32; 3]],

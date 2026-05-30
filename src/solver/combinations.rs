@@ -25,7 +25,7 @@ impl<const K: usize> BreadthFirstCombinations<K> {
     /// Create a new iterator yielding `K`-combinations from `items`.
     ///
     /// `items` should be sorted in priority order (e.g. brightest star indices first).
-    /// The iterator yields `Vec<usize>` of length `K`, each containing elements from `items`.
+    /// The iterator yields `[usize; K]`, each containing elements from `items`.
     pub fn new(items: &[usize]) -> Self {
         let n = items.len();
         let mut bfc = Self {
@@ -46,9 +46,9 @@ impl<const K: usize> BreadthFirstCombinations<K> {
 }
 
 impl<const K: usize> Iterator for BreadthFirstCombinations<K> {
-    type Item = Vec<usize>;
+    type Item = [usize; K];
 
-    fn next(&mut self) -> Option<Vec<usize>> {
+    fn next(&mut self) -> Option<[usize; K]> {
         let Reverse((_, combo)) = self.heap.pop()?;
 
         // Generate successors: for each position, try incrementing by 1.
@@ -75,7 +75,7 @@ impl<const K: usize> Iterator for BreadthFirstCombinations<K> {
         }
 
         // Map positional indices to actual items.
-        Some(combo.iter().map(|&i| self.items[i as usize]).collect())
+        Some(std::array::from_fn(|j| self.items[combo[j] as usize]))
     }
 }
 
@@ -87,17 +87,17 @@ mod tests {
     fn test_bfs_combinations_complete() {
         // All C(5,3) = 10 combinations should be yielded
         let items: Vec<usize> = vec![10, 20, 30, 40, 50];
-        let combos: Vec<Vec<usize>> = BreadthFirstCombinations::<3>::new(&items).collect();
+        let combos: Vec<[usize; 3]> = BreadthFirstCombinations::<3>::new(&items).collect();
         assert_eq!(combos.len(), 10);
         // First combo should be the 3 "brightest" (lowest index)
-        assert_eq!(combos[0], vec![10, 20, 30]);
+        assert_eq!(combos[0], [10, 20, 30]);
     }
 
     #[test]
     fn test_bfs_combinations_order() {
         // Combinations should come in order of increasing index sum
         let items: Vec<usize> = (0..6).collect();
-        let combos: Vec<Vec<usize>> = BreadthFirstCombinations::<4>::new(&items).collect();
+        let combos: Vec<[usize; 4]> = BreadthFirstCombinations::<4>::new(&items).collect();
         assert_eq!(combos.len(), 15); // C(6,4) = 15
 
         // Verify sum ordering
@@ -111,16 +111,16 @@ mod tests {
     fn test_bfs_combinations_early_stop() {
         // Should be able to take just a few without enumerating all
         let items: Vec<usize> = (0..50).collect();
-        let first_10: Vec<Vec<usize>> =
+        let first_10: Vec<[usize; 4]> =
             BreadthFirstCombinations::<4>::new(&items).take(10).collect();
         assert_eq!(first_10.len(), 10);
-        assert_eq!(first_10[0], vec![0, 1, 2, 3]);
+        assert_eq!(first_10[0], [0, 1, 2, 3]);
     }
 
     #[test]
     fn test_bfs_too_few_items() {
         let items: Vec<usize> = vec![1, 2];
-        let combos: Vec<Vec<usize>> = BreadthFirstCombinations::<4>::new(&items).collect();
+        let combos: Vec<[usize; 4]> = BreadthFirstCombinations::<4>::new(&items).collect();
         assert!(combos.is_empty());
     }
 }
