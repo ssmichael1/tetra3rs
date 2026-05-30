@@ -1,17 +1,18 @@
-use numpy::PyReadonlyArray2;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use tetra3::camera_model::CameraModel;
-use tetra3::distortion::calibrate::{calibrate_camera, CalibrateConfig, DistortionModelType};
+use tetra3::{calibrate_camera, CalibrateConfig, DistortionModelType};
 use tetra3::solver::{GenerateDatabaseConfig, SolveConfig, SolveStatus, SolverDatabase};
 use tetra3::Centroid;
 
 use crate::calibrate::PyCalibrateResult;
 use crate::camera_model::PyCameraModel;
 use crate::catalog_star::PyCatalogStar;
-use crate::centroid::PyCentroid;
-use crate::helpers::parse_solve_results_and_centroids;
+use crate::helpers::{
+    at_most_one_angle_rad, exactly_one_angle_rad, parse_centroids_single,
+    parse_solve_results_and_centroids, resolve_image_dims,
+};
 use crate::solve_result::PySolveResult;
 
 /// A star pattern database for plate solving.
@@ -217,83 +218,25 @@ impl PySolverDatabase {
         strict_hint: bool,
     ) -> PyResult<Option<PySolveResult>> {
         // Resolve FOV estimate: exactly one of deg or rad must be provided
-        let fov_rad = match (fov_estimate_deg, fov_estimate_rad) {
-            (Some(deg), None) => (deg as f32).to_radians(),
-            (None, Some(rad)) => rad as f32,
-            (Some(_), Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Specify exactly one of fov_estimate_deg or fov_estimate_rad, not both",
-                ));
-            }
-            (None, None) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Must specify either fov_estimate_deg or fov_estimate_rad",
-                ));
-            }
-        };
+        let fov_rad = exactly_one_angle_rad(
+            fov_estimate_deg,
+            fov_estimate_rad,
+            "Specify exactly one of fov_estimate_deg or fov_estimate_rad, not both",
+            "Must specify either fov_estimate_deg or fov_estimate_rad",
+        )?;
 
         // Resolve image dimensions: image_shape=(h, w) or image_width + image_height
-        let (img_width, img_height) = match (image_shape, image_width, image_height) {
-            (Some((h, w)), None, None) => (w, h),
-            (None, Some(w), Some(h)) => (w, h),
-            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Specify either image_shape or image_width/image_height, not both",
-                ));
-            }
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Must specify image dimensions via image_shape=(height, width) or image_width + image_height",
-                ));
-            }
-        };
+        let (img_width, img_height) = resolve_image_dims(image_shape, image_width, image_height)?;
 
-        // Accept either a list of Centroid objects or an Nx2/Nx3 numpy array
-        let centroid_vec: Vec<Centroid> = if let Ok(list) = centroids.cast::<pyo3::types::PyList>()
-        {
-            list.iter()
-                .map(|item| {
-                    let c: PyCentroid = item.extract()?;
-                    Ok(c.inner)
-                })
-                .collect::<PyResult<Vec<Centroid>>>()?
-        } else if let Ok(arr) = centroids.extract::<PyReadonlyArray2<f64>>() {
-            let a = arr.as_array();
-            let ncols = a.shape()[1];
-            if ncols < 2 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "centroids array must have at least 2 columns (x, y)",
-                ));
-            }
-            (0..a.shape()[0])
-                .map(|i| Centroid {
-                    x: a[[i, 0]] as f32,
-                    y: a[[i, 1]] as f32,
-                    mass: if ncols >= 3 {
-                        Some(a[[i, 2]] as f32)
-                    } else {
-                        None
-                    },
-                    cov: None,
-                })
-                .collect()
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "centroids must be a list of Centroid objects or an Nx2/Nx3 numpy array of float64",
-            ));
-        };
+        // Accept either a list of Centroid objects or an Nx2/Nx3 numpy array.
+        let centroid_vec: Vec<Centroid> = parse_centroids_single(centroids)?;
 
         // Resolve FOV max error: at most one of deg or rad
-        let fov_max_err = match (fov_max_error_deg, fov_max_error_rad) {
-            (Some(deg), None) => Some((deg as f32).to_radians()),
-            (None, Some(rad)) => Some(rad as f32),
-            (Some(_), Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Specify at most one of fov_max_error_deg or fov_max_error_rad, not both",
-                ));
-            }
-            (None, None) => None,
-        };
+        let fov_max_err = at_most_one_angle_rad(
+            fov_max_error_deg,
+            fov_max_error_rad,
+            "Specify at most one of fov_max_error_deg or fov_max_error_rad, not both",
+        )?;
 
         // Use provided camera model, or create a default pinhole model from FOV
         let cam = match camera_model {
@@ -302,16 +245,11 @@ impl PySolverDatabase {
         };
 
         // Resolve hint uncertainty: at most one of deg or rad.
-        let hint_uncertainty = match (hint_uncertainty_deg, hint_uncertainty_rad) {
-            (Some(deg), None) => Some((deg as f32).to_radians()),
-            (None, Some(rad)) => Some(rad as f32),
-            (Some(_), Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Specify at most one of hint_uncertainty_deg or hint_uncertainty_rad",
-                ));
-            }
-            (None, None) => None,
-        };
+        let hint_uncertainty = at_most_one_angle_rad(
+            hint_uncertainty_deg,
+            hint_uncertainty_rad,
+            "Specify at most one of hint_uncertainty_deg or hint_uncertainty_rad",
+        )?;
 
         // Build quaternion from the hint, accepting either a 4-element [w, x, y, z]
         // quaternion or a 3×3 rotation matrix.
@@ -550,20 +488,7 @@ impl PySolverDatabase {
         };
 
         // Resolve image dimensions: image_shape=(h, w) or image_width + image_height
-        let (img_width, img_height) = match (image_shape, image_width, image_height) {
-            (Some((h, w)), None, None) => (w, h),
-            (None, Some(w), Some(h)) => (w, h),
-            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Specify either image_shape or image_width/image_height, not both",
-                ));
-            }
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Must specify image dimensions via image_shape=(height, width) or image_width + image_height",
-                ));
-            }
-        };
+        let (img_width, img_height) = resolve_image_dims(image_shape, image_width, image_height)?;
 
         let (sr_vec, cent_vec) = parse_solve_results_and_centroids(solve_results, centroids)?;
 

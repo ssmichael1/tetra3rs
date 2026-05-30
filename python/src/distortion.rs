@@ -1,8 +1,7 @@
 use numpy::PyArray1;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use tetra3::distortion::polynomial::num_coeffs as poly_num_coeffs;
+use tetra3::num_coeffs as poly_num_coeffs;
 use tetra3::distortion::{Distortion, PolynomialDistortion, RadialDistortion};
 
 /// Helper: extract a Distortion enum from a Python RadialDistortion or PolynomialDistortion.
@@ -108,17 +107,14 @@ impl PyRadialDistortion {
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
-        let inner = &slf.borrow().inner;
-        let bytes = postcard::to_allocvec(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let bytes = crate::helpers::to_postcard_bytes(&slf.borrow().inner)?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = postcard::from_bytes::<RadialDistortion>(data)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let inner = crate::helpers::from_postcard_bytes::<RadialDistortion>(data)?;
         Ok(Self { inner })
     }
 
@@ -255,17 +251,14 @@ impl PyPolynomialDistortion {
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
-        let inner = &slf.borrow().inner;
-        let bytes = postcard::to_allocvec(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let bytes = crate::helpers::to_postcard_bytes(&slf.borrow().inner)?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = postcard::from_bytes::<PolynomialDistortion>(data)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let inner = crate::helpers::from_postcard_bytes::<PolynomialDistortion>(data)?;
         Ok(Self { inner })
     }
 

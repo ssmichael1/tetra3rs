@@ -1,6 +1,5 @@
 use numpy::ndarray;
 use numpy::PyArray2;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use crate::distortion::extract_distortion;
@@ -142,17 +141,14 @@ impl PyCentroid {
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
-        let inner = &slf.borrow().inner;
-        let bytes = postcard::to_allocvec(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let bytes = crate::helpers::to_postcard_bytes(&slf.borrow().inner)?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = postcard::from_bytes::<tetra3::Centroid>(data)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let inner = crate::helpers::from_postcard_bytes::<tetra3::Centroid>(data)?;
         Ok(Self { inner })
     }
 

@@ -1,6 +1,5 @@
 use numpy::ndarray;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1};
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
@@ -275,17 +274,14 @@ impl PySolveResult {
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (Vec<u8>,))> {
-        let inner = &slf.borrow().inner;
-        let bytes = postcard::to_allocvec(inner)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let bytes = crate::helpers::to_postcard_bytes(&slf.borrow().inner)?;
         let from_bytes = slf.get_type().getattr("_from_pickle_bytes")?;
         Ok((from_bytes.unbind(), (bytes,)))
     }
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let result = postcard::from_bytes::<SolveResult>(data)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let result = crate::helpers::from_postcard_bytes::<SolveResult>(data)?;
         Ok(Self::from_result(result))
     }
 
