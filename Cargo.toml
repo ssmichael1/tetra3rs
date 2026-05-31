@@ -28,8 +28,9 @@ postcard = { version = "1.0", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2"
 tracing = { version = "0.1.40", features = ["std"] }
-numeris = { version = "0.5.11", features = ["std", "serde", "optim"] }
+numeris = { version = "0.5.12", features = ["std", "serde", "optim"] }
 image = { version = "0.25", optional = true, default-features = false }
+rayon = { version = "1", optional = true }
 
 [features]
 default = []
@@ -39,6 +40,12 @@ hipparcos = []
 profile = []
 # Centroid extraction also pulls in numeris's imageproc (used for CCL).
 image = ["dep:image", "numeris/imageproc"]
+# Multi-threaded centroid extraction via rayon. Parallelizes the dominant
+# local-background stage (independent block medians + interpolation rows) and
+# the full-image element-wise maps; also enables numeris's rayon imageproc
+# paths (e.g. the matched-filter Gaussian blur). Bit-identical results to the
+# sequential build. Combine with `image`: `--features image,parallel`.
+parallel = ["dep:rayon", "numeris/rayon"]
 
 [profile.test]
 opt-level = 3

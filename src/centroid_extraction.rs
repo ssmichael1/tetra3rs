@@ -18,6 +18,10 @@
 //! - [`extract_centroids_from_raw`] for raw grayscale `f32` pixel data —
 //!   useful for FITS, camera SDK output, or any other non-standard source.
 //!
+//! With the `parallel` feature, the dominant local-background stage and the
+//! full-image element-wise maps run multi-threaded via rayon; results are
+//! bit-identical to the sequential build.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -36,6 +40,95 @@ use numeris::imageproc::{
     connected_components_with_label_buffer, gaussian_blur, BorderMode, Component, Connectivity,
 };
 use numeris::DynMatrix;
+
+/// Parallelism dispatch for the centroid-extraction hot paths.
+///
+/// Each helper has two cfg-gated twins: a [Rayon](https://docs.rs/rayon)
+/// work-stealing version under the `parallel` feature and a plain sequential
+/// version otherwise. The feature flag lives only here, so the two paths cannot
+/// drift apart and the call sites read identically in both configurations.
+///
+/// All helpers are deterministic: the element-wise maps write disjoint outputs
+/// and `map_indices` / `for_each_chunk_mut` assign each index or chunk to a
+/// fixed output slot, so results are independent of thread count and the
+/// non-`parallel` build is bit-identical to the original sequential code.
+///
+/// Scope is deliberately narrow. Profiling (`smrecording.fits`, 2.1 Mpix) shows
+/// `estimate_local_background` is ~60% of extraction wall-clock; the per-blob
+/// centroid loop is ~2% and connected-component labeling lives in numeris and
+/// is sequential there, so neither is parallelized here.
+mod par {
+    #[cfg(feature = "parallel")]
+    use rayon::prelude::*;
+
+    /// `(a - b).max(0.0)` element-wise (background subtraction with clamp).
+    #[cfg(feature = "parallel")]
+    pub fn map_subtract_clamp(a: &[f32], b: &[f32]) -> Vec<f32> {
+        a.par_iter()
+            .zip(b.par_iter())
+            .map(|(&v, &bg)| (v - bg).max(0.0))
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    pub fn map_subtract_clamp(a: &[f32], b: &[f32]) -> Vec<f32> {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&v, &bg)| (v - bg).max(0.0))
+            .collect()
+    }
+
+    /// `a - b` element-wise (background subtraction, unclamped).
+    #[cfg(feature = "parallel")]
+    pub fn map_subtract(a: &[f32], b: &[f32]) -> Vec<f32> {
+        a.par_iter()
+            .zip(b.par_iter())
+            .map(|(&v, &bg)| v - bg)
+            .collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    pub fn map_subtract(a: &[f32], b: &[f32]) -> Vec<f32> {
+        a.iter().zip(b.iter()).map(|(&v, &bg)| v - bg).collect()
+    }
+
+    /// Map `f` over `0..n` into a `Vec`, preserving index order.
+    #[cfg(feature = "parallel")]
+    pub fn map_indices<T, F>(n: usize, f: F) -> Vec<T>
+    where
+        T: Send,
+        F: Fn(usize) -> T + Sync + Send,
+    {
+        (0..n).into_par_iter().map(f).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    pub fn map_indices<T, F>(n: usize, f: F) -> Vec<T>
+    where
+        F: Fn(usize) -> T,
+    {
+        (0..n).map(f).collect()
+    }
+
+    /// Apply `f(i, chunk)` to each disjoint `chunk_len`-sized chunk of `buf`.
+    /// `buf.len()` must be a multiple of `chunk_len` (one chunk per image row).
+    #[cfg(feature = "parallel")]
+    pub fn for_each_chunk_mut<T, F>(buf: &mut [T], chunk_len: usize, f: F)
+    where
+        T: Send,
+        F: Fn(usize, &mut [T]) + Sync + Send,
+    {
+        buf.par_chunks_mut(chunk_len)
+            .enumerate()
+            .for_each(|(i, c)| f(i, c));
+    }
+    #[cfg(not(feature = "parallel"))]
+    pub fn for_each_chunk_mut<T, F>(buf: &mut [T], chunk_len: usize, mut f: F)
+    where
+        F: FnMut(usize, &mut [T]),
+    {
+        for (i, c) in buf.chunks_mut(chunk_len).enumerate() {
+            f(i, c);
+        }
+    }
+}
 
 /// Configuration for centroid extraction from an image.
 #[derive(Debug, Clone)]
@@ -235,11 +328,7 @@ fn extract_from_gray(
     let local_bg: Option<Vec<f32>>;
     if let Some(block_size) = config.local_bg_block_size {
         let bg = estimate_local_background(gray_input, width, height, block_size);
-        gray = gray_input
-            .iter()
-            .zip(bg.iter())
-            .map(|(&v, &b)| (v - b).max(0.0))
-            .collect();
+        gray = par::map_subtract_clamp(gray_input, &bg);
         local_bg = Some(bg);
     } else {
         gray = gray_input.to_vec();
@@ -250,11 +339,7 @@ fn extract_from_gray(
     // Use unclamped residuals for noise estimation so the lower half of the
     // distribution is preserved (clamping to 0 destroys it).
     let noise_input = if let Some(ref bg) = local_bg {
-        gray_input
-            .iter()
-            .zip(bg.iter())
-            .map(|(&v, &b)| v - b)
-            .collect::<Vec<f32>>()
+        par::map_subtract(gray_input, bg)
     } else {
         gray_input.to_vec()
     };
@@ -265,9 +350,8 @@ fn extract_from_gray(
     // When `matched_filter_sigma` is set, the bg-subtracted residual is
     // convolved with a Gaussian and threshold/CCL run on the filtered copy.
     // Centroids are still measured on the unfiltered `gray`, so intensities
-    // and CoM positions are unaffected. The same transpose trick as Step 1
-    // applies: Gaussian blur is separable and symmetric, so it commutes with
-    // the transpose.
+    // and CoM positions are unaffected. Under the `parallel` feature numeris's
+    // gaussian_blur runs multi-threaded.
     let filtered: Option<Vec<f32>> = match config.matched_filter_sigma {
         Some(sigma) if sigma.is_finite() && sigma > 0.0 => {
             let mat = DynMatrix::<f32>::from_vec(w, h, gray.clone());
@@ -362,6 +446,11 @@ fn extract_from_gray(
 ///
 /// This effectively removes large-scale structure (nebulosity, Milky Way
 /// emission, vignetting) while preserving point sources (stars).
+///
+/// This is the dominant extraction stage (~60% of wall-clock); under the
+/// `parallel` feature the per-block medians and the per-row interpolation both
+/// fan out across threads. Each block / row writes its own output slot, so the
+/// result is identical to the sequential path.
 fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size: u32) -> Vec<f32> {
     let w = width as usize;
     let h = height as usize;
@@ -371,64 +460,65 @@ fn estimate_local_background(pixels: &[f32], width: u32, height: u32, block_size
     let nx = w.div_ceil(bs);
     let ny = h.div_ceil(bs);
 
-    // Compute median for each block
-    let mut block_medians = vec![0.0f32; nx * ny];
-    for by in 0..ny {
-        for bx in 0..nx {
-            let x0 = bx * bs;
-            let y0 = by * bs;
-            let x1 = (x0 + bs).min(w);
-            let y1 = (y0 + bs).min(h);
+    // Compute median for each block. Blocks are independent and each writes its
+    // own index, so this maps in parallel under the `parallel` feature.
+    let block_medians: Vec<f32> = par::map_indices(nx * ny, |bi| {
+        let bx = bi % nx;
+        let by = bi / nx;
+        let x0 = bx * bs;
+        let y0 = by * bs;
+        let x1 = (x0 + bs).min(w);
+        let y1 = (y0 + bs).min(h);
 
-            let mut vals: Vec<f32> = Vec::with_capacity(bs * bs);
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let v = pixels[y * w + x];
-                    if v > 0.0 && v.is_finite() {
-                        vals.push(v);
-                    }
+        let mut vals: Vec<f32> = Vec::with_capacity(bs * bs);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let v = pixels[y * w + x];
+                if v > 0.0 && v.is_finite() {
+                    vals.push(v);
                 }
             }
-
-            if vals.is_empty() {
-                block_medians[by * nx + bx] = 0.0;
-            } else {
-                vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-                block_medians[by * nx + bx] = vals[vals.len() / 2];
-            }
         }
-    }
+
+        if vals.is_empty() {
+            0.0
+        } else {
+            vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            vals[vals.len() / 2]
+        }
+    });
 
     // Bilinearly interpolate between block centers to produce a smooth
-    // background estimate at every pixel.
+    // background estimate at every pixel. Each row depends only on the shared,
+    // immutable block medians, so rows are filled in parallel over disjoint
+    // output slices.
     let mut background = vec![0.0f32; w * h];
     let half_bs = bs as f32 / 2.0;
 
-    for y in 0..h {
-        for x in 0..w {
-            // Position in block-center coordinates
+    par::for_each_chunk_mut(&mut background, w, |y, row| {
+        // Position in block-center coordinates (row component)
+        let by_f = (y as f32 - half_bs) / bs as f32;
+        let by0 = (by_f.floor() as isize).max(0).min(ny as isize - 1) as usize;
+        let by1 = (by0 + 1).min(ny - 1);
+        let fy = (by_f - by0 as f32).clamp(0.0, 1.0);
+
+        for (x, px) in row.iter_mut().enumerate() {
             let bx_f = (x as f32 - half_bs) / bs as f32;
-            let by_f = (y as f32 - half_bs) / bs as f32;
-
             let bx0 = (bx_f.floor() as isize).max(0).min(nx as isize - 1) as usize;
-            let by0 = (by_f.floor() as isize).max(0).min(ny as isize - 1) as usize;
             let bx1 = (bx0 + 1).min(nx - 1);
-            let by1 = (by0 + 1).min(ny - 1);
-
             let fx = (bx_f - bx0 as f32).clamp(0.0, 1.0);
-            let fy = (by_f - by0 as f32).clamp(0.0, 1.0);
 
             let m00 = block_medians[by0 * nx + bx0];
             let m10 = block_medians[by0 * nx + bx1];
             let m01 = block_medians[by1 * nx + bx0];
             let m11 = block_medians[by1 * nx + bx1];
 
-            background[y * w + x] = m00 * (1.0 - fx) * (1.0 - fy)
+            *px = m00 * (1.0 - fx) * (1.0 - fy)
                 + m10 * fx * (1.0 - fy)
                 + m01 * (1.0 - fx) * fy
                 + m11 * fx * fy;
         }
-    }
+    });
 
     background
 }
@@ -578,6 +668,10 @@ struct RawCentroid {
 /// moments admit a slightly different set of marginal blobs (saturated stars
 /// with large halos, etc.), which destabilizes downstream calibration on
 /// dense fields like TESS.
+///
+/// This loop is ~2% of extraction wall-clock, so it is left sequential even
+/// under the `parallel` feature — the threading overhead would not pay off and
+/// keeps the two builds bit-identical here.
 fn compute_blob_centroids(
     gray: &[f32],
     labels: &[u32],

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### New features
+
+- **Optional `parallel` cargo feature: multi-threaded centroid extraction.**
+  Rayon-based parallelism for the extraction hot paths, off by default.
+  Parallelizes the dominant local-background stage (independent block medians +
+  bilinear interpolation rows, ~60% of extraction wall-clock) and the full-image
+  element-wise background-subtraction maps. Also enables numeris's rayon
+  `imageproc` paths, so the optional matched-filter Gaussian blur runs threaded.
+  Results are bit-identical to the sequential build. Measured ~1.9× (sparse
+  2-Mpix field) / ~1.45× (dense TESS field, ~37k blobs) on 8 cores. Build with
+  `--features image,parallel`. Connected-component labeling (sequential in
+  numeris) and the small per-blob centroid loop are left single-threaded.
+
+### Internal
+
+- Bumped `numeris` 0.5.11 → 0.5.12 (provides the rayon `imageproc` paths).
+
 ## 0.7.2
 
 Performance and tooling. No breaking public API changes.

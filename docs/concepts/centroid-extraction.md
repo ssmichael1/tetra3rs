@@ -152,6 +152,27 @@ The final list is **sorted by brightness** (integrated intensity above backgroun
 
 Optionally, the list can be truncated to `max_centroids` entries.
 
+## Performance
+
+### Multi-threading (`parallel` feature)
+
+The Rust crate's `parallel` feature multi-threads the extraction hot paths via
+[rayon](https://docs.rs/rayon). It parallelizes the local-background stage —
+independent block medians (step 1) and the bilinear interpolation rows, the
+single largest cost at ~60% of extraction wall-clock — along with the
+full-image element-wise background-subtraction maps. It also enables numeris's
+parallel `imageproc` routines, so the optional matched-filter Gaussian blur
+(step 3) runs threaded too. Results are bit-identical to the single-threaded
+build.
+
+Measured on an 8-core machine: **~1.9×** on a sparse 2-megapixel field and
+**~1.45×** on a dense TESS frame (~37k blobs). The dense case scales less
+because the per-blob centroid loop (step 6) — a small fraction of total time on
+typical fields — is left sequential, as is connected-component labeling (step
+5), which is inherently sequential.
+
+Build with `cargo build --release --features image,parallel`.
+
 ## Configuration Reference
 
 | Parameter | Default | Description |

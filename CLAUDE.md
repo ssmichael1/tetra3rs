@@ -21,6 +21,12 @@ cargo test --features image                  # integration tests (download test 
 cargo test --test skyview_solve_test --features image -- --nocapture
 cargo test --test tess_solve_test --features image -- --nocapture
 
+# Multi-threaded centroid extraction (rayon). Parallelizes the dominant
+# local-background stage + full-image maps; also turns on numeris's rayon
+# imageproc (matched-filter blur). Bit-identical results; ~1.9x sparse /
+# ~1.45x dense on 8 cores. Combine with `image`.
+cargo build --release --features image,parallel
+
 # Python (maturin via setuptools-rust)
 pip install -e .
 
