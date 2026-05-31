@@ -437,18 +437,27 @@ impl SolverDatabase {
                     if rotation_matrix.det() < 0.0 {
                         // Wrong parity (e.g. FITS image with CDELT1 < 0).
                         parity_flip = true;
-                        // Recompute rotation with flipped image pattern vectors
-                        let matched_img_flip: [[f32; 3]; 4] = std::array::from_fn(|i| {
-                            let orig = image_vecs[img_order[i]];
-                            [-orig[0], orig[1], orig[2]]
-                        });
-                        rotation_matrix = timed!(
-                            buckets::SVD,
-                            find_rotation_matrix(&matched_img_flip, &matched_cat)
-                        );
-                        if rotation_matrix.det() < 0.0 {
-                            continue; // still a reflection — skip
-                        }
+                        // Derive the parity-flipped rotation WITHOUT a second SVD.
+                        //
+                        // Flipping the x-component of every image vector is
+                        // img' = D·img with D = diag(-1, 1, 1). `find_rotation_matrix`
+                        // builds H = Σ imgᵢ · catᵢᵀ, decomposes H = U·S·Vᵀ, and
+                        // returns R = U·Vᵀ. With flipped image vectors
+                        //   H' = Σ (D·imgᵢ)·catᵢᵀ = D·H = (D·U)·S·Vᵀ,
+                        // a valid SVD because D is orthogonal. Hence
+                        //   R' = (D·U)·Vᵀ = D·(U·Vᵀ) = D·R,
+                        // i.e. R' is just R with its first ROW negated. Since
+                        // R = U·Vᵀ is invariant to the per-singular-vector sign
+                        // freedom of the decomposition, this is mathematically
+                        // exact and reproduces the second SVD bit-for-bit (up to
+                        // f32 rounding of a single extra negation).
+                        //
+                        // det(R') = det(D)·det(R) = −det(R) > 0 here, so R' is
+                        // always a proper rotation; the old "still a reflection →
+                        // skip" branch can never trigger and is therefore dropped.
+                        rotation_matrix[(0, 0)] = -rotation_matrix[(0, 0)];
+                        rotation_matrix[(0, 1)] = -rotation_matrix[(0, 1)];
+                        rotation_matrix[(0, 2)] = -rotation_matrix[(0, 2)];
                         // Lazily create flipped centroid vectors for matching
                         let fv = flipped_vectors.get_or_insert_with(|| {
                             centroid_vectors

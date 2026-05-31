@@ -204,16 +204,35 @@ fn solve_3x3(a: &[[f64; 3]; 3], b: &[f64; 3]) -> Option<[f64; 3]> {
 
 // ── Pixel-space matching ────────────────────────────────────────────────────
 
+/// Reusable scratch buffers for [`find_pixel_matches`]. Hoisted out of the outer
+/// refinement loop and `.clear()`ed before each call so the four allocations
+/// (candidate list + two used-flags + output) happen once per solve instead of
+/// once per outer iteration. Contents are fully overwritten each call, so reuse
+/// is behavior-identical to fresh allocation.
+#[derive(Default)]
+struct MatchScratch {
+    /// (dist_sq, cent_idx, pred_idx) candidate pairs within radius.
+    candidates: Vec<(f64, usize, usize)>,
+    /// Per-centroid "already assigned" flags.
+    used_cent: Vec<bool>,
+    /// Per-prediction "already assigned" flags.
+    used_pred: Vec<bool>,
+    /// Resulting `(centroid_idx, catalog_star_idx)` matches.
+    matches: Vec<(usize, usize)>,
+}
+
 /// Greedy 1-to-1 matching between centroid pixel positions and predicted catalog positions.
 ///
-/// Returns `Vec<(centroid_idx, catalog_star_idx)>` of unique matches
-/// within `radius_px` pixels.
-fn find_pixel_matches(
+/// Writes the unique matches `(centroid_idx, catalog_star_idx)` within
+/// `radius_px` pixels into `scratch.matches` and returns a reference to it. All
+/// buffers live in `scratch` so repeated calls reuse the same allocations.
+fn find_pixel_matches<'a>(
     centroid_pixels: &[(f64, f64)],
     max_centroids: usize,
     predicted: &[(usize, f64, f64)], // (catalog_star_idx, pred_x, pred_y)
     radius_px: f64,
-) -> Vec<(usize, usize)> {
+    scratch: &'a mut MatchScratch,
+) -> &'a [(usize, usize)] {
     let radius_sq = radius_px * radius_px;
     let n_cent = centroid_pixels.len().min(max_centroids);
 
@@ -221,7 +240,8 @@ fn find_pixel_matches(
     // `predicted` (not the catalog id) so uniqueness can use a bitset instead of
     // a HashSet — `predicted` holds distinct catalog stars, so position ↔ id is
     // a bijection and the dedup result is identical.
-    let mut candidates: Vec<(f64, usize, usize)> = Vec::new(); // (dist_sq, cent_idx, pred_idx)
+    let candidates = &mut scratch.candidates;
+    candidates.clear();
     for (cent_idx, &(cx, cy)) in centroid_pixels[..n_cent].iter().enumerate() {
         for (pred_idx, &(_cat_idx, px, py)) in predicted.iter().enumerate() {
             let dx = cx - px;
@@ -237,11 +257,16 @@ fn find_pixel_matches(
     candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     // Greedy unique 1-to-1 assignment
-    let mut used_cent = vec![false; n_cent];
-    let mut used_pred = vec![false; predicted.len()];
-    let mut matches = Vec::new();
+    let used_cent = &mut scratch.used_cent;
+    used_cent.clear();
+    used_cent.resize(n_cent, false);
+    let used_pred = &mut scratch.used_pred;
+    used_pred.clear();
+    used_pred.resize(predicted.len(), false);
+    let matches = &mut scratch.matches;
+    matches.clear();
 
-    for &(_, cent_idx, pred_idx) in &candidates {
+    for &(_, cent_idx, pred_idx) in candidates.iter() {
         if !used_cent[cent_idx] && !used_pred[pred_idx] {
             used_cent[cent_idx] = true;
             used_pred[pred_idx] = true;
@@ -382,12 +407,19 @@ const MAD_SCALE: f64 = 1.4826;
 /// Both the median and the median-absolute-deviation use the simple midpoint of
 /// the sorted values (`v[len / 2]`) — the refinement's existing convention.
 fn residual_median_sigma(residuals: &[(usize, f64)]) -> (f64, f64) {
+    // Only the single midpoint order statistic `v[len/2]` is needed from each
+    // list (the refinement's existing "median = sorted midpoint" convention), so
+    // a partial selection yields the identical element with less work than a full
+    // sort. `select_nth_unstable_by` places the k-th smallest at index k under
+    // the given comparator — the same value `sort_by` would put there.
     let mut res_vals: Vec<f64> = residuals.iter().map(|&(_, r)| r).collect();
-    res_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = res_vals[res_vals.len() / 2];
+    let mid = res_vals.len() / 2;
+    res_vals.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+    let median = res_vals[mid];
     let mut abs_devs: Vec<f64> = res_vals.iter().map(|r| (r - median).abs()).collect();
-    abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mad = abs_devs[abs_devs.len() / 2];
+    let mid_dev = abs_devs.len() / 2;
+    abs_devs.select_nth_unstable_by(mid_dev, |a, b| a.partial_cmp(b).unwrap());
+    let mad = abs_devs[mid_dev];
     (median, MAD_SCALE * mad)
 }
 
@@ -495,6 +527,13 @@ pub fn wcs_refine(
     let requery_margin = match_radius_rad as f64 * 2.0;
     let requery_cos = requery_margin.cos();
     let mut reassoc_cache: Option<(Vector3<f64>, Vec<usize>, Vec<StarRaDec>)> = None;
+
+    // Phase-D scratch reused across outer iterations: the projected-pixel list
+    // and the greedy-matcher's working buffers. Cleared + refilled each pass, so
+    // reuse is behavior-identical to fresh allocation but moves the allocations
+    // out of the loop.
+    let mut predicted: Vec<(usize, f64, f64)> = Vec::new();
+    let mut match_scratch = MatchScratch::default();
 
     // ── Outer refinement loop ───────────────────────────────────────────
     for outer_iter in 0..max_iterations {
@@ -706,8 +745,8 @@ pub fn wcs_refine(
             let prune_r2 = prune_r * prune_r;
             let sin_dec0 = crval_dec.sin();
             let cos_dec0 = crval_dec.cos();
-            let predicted: Vec<(usize, f64, f64)> = timed!(buckets::WCS_REASSOC_PROJECT, {
-                let mut predicted: Vec<(usize, f64, f64)> = Vec::new();
+            timed!(buckets::WCS_REASSOC_PROJECT, {
+                predicted.clear();
                 for (k, &cat_idx) in nearby_indices.iter().enumerate() {
                     if let Some((xi, eta)) =
                         tan_project_pre(&nearby_radec[k], crval_ra, sin_dec0, cos_dec0)
@@ -718,21 +757,21 @@ pub fn wcs_refine(
                         }
                     }
                 }
-                predicted
             });
 
-            let new_matches = timed!(
+            let new_matches: &[(usize, usize)] = timed!(
                 buckets::WCS_REASSOC_MATCH,
                 find_pixel_matches(
                     centroids_px,
                     max_match_centroids,
                     &predicted,
                     adaptive_radius_px,
+                    &mut match_scratch,
                 )
             );
 
             if new_matches.len() >= 4 {
-                let mut sorted_new = new_matches.clone();
+                let mut sorted_new = new_matches.to_vec();
                 sorted_new.sort();
                 let mut sorted_cur = current_matches.clone();
                 sorted_cur.sort();
@@ -745,7 +784,7 @@ pub fn wcs_refine(
                         new_matches.len(),
                         adaptive_radius_px,
                     );
-                    current_matches = new_matches;
+                    current_matches = new_matches.to_vec();
                     continue;
                 }
             }
