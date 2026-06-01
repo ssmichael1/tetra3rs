@@ -15,6 +15,19 @@
   `--features image,parallel`. Connected-component labeling (sequential in
   numeris) and the small per-blob centroid loop are left single-threaded.
 
+### Performance
+
+- **Faster solves, behavior-identical** (no algorithm or output changes):
+  - In the lost-in-space path, derive the parity-flipped rotation algebraically
+    (negate the first row of `R = U·Vᵀ`) instead of running a second SVD when the
+    initial rotation has `det < 0`. The old "still a reflection → skip" branch is
+    provably dead and removed.
+  - In `wcs_refine`, hoist heap allocations out of hot paths: the greedy pixel
+    matcher reuses a `MatchScratch` buffer set across calls, `residual_median_sigma`
+    uses `select_nth_unstable_by` (partial selection) instead of a full sort, and
+    the Phase-D `predicted` list and match scratch are allocated once before the
+    outer refinement loop.
+
 ### Internal
 
 - Bumped `numeris` 0.5.11 → 0.5.12 (provides the rayon `imageproc` paths).
