@@ -24,6 +24,7 @@ macro_rules! timed {
     }};
 }
 
+pub(crate) mod clock;
 pub(crate) mod combinations;
 pub(crate) mod database;
 pub(crate) mod matching;

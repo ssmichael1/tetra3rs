@@ -15,7 +15,7 @@
 //! This succeeds with as few as 3 matched stars (LIS needs 4) and is robust to
 //! pattern-hash failures from sparse / low-SNR fields.
 
-use std::time::Instant;
+use super::clock::Instant;
 
 use numeris::Vector3;
 use tracing::debug;

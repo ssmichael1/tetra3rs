@@ -11,7 +11,7 @@
 //!    d. Accept if false-positive probability is below threshold.
 
 use std::borrow::Cow;
-use std::time::Instant;
+use super::clock::Instant;
 
 use numeris::{Matrix3, Quaternion, Vector3};
 use tracing::{debug, warn};
