@@ -2,7 +2,7 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
-## Unreleased
+## 0.11.1 - 2026-08-30
 
 ### Changed
 
