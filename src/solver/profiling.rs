@@ -19,8 +19,8 @@
 //! - **Threading:** accumulators are `thread_local`, so [`snapshot`] reports only
 //!   the calling thread. A solve is single-threaded today; if solves are ever run
 //!   in parallel, per-thread results would need to be merged by the caller.
-//! - **Observer cost:** counting inside very hot leaves (e.g. `wcs_radec` fires
-//!   ~1000×/solve) adds a few ns per call via the `RefCell` borrow, which
+//! - **Observer cost:** counting inside very hot leaves (hundreds of calls per
+//!   solve) adds a few ns per call via the `RefCell` borrow, which
 //!   slightly inflates the *absolute* timing of the enclosing span. Counts
 //!   themselves are exact; relative splits from `timed!` spans around larger
 //!   blocks are reliable.
@@ -67,8 +67,6 @@ pub mod buckets {
     pub const WCS_OUTER: &str = "wcs_outer";
     /// Number of inner least-squares iterations.
     pub const WCS_INNER: &str = "wcs_inner";
-    /// `sv_to_radec` (atan2 + asin) invocations.
-    pub const WCS_RADEC: &str = "wcs_radec";
     /// Phase-D re-association: catalog cone query (timed).
     pub const WCS_REASSOC_QUERY: &str = "wcs_reassoc_query";
     /// Phase-D re-association: project nearby catalog stars to pixels (timed).

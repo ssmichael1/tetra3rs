@@ -319,6 +319,10 @@ impl SolverDatabase {
         // measured FOV (see the rebuild step in the candidate loop). Reused
         // across candidates to avoid per-candidate allocation.
         let mut rebuilt_vectors: Vec<[f32; 3]> = Vec::new();
+        // Scratch for the post-refinement re-verify (see the acceptance test
+        // in the candidate loop). Separate from `rebuilt_vectors` because
+        // `working_vectors` may still borrow that one.
+        let mut reverify_buf: Vec<[f32; 3]> = Vec::new();
 
         // Matching working buffers, held across the candidate loop so
         // `verify_attitude`/`find_centroid_matches` reuse them (see their
@@ -745,6 +749,7 @@ impl SolverDatabase {
                     // match measures the true scale, and the model's f is only
                     // a search seed here. Fewer than 4 surviving matches → try
                     // next candidate.
+                    let ps_fov = pixel_scale_from_fov(config.image_width(), fov as f64);
                     let Some(mut result) = self.refine_and_finalize(
                         &rotation_matrix,
                         &current_matches,
@@ -754,7 +759,7 @@ impl SolverDatabase {
                         config,
                         parity_flip,
                         fov,
-                        pixel_scale_from_fov(config.image_width(), fov as f64),
+                        ps_fov,
                         match_centroid_count,
                         4,
                         prob_mismatch,
@@ -797,13 +802,35 @@ impl SolverDatabase {
                     // lucky false one. Floored at 2.5 px (the refinement's own
                     // adaptive-radius floor) and never looser than the search
                     // radius.
+                    // The refinement was locked to the candidate's measured
+                    // scale (`ps_fov`), but `working_vectors` still sit at the
+                    // *swept* scale when the rebuild above was skipped
+                    // (mismatch ≤ 0.25·match_radius). That slack is harmless
+                    // at the coarse search radius, not at the tightened
+                    // re-verify radius below (floored at 2.5 px): the edge
+                    // residual ε·r reaches ~7 px on a 4096 px frame, silently
+                    // dropping true edge matches from the acceptance
+                    // statistic. Rebuild at `ps_fov` unless that already
+                    // happened — only pre-gated candidates reach here, so the
+                    // cost is negligible.
+                    let reverify_vectors: &[[f32; 3]] =
+                        if rebuild {
+                            working_vectors
+                        } else {
+                            let sign = if parity_flip { -1.0f32 } else { 1.0 };
+                            reverify_buf.clear();
+                            reverify_buf.extend(sorted_indices.iter().map(|&i| {
+                                unit_vector_from_pixels(&centroids[i], ps_fov as f32, sign)
+                            }));
+                            &reverify_buf
+                        };
                     let ps_refined = (1.0 / result.camera_model.focal_length_px) as f32;
                     let refined_radius = (5.0 * result.rmse_rad)
                         .max(2.5 * ps_refined)
                         .min(config.match_radius * result.fov_rad);
                     let (refined_matches, p_refined) = self.verify_attitude(
                         &refined_rotation,
-                        working_vectors,
+                        reverify_vectors,
                         match_centroid_count,
                         result.fov_rad,
                         config,

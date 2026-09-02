@@ -347,7 +347,6 @@ fn main() {
         const WCS_COUNTS: &[&str] = &[
             bk::WCS_OUTER,
             bk::WCS_INNER,
-            bk::WCS_RADEC,
             bk::WCS_REASSOC_CALL,
             bk::WCS_REASSOC_STARS,
         ];
@@ -386,11 +385,6 @@ fn main() {
                     n as f64 / sets.len() as f64
                 );
             }
-            let radec = get(bk::WCS_RADEC).1;
-            println!(
-                "    → sv_to_radec (atan2+asin) called {:.0}×/solve; tan_project similar — prime cache targets",
-                radec as f64 / sets.len() as f64
-            );
         }
 
         // The key question for the N×N precompute decision:

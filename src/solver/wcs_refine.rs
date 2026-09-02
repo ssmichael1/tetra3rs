@@ -207,52 +207,34 @@ fn predict_tanplane(px: f64, py: f64, cos_t: f64, sin_t: f64, ps: f64) -> (f64, 
     (xi, eta)
 }
 
-/// Precomputed per-star projection inputs: right ascension plus the sine and
-/// cosine of declination. Decoded once from the ICRS unit vector and reused
-/// across every refinement pass (the `atan2`/`asin`/`sin`/`cos` would otherwise
-/// be recomputed for the same star on every iteration).
-#[derive(Clone, Copy)]
-struct StarRaDec {
-    ra: f64,
-    sin_dec: f64,
-    cos_dec: f64,
-}
+/// Tangent-plane basis at CRVAL, `[e_ξ, e_η, boresight]` in ICRS — the
+/// camera rows of [`camera_rows_f64`] at θ = 0. Built once per fit pass
+/// (CRVAL moves between passes) and shared by every star in the pass.
+type TanBasis = [[f64; 3]; 3];
 
-/// Decode a catalog star's ICRS unit vector into [`StarRaDec`].
 #[inline]
-fn star_radec(sv: &[f32; 3]) -> StarRaDec {
-    #[cfg(feature = "profile")]
-    profiling::count(buckets::WCS_RADEC, 1);
-    let ra = (sv[1] as f64).atan2(sv[0] as f64);
-    let dec = (sv[2] as f64).asin();
-    StarRaDec {
-        ra,
-        sin_dec: dec.sin(),
-        cos_dec: dec.cos(),
-    }
+fn tan_basis(crval_ra: f64, crval_dec: f64) -> TanBasis {
+    camera_rows_f64(0.0, crval_ra, crval_dec)
 }
 
-/// TAN projection from precomputed star coords and precomputed CRVAL sin/cos.
+/// TAN projection of a catalog unit vector onto the tangent plane spanned by
+/// `basis` (see [`tan_basis`]).
 ///
-/// Equivalent to [`tan_project`] but takes a [`StarRaDec`] (star dec sin/cos
-/// already known) and the CRVAL declination sin/cos hoisted out of the per-star
-/// loop, leaving only `cos(da)`/`sin(da)` to compute per call.
+/// Equivalent to [`tan_project`] with no per-star transcendentals: for a unit
+/// vector `v`, `v·boresight` is the gnomonic denominator and `(v·e_ξ, v·e_η)`
+/// its numerators (Calabretta & Greisen 2002, §5.1.1, in Cartesian form).
+/// This is the same math Phase-D re-association already uses; it replaces the
+/// former per-star `atan2`/`asin`/`sin`/`cos` decode plus per-pass `cos(Δα)`/
+/// `sin(Δα)`. Returns `None` for a star on or behind the tangent plane.
 #[inline]
-fn tan_project_pre(
-    s: &StarRaDec,
-    crval_ra: f64,
-    sin_dec0: f64,
-    cos_dec0: f64,
-) -> Option<(f64, f64)> {
-    let da = s.ra - crval_ra;
-    let cos_da = da.cos();
-    let denom = s.sin_dec * sin_dec0 + s.cos_dec * cos_dec0 * cos_da;
+fn tan_project_vec(sv: &[f32; 3], basis: &TanBasis) -> Option<(f64, f64)> {
+    let v = [sv[0] as f64, sv[1] as f64, sv[2] as f64];
+    let dot = |r: &[f64; 3]| r[0] * v[0] + r[1] * v[1] + r[2] * v[2];
+    let denom = dot(&basis[2]);
     if denom <= 1e-12 {
         return None;
     }
-    let xi = s.cos_dec * da.sin() / denom;
-    let eta = (s.sin_dec * cos_dec0 - s.cos_dec * sin_dec0 * cos_da) / denom;
-    Some((xi, eta))
+    Some((dot(&basis[0]) / denom, dot(&basis[1]) / denom))
 }
 
 /// Accumulate one matched star's contribution to the 3-parameter
@@ -366,7 +348,7 @@ fn mad_clip_matches(
 /// pairs; matches whose star projects behind the tangent plane are skipped.
 fn compute_residuals(
     matches: &[(usize, usize)],
-    match_radec: &[StarRaDec],
+    star_vectors: &[[f32; 3]],
     centroids_px: &[(f64, f64)],
     theta: f64,
     crval_ra: f64,
@@ -375,14 +357,11 @@ fn compute_residuals(
 ) -> Vec<(usize, f64)> {
     let cos_t = theta.cos();
     let sin_t = theta.sin();
-    let sin_dec0 = crval_dec.sin();
-    let cos_dec0 = crval_dec.cos();
+    let basis = tan_basis(crval_ra, crval_dec);
 
     let mut residuals: Vec<(usize, f64)> = Vec::with_capacity(matches.len());
-    for (match_idx, &(cent_idx, _)) in matches.iter().enumerate() {
-        if let Some((xi_cat, eta_cat)) =
-            tan_project_pre(&match_radec[match_idx], crval_ra, sin_dec0, cos_dec0)
-        {
+    for (match_idx, &(cent_idx, cat_idx)) in matches.iter().enumerate() {
+        if let Some((xi_cat, eta_cat)) = tan_project_vec(&star_vectors[cat_idx], &basis) {
             let (px, py) = centroids_px[cent_idx];
             let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
             let dxi = xi_pred - xi_cat;
@@ -400,7 +379,7 @@ fn compute_residuals(
 /// equations are singular — callers skip the update / stop iterating.
 fn ls_fit_once(
     matches: &[(usize, usize)],
-    match_radec: &[StarRaDec],
+    star_vectors: &[[f32; 3]],
     centroids_px: &[(f64, f64)],
     theta: f64,
     crval_ra: f64,
@@ -409,18 +388,15 @@ fn ls_fit_once(
 ) -> Option<[f64; 3]> {
     let cos_t = theta.cos();
     let sin_t = theta.sin();
-    // CRVAL changes between passes; hoist its sin/cos out of the per-star loop.
-    let sin_dec0 = crval_dec.sin();
-    let cos_dec0 = crval_dec.cos();
+    // CRVAL changes between passes; build its tangent basis once per pass.
+    let basis = tan_basis(crval_ra, crval_dec);
 
     let mut ata = [[0.0f64; 3]; 3];
     let mut atb = [0.0f64; 3];
     let mut n_valid = 0u32;
 
-    for (i, &(cent_idx, _)) in matches.iter().enumerate() {
-        let Some((xi_cat, eta_cat)) =
-            tan_project_pre(&match_radec[i], crval_ra, sin_dec0, cos_dec0)
-        else {
+    for &(cent_idx, cat_idx) in matches {
+        let Some((xi_cat, eta_cat)) = tan_project_vec(&star_vectors[cat_idx], &basis) else {
             continue;
         };
 
@@ -573,14 +549,6 @@ pub fn wcs_refine(
     for outer_iter in 0..max_iterations {
         #[cfg(feature = "profile")]
         profiling::count(buckets::WCS_OUTER, 1);
-        // Precompute per-star (ra, sin_dec, cos_dec) for the current match set
-        // once; reused by Phase A's inner loop and Phase B. The values depend
-        // only on the star, not on θ/CRVAL.
-        let match_radec: Vec<StarRaDec> = current_matches
-            .iter()
-            .map(|&(_, cat_idx)| star_radec(&star_vectors[cat_idx]))
-            .collect();
-
         // ── Phase A: LS fit (δθ, dξ₀, dη₀) ──────────────────────────
         for inner_iter in 0..10 {
             if current_matches.len() < 3 {
@@ -591,7 +559,7 @@ pub fn wcs_refine(
 
             let Some(sol) = ls_fit_once(
                 &current_matches,
-                &match_radec,
+                star_vectors,
                 centroids_px,
                 theta,
                 crval_ra,
@@ -627,7 +595,7 @@ pub fn wcs_refine(
         // ── Phase B: Compute residuals ──────────────────────────────────
         let residuals = compute_residuals(
             &current_matches,
-            &match_radec,
+            star_vectors,
             centroids_px,
             theta,
             crval_ra,
@@ -809,13 +777,9 @@ pub fn wcs_refine(
             break;
         }
 
-        let match_radec: Vec<StarRaDec> = current_matches
-            .iter()
-            .map(|&(_, cat_idx)| star_radec(&star_vectors[cat_idx]))
-            .collect();
         let residuals = compute_residuals(
             &current_matches,
-            &match_radec,
+            star_vectors,
             centroids_px,
             theta,
             crval_ra,
@@ -843,13 +807,9 @@ pub fn wcs_refine(
         current_matches = keep;
 
         // Re-fit theta + CRVAL on the cleaned set (one LS pass)
-        let keep_radec: Vec<StarRaDec> = current_matches
-            .iter()
-            .map(|&(_, cat_idx)| star_radec(&star_vectors[cat_idx]))
-            .collect();
         if let Some(sol) = ls_fit_once(
             &current_matches,
-            &keep_radec,
+            star_vectors,
             centroids_px,
             theta,
             crval_ra,
@@ -868,13 +828,9 @@ pub fn wcs_refine(
     // exist only for the debug log below, so the sort they need is skipped
     // entirely unless DEBUG logging is enabled (this runs once per solve on the
     // profiling-dominant path).
-    let final_radec: Vec<StarRaDec> = current_matches
-        .iter()
-        .map(|&(_, cat_idx)| star_radec(&star_vectors[cat_idx]))
-        .collect();
     let mut final_residuals: Vec<f64> = compute_residuals(
         &current_matches,
-        &final_radec,
+        star_vectors,
         centroids_px,
         theta,
         crval_ra,
