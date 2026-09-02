@@ -24,6 +24,24 @@ Contributions are welcome! Whether it's bug reports, feature requests, documenta
 2. Make your changes and ensure all tests pass
 3. Open a pull request against `main` with a clear description of what you changed and why
 
+## Checking a refactor for identical behavior
+
+`tests/golden_dump.rs` solves 1500 deterministic synthetic fields (plain,
+spurious, FOV sweep, parity, tracking, aberration) and writes one line per
+solution. Run it before and after a change and diff the two files:
+
+```sh
+TETRA3_GOLDEN_OUT=/tmp/before.txt cargo test --release --test golden_dump -- --ignored --nocapture
+# ... make the change ...
+TETRA3_GOLDEN_OUT=/tmp/after.txt  cargo test --release --test golden_dump -- --ignored --nocapture
+diff /tmp/before.txt /tmp/after.txt
+```
+
+A pure refactor should produce no diff at all. A change to the verification
+statistic changes only the `prob=` column (strip it with
+`sed 's/prob=[^ ]* //'` before diffing). It needs `data/gaia_merged.bin`
+(downloaded on the first `--features image` integration-test run).
+
 ## Reporting issues
 
 Open an issue on GitHub. For bugs, please include:

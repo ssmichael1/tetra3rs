@@ -19,7 +19,6 @@
 //! attitude, and apply the sequential multiple-comparison correction.
 
 use super::clock::Instant;
-use std::borrow::Cow;
 
 use numeris::{Matrix3, Quaternion, Vector3};
 use tracing::{debug, warn};
@@ -48,6 +47,51 @@ const REFINED_SIGMA_FLOOR_PX: f32 = 0.5;
 
 /// Speed of light in km/s.
 pub(super) const C_KM_S: f64 = 299_792.458;
+
+/// Catalog unit vectors as seen by one solve: the database's stored ICRS
+/// vectors, optionally aberration-corrected for the observer's velocity.
+///
+/// The correction is applied *on access* rather than by copying the whole
+/// catalog per solve: a solve touches a few hundred stars (the pattern
+/// candidates, the verification cone, the refinement's re-association
+/// set), while the catalog holds tens or hundreds of thousands, so the
+/// former copy cost more than the solve itself whenever
+/// `observer_velocity_km_s` was set. Each access applies exactly the
+/// per-star formula the copy did, so results are bit-identical.
+#[derive(Clone, Copy)]
+pub(crate) struct StarVectors<'a> {
+    base: &'a [[f32; 3]],
+    /// Observer velocity / c in ICRS, when aberration is enabled.
+    beta: Option<[f64; 3]>,
+}
+
+impl<'a> StarVectors<'a> {
+    /// The stored vectors, uncorrected.
+    pub(crate) fn raw(base: &'a [[f32; 3]]) -> Self {
+        Self { base, beta: None }
+    }
+
+    /// Vectors corrected for the observer's barycentric velocity (km/s,
+    /// ICRS); `None` leaves them uncorrected.
+    pub(crate) fn with_observer_velocity(
+        base: &'a [[f32; 3]],
+        velocity_km_s: Option<[f64; 3]>,
+    ) -> Self {
+        Self {
+            base,
+            beta: velocity_km_s.map(|v| [v[0] / C_KM_S, v[1] / C_KM_S, v[2] / C_KM_S]),
+        }
+    }
+
+    /// Apparent unit vector of catalog star `idx`.
+    #[inline]
+    pub(crate) fn get(&self, idx: usize) -> [f32; 3] {
+        match &self.beta {
+            Some(beta) => aberration_correct(&self.base[idx], beta),
+            None => self.base[idx],
+        }
+    }
+}
 
 /// Classical stellar aberration: true ICRS unit vector → apparent.
 ///
@@ -78,8 +122,8 @@ struct LisContext<'a> {
     centroids: &'a [Centroid],
     /// Brightness-sorted centroid index order.
     sorted_indices: &'a [usize],
-    /// (Possibly aberration-corrected) catalog unit vectors.
-    star_vectors: &'a [[f32; 3]],
+    /// Catalog unit vectors as seen by this solve.
+    star_vectors: StarVectors<'a>,
     /// Number of brightest centroids the verification tests.
     match_centroid_count: usize,
     /// Per-centroid position σ in pixels (brightness order; 0 = unknown).
@@ -139,19 +183,10 @@ impl SolverDatabase {
         }
         let cam = &config.camera_model;
 
-        // ── Aberration correction: build corrected catalog vectors if velocity is set ──
-        let star_vecs: Cow<[[f32; 3]]> = match config.observer_velocity_km_s {
-            Some(v) => {
-                let beta = [v[0] / C_KM_S, v[1] / C_KM_S, v[2] / C_KM_S];
-                Cow::Owned(
-                    self.star_vectors
-                        .iter()
-                        .map(|sv| aberration_correct(sv, &beta))
-                        .collect(),
-                )
-            }
-            None => Cow::Borrowed(&self.star_vectors),
-        };
+        // Catalog vectors for this solve, aberration-corrected on access when
+        // an observer velocity is set (see `StarVectors`).
+        let star_vecs =
+            StarVectors::with_observer_velocity(&self.star_vectors, config.observer_velocity_km_s);
 
         let pre = preprocess(centroids, cam);
         let working_centroids: &[Centroid] = &pre.centroids;
@@ -159,7 +194,7 @@ impl SolverDatabase {
 
         // ── Tracking-mode shortcut: if a hint is provided, try direct correspondence first ──
         if let Some(ref hint) = config.attitude_hint {
-            match self.solve_with_hint(working_centroids, &star_vecs, config, hint, t0) {
+            match self.solve_with_hint(working_centroids, star_vecs, config, hint, t0) {
                 Ok(mut solution) => {
                     remap_matched_indices(&mut solution, orig_indices);
                     debug!(
@@ -204,7 +239,7 @@ impl SolverDatabase {
             config,
             centroids: working_centroids,
             sorted_indices: &sorted_indices,
-            star_vectors: &star_vecs,
+            star_vectors: star_vecs,
             match_centroid_count,
             sigma_px: centroid_sigma_px(working_centroids, &sorted_indices),
             t0,
@@ -218,7 +253,7 @@ impl SolverDatabase {
             working_centroids,
             &sorted_indices,
             config,
-            &star_vecs,
+            star_vecs,
             t0,
         );
         let mut solution = search.run(&mut |h| self.accept_lis_candidate(h, &mut ctx))?;
@@ -427,7 +462,7 @@ impl SolverDatabase {
         verify_matches: &[(usize, usize)],
         centroids: &[Centroid],
         sorted_indices: &[usize],
-        star_vectors: &[[f32; 3]],
+        star_vectors: StarVectors<'_>,
         config: &SolveConfig,
         parity_flip: bool,
         fov: f32,
@@ -492,7 +527,7 @@ impl SolverDatabase {
     fn finalize_solve_result(
         &self,
         wcs_result: &wcs_refine::WcsRefineResult,
-        star_vectors: &[[f32; 3]],
+        star_vectors: StarVectors<'_>,
         sorted_indices: &[usize],
         centroids_px: &[(f64, f64)],
         config: &SolveConfig,
@@ -530,7 +565,7 @@ impl SolverDatabase {
             let norm = (ix * ix + iy * iy + iz * iz).sqrt();
             let img_v = refined_rotation.transpose()
                 * Vector3::from_array([ix / norm, iy / norm, iz / norm]);
-            let sv = &star_vectors[cat_star_idx];
+            let sv = star_vectors.get(cat_star_idx);
             let cat_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
             let cross = img_v.cross(&cat_v);
             let ang = cross.norm().atan2(img_v.dot(&cat_v));
@@ -619,8 +654,8 @@ pub(super) fn failure(status: SolveStatus, t0: Instant) -> SolveResult {
 /// to f32. Returns `None` if the SVD fails (degenerate cross-covariance from
 /// pathological input vectors). Serves both the fixed-size 4-star LIS pattern
 /// and the tracking path's dynamic correspondence sets.
-pub(super) fn wahba_rotation<'a>(
-    pairs: impl IntoIterator<Item = (&'a [f32; 3], &'a [f32; 3])>,
+pub(super) fn wahba_rotation(
+    pairs: impl IntoIterator<Item = ([f32; 3], [f32; 3])>,
 ) -> Option<Matrix3<f32>> {
     let mut h = numeris::Matrix3::<f64>::zeros();
     for (img, cat) in pairs {

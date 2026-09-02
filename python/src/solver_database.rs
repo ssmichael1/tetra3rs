@@ -479,12 +479,10 @@ impl PySolverDatabase {
 
     #[staticmethod]
     fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
-        let inner = postcard::from_bytes::<SolverDatabase>(data)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        // Corrupt pickle bytes can decode into a structurally-valid database
-        // whose indices panic mid-solve; enforce the same invariants as
-        // load_from_file (ValueError instead of a deferred PanicException).
-        inner.validate().map_err(crate::helpers::map_tetra3_err)?;
+        // Header-aware decode + the same invariant checks as load_from_file
+        // (corrupt pickle bytes must raise, never panic mid-solve). Pickles
+        // from before the file header existed still load (legacy path).
+        let inner = SolverDatabase::from_bytes(data).map_err(crate::helpers::map_tetra3_err)?;
         Ok(Self { inner })
     }
 

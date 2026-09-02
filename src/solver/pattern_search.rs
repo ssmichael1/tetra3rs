@@ -26,7 +26,7 @@ use super::pattern::{
     hash_to_index, sort_pattern_by_centroid_distance, NUM_EDGES, NUM_EDGE_RATIOS, PATTERN_SIZE,
 };
 use super::preprocess::{centroid_unit_vectors, unit_vector_from_pixels, CentroidVectors};
-use super::solve::{elapsed_ms, failure, wahba_rotation};
+use super::solve::{elapsed_ms, failure, wahba_rotation, StarVectors};
 use super::verify::diagonal_factor;
 use super::{
     pixel_scale_from_fov, Solution, SolveConfig, SolveResult, SolveStatus, SolverDatabase,
@@ -62,8 +62,8 @@ pub(super) struct PatternSearch<'a> {
     centroids: &'a [Centroid],
     /// Brightness-sorted centroid index order.
     sorted_indices: &'a [usize],
-    /// (Possibly aberration-corrected) catalog unit vectors.
-    star_vectors: &'a [[f32; 3]],
+    /// Catalog unit vectors as seen by this solve.
+    star_vectors: StarVectors<'a>,
     t0: Instant,
     /// FOV values to try: exact estimate first, then spiraling outward.
     fov_values: Vec<f32>,
@@ -80,7 +80,7 @@ impl<'a> PatternSearch<'a> {
         centroids: &'a [Centroid],
         sorted_indices: &'a [usize],
         config: &'a SolveConfig,
-        star_vectors: &'a [[f32; 3]],
+        star_vectors: StarVectors<'a>,
         t0: Instant,
     ) -> Self {
         let fov_values = build_fov_sweep(
@@ -410,10 +410,10 @@ impl<'a> PatternSearch<'a> {
                     // Full edge-ratio comparison
                     let cat_pat = entry.star_indices;
                     let cat_vecs: [[f32; 3]; 4] = [
-                        star_vectors[cat_pat[0] as usize],
-                        star_vectors[cat_pat[1] as usize],
-                        star_vectors[cat_pat[2] as usize],
-                        star_vectors[cat_pat[3] as usize],
+                        star_vectors.get(cat_pat[0] as usize),
+                        star_vectors.get(cat_pat[1] as usize),
+                        star_vectors.get(cat_pat[2] as usize),
+                        star_vectors.get(cat_pat[3] as usize),
                     ];
                     // Catalog-side edges: the analogue of `image_edges`, but
                     // computed per surviving candidate and NOT precomputable
@@ -505,7 +505,9 @@ impl<'a> PatternSearch<'a> {
                     // centroids) fails the SVD — skip the candidate, don't panic.
                     let Some(mut rotation_matrix) = timed!(
                         buckets::SVD,
-                        wahba_rotation(matched_img.iter().zip(matched_cat.iter()))
+                        wahba_rotation(
+                            matched_img.iter().copied().zip(matched_cat.iter().copied())
+                        )
                     ) else {
                         continue;
                     };

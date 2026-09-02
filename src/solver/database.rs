@@ -430,10 +430,55 @@ fn compute_magnitude_cutoff(stars: &[Star], min_fov: f32, verification_stars_per
 
 // ── Serialization ───────────────────────────────────────────────────────────
 
+/// Magic prefix of a serialized database (`to_bytes` / `save_to_file`).
+const DB_MAGIC: &[u8; 4] = b"T3DB";
+/// Current serialized-database format version, written after the magic as
+/// a little-endian `u16`. Bump when the postcard payload's layout changes so
+/// an old crate fails a new file with a clear message (and vice versa)
+/// instead of an opaque decode error or a silently mis-decoded table.
+const DB_FORMAT_VERSION: u16 = 1;
+
 impl SolverDatabase {
-    /// Serialize the database to bytes using postcard.
+    /// Serialize the database: a 6-byte header (`"T3DB"` + format version)
+    /// followed by the postcard payload. See [`Self::from_bytes`].
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
-        Ok(postcard::to_allocvec(self)?)
+        let mut bytes = Vec::with_capacity(6 + 64);
+        bytes.extend_from_slice(DB_MAGIC);
+        bytes.extend_from_slice(&DB_FORMAT_VERSION.to_le_bytes());
+        postcard::to_extend(self, bytes).map_err(Into::into)
+    }
+
+    /// Decode a database produced by [`Self::to_bytes`] (or, for files
+    /// written before the header existed, a bare postcard payload — detected
+    /// by the missing magic) and check its invariants with
+    /// [`Self::validate`].
+    ///
+    /// Fails with [`crate::Error::InvalidInput`] on an unsupported format
+    /// version, and with the decode error on a truncated or corrupt payload.
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        let payload = match bytes.strip_prefix(DB_MAGIC) {
+            Some(rest) => {
+                let (ver, payload) = rest.split_at_checked(2).ok_or_else(|| {
+                    crate::Error::InvalidInput("database header truncated after the magic".into())
+                })?;
+                let version = u16::from_le_bytes([ver[0], ver[1]]);
+                if version != DB_FORMAT_VERSION {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "unsupported database format version {version} \
+                         (this crate reads version {DB_FORMAT_VERSION})"
+                    )));
+                }
+                payload
+            }
+            // Legacy (pre-header) file: the whole buffer is the payload. A
+            // legacy payload starting with the magic bytes would need
+            // nside = 0x54 followed by n_lat = 0x33, which `validate()`
+            // rejects (n_lat must be 3·nside), so misdetection cannot load.
+            None => bytes,
+        };
+        let db = postcard::from_bytes::<Self>(payload)?;
+        db.validate()?;
+        Ok(db)
     }
 
     /// Save the database to a file using postcard.
@@ -444,15 +489,15 @@ impl SolverDatabase {
         Ok(())
     }
 
-    /// Load a database from a postcard file.
+    /// Load a database file written by [`Self::save_to_file`] (or a legacy
+    /// pre-header file). See [`Self::from_bytes`].
     ///
     /// The decoded database is checked with [`Self::validate`], so a corrupt,
     /// truncated, or tampered file fails here with a descriptive
     /// [`crate::Error::InvalidInput`] instead of panicking mid-solve.
     pub fn load_from_file(path: &str) -> crate::Result<Self> {
         let bytes = std::fs::read(path)?;
-        let db = postcard::from_bytes::<Self>(&bytes)?;
-        db.validate()?;
+        let db = Self::from_bytes(&bytes)?;
         info!(
             "Loaded database: {} stars, {} patterns",
             db.star_catalog.len(),
@@ -545,5 +590,39 @@ impl SolverDatabase {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unsupported_version_and_truncated_header() {
+        let mut bytes = DB_MAGIC.to_vec();
+        bytes.extend_from_slice(&(DB_FORMAT_VERSION + 1).to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 32]);
+        let err = SolverDatabase::from_bytes(&bytes).unwrap_err().to_string();
+        assert!(err.contains("unsupported database format version"), "{err}");
+
+        let err = SolverDatabase::from_bytes(&DB_MAGIC[..])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("truncated"), "{err}");
+        let err = SolverDatabase::from_bytes(&bytes[..5])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn garbage_payload_is_an_error_not_a_panic() {
+        let mut bytes = DB_MAGIC.to_vec();
+        bytes.extend_from_slice(&DB_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&[0xFF; 40]);
+        assert!(SolverDatabase::from_bytes(&bytes).is_err());
+        // Legacy path (no magic): also an error, never a panic.
+        assert!(SolverDatabase::from_bytes(&[0xFF; 40]).is_err());
+        assert!(SolverDatabase::from_bytes(&[]).is_err());
     }
 }
