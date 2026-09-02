@@ -766,6 +766,16 @@ pub struct Solution {
     pub prob: f64,
     /// Wall-clock time spent solving, in milliseconds.
     pub solve_time_ms: f32,
+    /// Covariance of the refined attitude parameters, in rad²:
+    /// `[[σ²_θ, ·, ·], [·, σ²_ξ, ·], [·, ·, σ²_η]]` for `[θ, ξ₀, η₀]` — roll
+    /// about the boresight ([`theta_rad`](Self::theta_rad)) and the
+    /// tangent-plane offsets of the boresight, East and North at CRVAL.
+    /// Estimated from the refinement's normal equations, `σ²·(JᵀJ)⁻¹` with
+    /// `σ² = Σ residual² / (2n − 3)` over the `n` matched stars, so it
+    /// reflects the centroid scatter actually observed. The diagonal is `+∞`
+    /// when the fit is unconstrained (fewer than 2 matches) or degenerate.
+    /// See [`Solution::attitude_sigma_rad`].
+    pub attitude_cov_rad2: [[f64; 3]; 3],
     /// Whether the image x-axis was flipped to achieve a proper rotation.
     ///
     /// When `true`, the rotation matrix assumes negated x-coordinates.
@@ -801,6 +811,14 @@ pub struct Solution {
 }
 
 impl Solution {
+    /// 1σ uncertainties `[σ_θ, σ_ξ, σ_η]` (radians) of the refined attitude:
+    /// the square roots of the diagonal of
+    /// [`attitude_cov_rad2`](Self::attitude_cov_rad2). The boresight's
+    /// pointing uncertainty is `hypot(σ_ξ, σ_η)`.
+    pub fn attitude_sigma_rad(&self) -> [f64; 3] {
+        std::array::from_fn(|i| self.attitude_cov_rad2[i][i].sqrt())
+    }
+
     /// Convert centered pixel coordinates to world coordinates (RA, Dec) in degrees.
     ///
     /// Pixel coordinates use the same convention as solver centroids:

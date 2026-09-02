@@ -605,6 +605,7 @@ impl SolverDatabase {
             max_err_rad: max_err,
             prob,
             solve_time_ms: elapsed_ms(t0),
+            attitude_cov_rad2: wcs_result.covariance,
             parity_flip,
             matched_catalog_ids: matched_cat_ids,
             matched_centroid_indices: matched_cent_inds,
