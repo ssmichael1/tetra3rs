@@ -137,6 +137,8 @@ Publishing:
 |---|---|---|
 | Unit (`cargo test`) | — | 40/40 passing (1 ignored) |
 | `tests/integration_test.rs` | — | 4/4 (1000 noiseless + 1000 noisy + basic + save/load) |
+| `tests/spatial_index_test.rs` | — | catalog cone query vs brute force over the whole sphere (polar caps, radii to 80°, nside 4/16/64) |
+| `tests/golden_dump.rs` (ignored) | 10° | 1500-field solution dump for before/after diffing of refactors (`TETRA3_GOLDEN_OUT=…`; see CONTRIBUTING.md) |
 | `tests/skyview_solve_test.rs` | 10° | 10/10 — synthetic NASA SkyView FITS, simple CDELT WCS |
 | `tests/tess_solve_test.rs` | ~12° | 3-image basic (<30′), 3-image distortion fit (<1′), 10-image multi-sector calibration (RMSE <9″, FITS WCS agreement <3″) |
 

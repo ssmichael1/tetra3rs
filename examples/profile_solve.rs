@@ -16,75 +16,29 @@
 use std::time::Instant;
 
 use numeris::{Matrix3, Vector3};
-use tetra3::{Centroid, GenerateDatabaseConfig, SolveConfig, SolverDatabase};
+use tetra3::{Centroid, SolveConfig, SolverDatabase};
 
-/// Minimal deterministic xorshift64* RNG — keeps the example dependency-light.
-struct Rng(u64);
-impl Rng {
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-    /// Uniform f32 in [0, 1).
-    fn unit(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
-    }
-}
-
-fn rotation_from_ra_dec_roll(ra: f32, dec: f32, roll: f32) -> Matrix3<f32> {
-    let boresight = Vector3::from_array([dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]);
-    let cam_z = boresight.normalize();
-    let north = Vector3::from_array([0.0, 0.0, 1.0]);
-    let raw_x = north.cross(&cam_z);
-    let cam_x_noroll = if raw_x.norm() > 1e-6 {
-        raw_x.normalize()
-    } else {
-        Vector3::from_array([1.0, 0.0, 0.0])
-            .cross(&cam_z)
-            .normalize()
-    };
-    let cam_y_noroll = cam_z.cross(&cam_x_noroll);
-    let cam_x = cam_x_noroll * roll.cos() + cam_y_noroll * roll.sin();
-    let cam_y = -cam_x_noroll * roll.sin() + cam_y_noroll * roll.cos();
-    Matrix3::new([
-        [cam_x[0], cam_x[1], cam_x[2]],
-        [cam_y[0], cam_y[1], cam_y[2]],
-        [cam_z[0], cam_z[1], cam_z[2]],
-    ])
-}
+#[path = "../tests/common/mod.rs"]
+mod common;
+use common::{rotation_from_ra_dec_roll, Rng};
 
 fn generate_centroids(
     db: &SolverDatabase,
     rot: &Matrix3<f32>,
-    boresight_icrs: &Vector3<f32>,
     half_fov: f32,
     pixel_scale: f32,
+    rng: &mut Rng,
 ) -> Vec<Centroid> {
-    let nearby = db
-        .star_catalog
-        .query_indices_from_uvec(*boresight_icrs, half_fov * 1.2);
-    let mut centroids = Vec::new();
-    for &idx in &nearby {
-        let sv = &db.star_vectors[idx];
-        let cam_v = *rot * Vector3::from_array([sv[0], sv[1], sv[2]]);
-        if cam_v[2] > 0.01 {
-            let cx_rad = cam_v[0] / cam_v[2];
-            let cy_rad = cam_v[1] / cam_v[2];
-            if cx_rad.abs() < half_fov && cy_rad.abs() < half_fov {
-                centroids.push(Centroid {
-                    x: cx_rad / pixel_scale,
-                    y: cy_rad / pixel_scale,
-                    mass: Some(10.0 - db.star_catalog.stars()[idx].mag),
-                    cov: None,
-                });
-            }
-        }
-    }
-    centroids
+    let mags: Vec<f32> = db.star_catalog.stars().iter().map(|s| s.mag).collect();
+    common::project_field(
+        &db.star_vectors,
+        &mags,
+        rot,
+        half_fov,
+        pixel_scale,
+        0.0,
+        rng,
+    )
 }
 
 fn main() {
@@ -99,18 +53,16 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 10° FOV database (matches tests/integration_test.rs statistical test).
-    let config = GenerateDatabaseConfig {
-        max_fov_deg: 12.0,
-        min_fov_deg: None,
-        star_max_magnitude: Some(7.0),
-        pattern_max_error: 0.003,
-        lattice_field_oversampling: 50,
-        patterns_per_lattice_field: 100,
-        verification_stars_per_fov: 40,
-        multiscale_step: 1.5,
-        epoch_proper_motion_year: Some(2025.0),
-        catalog_nside: 8,
+    // T3_FOV_DEG=x sets the camera FOV (default 10°); the database's max FOV
+    // scales with it (1.2×, as the default 12° does for 10°).
+    let fov_deg: f32 = std::env::var("T3_FOV_DEG")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10.0);
+    // 10° FOV database (shared with the golden dump and statistical tests).
+    let config = tetra3::GenerateDatabaseConfig {
+        max_fov_deg: fov_deg * 1.2,
+        ..common::profiler_db_config()
     };
 
     eprintln!("Building database from {catalog_path} …");
@@ -124,7 +76,7 @@ fn main() {
         t_build.elapsed().as_secs_f32()
     );
 
-    let fov_rad = 10.0_f32.to_radians();
+    let fov_rad = fov_deg.to_radians();
     let half_fov = fov_rad / 2.0;
     let image_width = 1024u32;
     let pixel_scale = {
@@ -172,6 +124,7 @@ fn main() {
     //   T3_MAX_CENTROIDS=N  keep only the N brightest true centroids per field
     //   T3_PATTERN_STARS=N  cap pattern-forming centroids at the N brightest
     //   T3_ABERRATION=1     aberration-correct the catalog (observer velocity set)
+    //   T3_FOV_DEG=x        camera FOV in degrees (database max FOV = 1.2×; default 10)
     //                  (sparse-field scenario; fields with fewer than 4 are
     //                  regenerated as usual)
     let spurious: usize = std::env::var("T3_SPURIOUS")
@@ -187,7 +140,7 @@ fn main() {
         "Scenario: random_only={random_only}, spurious_per_field={spurious}, fov_bias={fov_bias}, max_centroids={max_centroids:?}, pattern_stars={pattern_checking_stars}"
     );
 
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15);
     let add_spurious = |c: &mut Vec<Centroid>, rng: &mut Rng, k: usize| {
         for _ in 0..k {
             c.push(Centroid {
@@ -215,7 +168,7 @@ fn main() {
         let mut c = if random_only {
             Vec::new()
         } else {
-            generate_centroids(&db, &rot, &boresight, half_fov, pixel_scale)
+            generate_centroids(&db, &rot, half_fov, pixel_scale, &mut rng)
         };
         if let Some(n) = max_centroids {
             c.sort_by(|a, b| {
