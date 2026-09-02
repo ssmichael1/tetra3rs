@@ -652,6 +652,7 @@ class SolverDatabase:
         match_threshold: float = 1e-5,
         solve_timeout_ms: Optional[int] = 5000,
         max_patterns_checked: Optional[int] = 10_000_000,
+        pattern_checking_stars: int = 24,
         match_max_error: Optional[float] = None,
         camera_model: Optional[CameraModel] = None,
         observer_velocity_km_s: Optional[list[float]] = None,
@@ -673,7 +674,8 @@ class SolverDatabase:
           ``match_radius``, ``match_threshold``, ``solve_timeout_ms``,
           ``max_patterns_checked``,
           ``observer_velocity_km_s``.
-        * **Lost-in-space only:** ``fov_max_error_*``, ``match_max_error``.
+        * **Lost-in-space only:** ``fov_max_error_*``, ``match_max_error``,
+          ``pattern_checking_stars``.
         * **Tracking only** (ignored unless ``attitude_hint`` is set):
           ``attitude_hint``, ``hint_uncertainty_*``, ``strict_hint``.
 
@@ -710,6 +712,12 @@ class SolverDatabase:
                 than wall time, so the outcome is the same on every machine;
                 composes with ``solve_timeout_ms`` (whichever trips first).
                 None = unbounded. Lost-in-space only.
+            pattern_checking_stars: Number of brightest (well-separated)
+                centroids the lost-in-space search forms 4-star patterns
+                from; fainter centroids still take part in verification.
+                Bounds a no-match search at C(N, 4) patterns per FOV value.
+                Raise it when many of the brightest detections are not
+                catalog stars. Must be >= 4. Lost-in-space only.
             match_max_error: Maximum edge-ratio error. None = use database value.
                 Values below the database's pattern quantization error are clamped up to it.
                 Lost-in-space only — tracking does not use the pattern hash.

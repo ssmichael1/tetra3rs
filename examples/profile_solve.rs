@@ -140,12 +140,20 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
 
+    // T3_PATTERN_STARS=N caps the pattern-forming centroids at the N
+    // brightest (SolveConfig::pattern_checking_stars; default when unset).
+    let pattern_checking_stars: u32 = std::env::var("T3_PATTERN_STARS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(SolveConfig::DEFAULT_PATTERN_CHECKING_STARS);
+
     let solve_config = SolveConfig {
         fov_max_error_rad: Some(2.0_f32.to_radians()),
         match_radius: 0.01,
         match_threshold: 1e-5,
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
+        pattern_checking_stars,
         ..SolveConfig::new(fov_rad * (1.0 + fov_bias), image_width, image_width)
     };
 
@@ -155,6 +163,7 @@ fn main() {
     //                  full combination enumeration × full FOV sweep)
     //   T3_FOV_BIAS=x  bias the solver's FOV estimate by fraction x (see below)
     //   T3_MAX_CENTROIDS=N  keep only the N brightest true centroids per field
+    //   T3_PATTERN_STARS=N  cap pattern-forming centroids at the N brightest
     //                  (sparse-field scenario; fields with fewer than 4 are
     //                  regenerated as usual)
     let spurious: usize = std::env::var("T3_SPURIOUS")
@@ -167,7 +176,7 @@ fn main() {
         .and_then(|s| s.parse().ok());
     let half_w_px = half_fov / pixel_scale; // image half-extent in pixels
     eprintln!(
-        "Scenario: random_only={random_only}, spurious_per_field={spurious}, fov_bias={fov_bias}, max_centroids={max_centroids:?}"
+        "Scenario: random_only={random_only}, spurious_per_field={spurious}, fov_bias={fov_bias}, max_centroids={max_centroids:?}, pattern_stars={pattern_checking_stars}"
     );
 
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);

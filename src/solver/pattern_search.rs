@@ -229,14 +229,22 @@ impl<'a> PatternSearch<'a> {
             }
         }
 
-        let pattern_centroid_inds: Vec<usize> = (0..num_centroids)
+        let mut pattern_centroid_inds: Vec<usize> = (0..num_centroids)
             .filter(|&i| keep_for_patterns[i])
             .collect();
+        let num_after_thinning = pattern_centroid_inds.len();
+        // Only the brightest `pattern_checking_stars` survivors form
+        // patterns (see `SolveConfig::pattern_checking_stars`): the table
+        // holds patterns among each field's brightest well-separated stars,
+        // so bright quads are the ones that can hit, and the cap bounds a
+        // no-match search at C(N, 4) per FOV value. `pattern_centroid_inds`
+        // is ascending in brightness rank, so truncation keeps the brightest.
+        pattern_centroid_inds.truncate(config.pattern_checking_stars as usize);
         let num_pattern_centroids = pattern_centroid_inds.len();
 
         debug!(
-            "Centroids: {} total, {} for patterns after cluster busting",
-            num_centroids, num_pattern_centroids
+            "Centroids: {} total, {} for patterns after cluster busting, {} after the brightness cap",
+            num_centroids, num_after_thinning, num_pattern_centroids
         );
 
         if num_pattern_centroids < PATTERN_SIZE {

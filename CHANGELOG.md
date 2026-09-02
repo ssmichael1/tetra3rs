@@ -4,8 +4,14 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 ## Unreleased
 
+### Added
+
+- **Breaking:** `SolveConfig::pattern_checking_stars` (Python `pattern_checking_stars=`, default 24): only the brightest N well-separated centroids form 4-star patterns (fainter ones still verify), bounding a fruitless lost-in-space search at C(N, 4) patterns per FOV value — 200-detection no-match frames 28 → 8.8 ms on the profiler, and frames that thin to a 150-star pattern set no longer run to the timeout. Solved fields are unchanged (1500-field golden dump identical; SkyView/TESS suites pass; a cap of 12 lost 3/10 real SkyView fields, 20 is the minimum that passes). `u32::MAX` restores the unbounded search; < 4 fails `validate()`. Adds a field to an exhaustive struct → 0.13.0. ([#61](https://github.com/ssmichael1/tetra3rs/pull/61))
+- Profiler knob `T3_PATTERN_STARS=N`. ([#61](https://github.com/ssmichael1/tetra3rs/pull/61))
+
 ### Changed
 
+- Database generation sorts the pattern list before building the hash table, so a database is a pure function of its inputs; previously `HashSet` iteration order varied per process, changing hash-chain order and the candidates-tested divisor of `Solution.prob` between otherwise identical databases. ([#61](https://github.com/ssmichael1/tetra3rs/pull/61))
 - The lost-in-space solve is split into explicit stages — `preprocess` → `PatternSearch` (hypothesis source: FOV sweep, hash lookup, SVD, parity) → `verify_attitude` → `accept_lis_candidate` (pre-gate, refine, re-verify, correction) — with the verification vectors carrying their pixel scale (`CentroidVectors`) so a stage needing a different scale rebuilds instead of silently testing at the wrong one; tracking is the second hypothesis source into the same verify/refine tail. Crate-private; results bit-identical on 1500 synthetic fields across plain, spurious, FOV-sweep, parity, hinted and aberration scenarios. ([#60](https://github.com/ssmichael1/tetra3rs/pull/60))
 - WCS refinement projects catalog stars with the tangent-plane basis at CRVAL (dot products, as Phase-D re-association already did) instead of decoding each matched star to RA/Dec and evaluating per-star trig every pass; `wcs_refine` 16.9 → 12.2 µs per solve on the profiler field (mean solve 50 → 41 µs), results unchanged within f64 rounding. ([#59](https://github.com/ssmichael1/tetra3rs/pull/59))
 
