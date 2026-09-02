@@ -323,7 +323,12 @@ impl SolverDatabase {
             );
         }
 
-        let pattern_list: Vec<[u32; PATTERN_SIZE]> = pattern_set.into_iter().collect();
+        // Sort so the table layout is a pure function of the input: HashSet
+        // iteration order varies per process, which made hash-chain order —
+        // and therefore the candidate order / `Solution.prob` divisor of a
+        // solve — differ between databases generated from identical inputs.
+        let mut pattern_list: Vec<[u32; PATTERN_SIZE]> = pattern_set.into_iter().collect();
+        pattern_list.sort_unstable();
         info!("Total unique patterns: {}", pattern_list.len());
 
         // ── Build hash table ──
