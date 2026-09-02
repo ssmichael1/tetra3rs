@@ -12,7 +12,7 @@
 //!
 //! ## Scope & caveats
 //!
-//! - **Instrumented paths:** only the lost-in-space solve (`solve::solve_at_fov`)
+//! - **Instrumented paths:** only the lost-in-space solve (`pattern_search::PatternSearch`)
 //!   and its `wcs_refine`. The tracking/hint path (`track.rs`) and database
 //!   generation are **not** instrumented — profiling a tracking workload yields
 //!   empty buckets for the solve loop.
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 /// instrumentation sites and any reporting harness. Using these consts instead
 /// of string literals keeps the two in sync and makes typos a compile error.
 pub mod buckets {
-    // ── solver hot loop (solve::solve_at_fov) ──
+    // ── solver hot loop (pattern_search::PatternSearch::pass_at_fov) ──
     /// Image-side sorted edge angles + ratios (the N×N-precompute target).
     pub const IMAGE_EDGES: &str = "image_edges";
     /// Catalog-side sorted edge angles + ratios per surviving candidate.

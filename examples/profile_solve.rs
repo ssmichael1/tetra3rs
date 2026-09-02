@@ -1,7 +1,7 @@
 //! Leaf-level solver profiler.
 //!
 //! Builds a 10°-FOV database once, then solves many random orientations and
-//! reports where time goes inside `solve_at_fov` (image-side edges, catalog-side
+//! reports where time goes inside the pattern search (image-side edges, catalog-side
 //! edges, SVD, verification query/match, wcs_refine) plus operation counts.
 //!
 //! Run with the `profile` feature for the per-bucket timing breakdown:
