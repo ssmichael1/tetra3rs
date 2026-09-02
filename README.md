@@ -21,7 +21,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Lost-in-space solving** — determines attitude from star patterns with no initial guess
 - **Tracking mode** — when an attitude hint is available (e.g. the previous frame's solution), skip the 4-star pattern-hash phase and match centroids directly against catalog stars near the hinted boresight. Succeeds with as few as 3 stars, robust to sparse/low-SNR fields, with automatic fallback to lost-in-space if the hint is stale
 - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
-- **Robust** — statistical verification via binomial false-positive probability
+- **Robust** — statistical verification via a per-star likelihood ratio with a bounded false-positive probability
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates catalog star positions to any observation epoch
 - **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard) in a portable, lightweight format with no offset-size limit, so wide-FOV-range multiscale databases of any size load cleanly
@@ -128,7 +128,7 @@ if let Ok(solution) = db.solve_from_centroids(&centroids, &solve_config) {
 1. **Pattern generation** — select combinations of 4 bright centroids; compute 6 pairwise angular separations and normalize into 5 edge ratios (a geometric invariant)
 2. **Hash lookup** — quantize the edge ratios into a key and probe a precomputed hash table for matching catalog patterns
 3. **Attitude estimation** — solve Wahba's problem via SVD to find the rotation from catalog (ICRS) to camera frame
-4. **Verification** — project nearby catalog stars into the camera frame, count matches, and accept only if the false-positive probability (binomial CDF) is below threshold
+4. **Verification** — project nearby catalog stars into the camera frame, match them to centroids, and accept only if the likelihood ratio bounds the false-positive probability below threshold
 5. **Refinement** — re-estimate the rotation using all matched star pairs via iterative SVD passes
 6. **WCS fit** — constrained 3-DOF tangent-plane refinement (rotation angle θ + CRVAL offset) with sigma-clipping, producing FITS-standard WCS output (CD matrix, CRVAL)
 

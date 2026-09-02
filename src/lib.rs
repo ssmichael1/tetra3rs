@@ -25,7 +25,7 @@
 //!   sparse / low-SNR fields, with automatic fallback to lost-in-space unless
 //!   [`SolveConfig::strict_hint`] is set.
 //! - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
-//! - **Robust** — statistical verification via binomial false-positive probability
+//! - **Robust** — statistical verification via a per-star likelihood ratio with a bounded false-positive probability
 //! - **Multiscale** — supports a range of field-of-view scales in a single database
 //! - **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
 //! - **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard)
@@ -163,8 +163,9 @@
 //!    table for matching catalog patterns
 //! 3. **Attitude estimation** — solve Wahba's problem via SVD to find the rotation from
 //!    catalog (ICRS) to camera frame
-//! 4. **Verification** — project nearby catalog stars into the camera frame, count matches,
-//!    and accept only if the false-positive probability (binomial CDF) is below threshold
+//! 4. **Verification** — project nearby catalog stars into the camera frame, match them to
+//!    centroids, and accept only if the likelihood ratio bounds the false-positive
+//!    probability below threshold
 //! 5. **Refinement** — re-estimate the rotation using all matched star pairs via iterative
 //!    SVD passes
 //! 6. **WCS fit** — constrained 3-DOF tangent-plane refinement (rotation angle θ + CRVAL

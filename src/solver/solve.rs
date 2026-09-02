@@ -30,8 +30,10 @@ use super::matching;
 use super::pattern::PATTERN_SIZE;
 use super::pattern_search::{Hypothesis, PatternSearch};
 use super::preprocess::{
-    preprocess, sort_indices_by_brightness, unit_vector_from_pixels, CentroidVectors,
+    centroid_sigma_px, preprocess, sort_indices_by_brightness, unit_vector_from_pixels,
+    CentroidVectors,
 };
+use super::verify::VerifyStage;
 use super::wcs_refine;
 use super::{
     pixel_scale_from_fov, Solution, SolveConfig, SolveFailure, SolveResult, SolveStatus,
@@ -40,6 +42,9 @@ use super::{
 
 #[cfg(feature = "profile")]
 use crate::solver::profiling::{self, buckets};
+
+/// Floor on the refined-stage verification σ, in pixels.
+const REFINED_SIGMA_FLOOR_PX: f32 = 0.5;
 
 /// Speed of light in km/s.
 pub(super) const C_KM_S: f64 = 299_792.458;
@@ -77,6 +82,8 @@ struct LisContext<'a> {
     star_vectors: &'a [[f32; 3]],
     /// Number of brightest centroids the verification tests.
     match_centroid_count: usize,
+    /// Per-centroid position σ in pixels (brightness order; 0 = unknown).
+    sigma_px: Vec<f32>,
     t0: Instant,
     /// Candidate attitudes verified so far — the divisor of the sequential
     /// multiple-comparison correction in the acceptance test.
@@ -199,6 +206,7 @@ impl SolverDatabase {
             sorted_indices: &sorted_indices,
             star_vectors: &star_vecs,
             match_centroid_count,
+            sigma_px: centroid_sigma_px(working_centroids, &sorted_indices),
             t0,
             candidates_tested: 0,
             match_xy: Vec::new(),
@@ -211,7 +219,6 @@ impl SolverDatabase {
             &sorted_indices,
             config,
             &star_vecs,
-            match_centroid_count,
             t0,
         );
         let mut solution = search.run(&mut |h| self.accept_lis_candidate(h, &mut ctx))?;
@@ -244,8 +251,9 @@ impl SolverDatabase {
             fov,
             config,
             star_vectors,
-            h.hypothesis_stars,
-            None,
+            &h.pattern,
+            &ctx.sigma_px,
+            VerifyStage::Coarse,
             &mut ctx.match_xy,
             &mut ctx.match_scratch,
         );
@@ -328,23 +336,21 @@ impl SolverDatabase {
             result.crval_rad[0],
             result.crval_rad[1],
         );
-        // Re-verify at a radius tied to the refined fit quality
-        // instead of the (coarse) search radius: true matches sit
-        // within a few RMSE of the refined attitude, while a
-        // false candidate's coincidences are uniform across the
-        // search radius, so tightening the radius multiplies each
-        // match's evidence by (search/refined)² — this is what
-        // separates a true 14-of-50 dense-field candidate (many
-        // bright centroids simply absent from the catalog) from a
-        // lucky false one. Floored at 2.5 px (the refinement's own
-        // adaptive-radius floor) and never looser than the search
-        // radius.
+        // Re-verify at the refined fit's own residual scale instead of the
+        // (coarse) search radius: true matches sit within a few RMSE of the
+        // refined attitude, while a false candidate's coincidences are
+        // uniform across the search radius, so the tighter σ multiplies each
+        // match's evidence by (search/refined)² — this is what separates a
+        // true 14-of-50 dense-field candidate (many bright centroids simply
+        // absent from the catalog) from a lucky false one. σ is floored at
+        // half a pixel (the refinement's own adaptive-radius floor is
+        // 2.5 px ≈ 5σ).
         // The refinement was locked to the candidate's measured
         // scale (`ps_fov`), but the hypothesis vectors may still
         // sit at the *swept* scale when the search skipped its
         // rebuild (mismatch ≤ 0.25·match_radius). That slack is
         // harmless at the coarse search radius, not at the
-        // tightened re-verify radius below (floored at 2.5 px):
+        // tightened re-verify σ below (floored at half a pixel):
         // the edge residual ε·r reaches ~7 px on a 4096 px frame,
         // silently dropping true edge matches from the acceptance
         // statistic. The typed vectors carry their scale, so
@@ -367,9 +373,7 @@ impl SolverDatabase {
             }
         };
         let ps_refined = (1.0 / result.camera_model.focal_length_px) as f32;
-        let refined_radius = (5.0 * result.rmse_rad)
-            .max(2.5 * ps_refined)
-            .min(config.match_radius * result.fov_rad);
+        let sigma_refined = result.rmse_rad.max(REFINED_SIGMA_FLOOR_PX * ps_refined);
         let (refined_matches, p_refined) = self.verify_attitude(
             &refined_rotation,
             reverify_vectors,
@@ -377,8 +381,11 @@ impl SolverDatabase {
             result.fov_rad,
             config,
             star_vectors,
-            h.hypothesis_stars,
-            Some(refined_radius),
+            &h.pattern,
+            &ctx.sigma_px,
+            VerifyStage::Refined {
+                sigma_rad: sigma_refined,
+            },
             &mut ctx.match_xy,
             &mut ctx.match_scratch,
         );
