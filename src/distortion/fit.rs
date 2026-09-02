@@ -14,6 +14,7 @@ use numeris::{DynMatrix, DynVector, Matrix3};
 use tracing::debug;
 
 use crate::centroid::Centroid;
+use crate::solver::solve::StarVectors;
 use crate::solver::SolverDatabase;
 use crate::stats::median_mad_sigma;
 
@@ -727,7 +728,7 @@ pub(super) fn project_matches(
     rot: Matrix3<f32>,
     pairs: impl IntoIterator<Item = (usize, usize)>,
     centroids: &[Centroid],
-    star_vectors: &[[f32; 3]],
+    star_vectors: StarVectors<'_>,
     parity_sign: f64,
     pixel_scale: f64,
     out: &mut Vec<MatchedPoint>,
@@ -736,7 +737,7 @@ pub(super) fn project_matches(
         let c = &centroids[cent_idx];
         if let Some(mp) = project_to_matched_point(
             rot,
-            &star_vectors[star_idx],
+            &star_vectors.get(star_idx),
             parity_sign,
             pixel_scale,
             c.x as f64,

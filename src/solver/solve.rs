@@ -66,11 +66,6 @@ pub(crate) struct StarVectors<'a> {
 }
 
 impl<'a> StarVectors<'a> {
-    /// The stored vectors, uncorrected.
-    pub(crate) fn raw(base: &'a [[f32; 3]]) -> Self {
-        Self { base, beta: None }
-    }
-
     /// Vectors corrected for the observer's barycentric velocity (km/s,
     /// ICRS); `None` leaves them uncorrected.
     pub(crate) fn with_observer_velocity(
@@ -607,6 +602,7 @@ impl SolverDatabase {
             solve_time_ms: elapsed_ms(t0),
             attitude_cov_rad2: wcs_result.covariance,
             parity_flip,
+            observer_velocity_km_s: config.observer_velocity_km_s,
             matched_catalog_ids: matched_cat_ids,
             matched_centroid_indices: matched_cent_inds,
             cd_matrix: wcs_result.cd_matrix,

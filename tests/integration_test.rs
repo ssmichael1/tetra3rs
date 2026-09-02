@@ -1764,3 +1764,126 @@ fn test_pattern_budget_reports_timeout() {
         .expect_err("zero budget is an invalid config");
     assert_eq!(err.status, SolveStatus::InvalidConfig);
 }
+
+/// Calibration must correct stellar aberration with the velocity each solve
+/// recorded: the differential aberration across a frame (≈ 1e-4 of the
+/// field) is otherwise fitted as lens distortion or left in the residuals.
+/// Synthetic sky: catalog positions aberrated for a 30 km/s observer,
+/// projected through an ideal pinhole (no distortion), solved with the
+/// velocity given, then calibrated (a) with the recorded velocity and (b)
+/// with it stripped from the solutions.
+#[test]
+fn test_calibration_corrects_aberration_per_image() {
+    let db = small_test_db();
+    let fov_rad = 15.0_f32.to_radians();
+    let (w, h) = (2048u32, 2048u32);
+    let half_fov = fov_rad / 2.0;
+    let pixel_scale = 1.0 / ((w as f32 / 2.0) / half_fov.tan());
+    let velocity = [0.0f64, 30.0, 0.0]; // km/s, ICRS
+    let c_km_s = 299_792.458f64;
+    let beta = [
+        velocity[0] / c_km_s,
+        velocity[1] / c_km_s,
+        velocity[2] / c_km_s,
+    ];
+
+    // Two pointings on the sky where the velocity is nearly transverse
+    // (largest differential aberration): boresights near ±X.
+    let pointings = [
+        (0.0f32, 5.0f32.to_radians(), 0.3f32),
+        (0.2f32, -8.0f32.to_radians(), 1.1f32),
+    ];
+    let mut solve_results: Vec<tetra3::SolveResult> = Vec::new();
+    let mut stripped: Vec<tetra3::SolveResult> = Vec::new();
+    let mut centroid_sets: Vec<Vec<Centroid>> = Vec::new();
+    for &(ra, dec, roll) in &pointings {
+        let rot = rotation_from_ra_dec_roll(ra, dec, roll);
+        let mut centroids = Vec::new();
+        for (i, sv) in db.star_vectors.iter().enumerate() {
+            // Apparent direction: s' = (s + β) / |s + β|.
+            let a = [
+                sv[0] as f64 + beta[0],
+                sv[1] as f64 + beta[1],
+                sv[2] as f64 + beta[2],
+            ];
+            let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+            let v = rot
+                * Vector3::from_array([(a[0] / n) as f32, (a[1] / n) as f32, (a[2] / n) as f32]);
+            if v[2] > 0.01 {
+                let (cx, cy) = (v[0] / v[2], v[1] / v[2]);
+                if cx.abs() < half_fov && cy.abs() < half_fov {
+                    centroids.push(Centroid {
+                        x: cx / pixel_scale,
+                        y: cy / pixel_scale,
+                        mass: Some(10.0 - db.star_catalog.stars()[i].mag),
+                        cov: None,
+                    });
+                }
+            }
+        }
+        let config = SolveConfig {
+            fov_max_error_rad: Some(2.0_f32.to_radians()),
+            solve_timeout_ms: Some(30_000),
+            observer_velocity_km_s: Some(velocity),
+            ..SolveConfig::new(fov_rad, w, h)
+        };
+        let solution = db
+            .solve_from_centroids(&centroids, &config)
+            .expect("aberrated field should solve");
+        assert_eq!(solution.observer_velocity_km_s, Some(velocity));
+        let mut without = solution.clone();
+        without.observer_velocity_km_s = None;
+        solve_results.push(Ok(solution));
+        stripped.push(Ok(without));
+        centroid_sets.push(centroids);
+    }
+
+    let cal_config = tetra3::CalibrateConfig {
+        model: tetra3::DistortionModelType::Polynomial { order: 3 },
+        ..Default::default()
+    };
+    let cents: Vec<&[Centroid]> = centroid_sets.iter().map(|c| c.as_slice()).collect();
+    for n_images in [1usize, 2] {
+        let with: Vec<&tetra3::SolveResult> = solve_results.iter().take(n_images).collect();
+        let without: Vec<&tetra3::SolveResult> = stripped.iter().take(n_images).collect();
+        let corrected = tetra3::calibrate_camera(&with, &cents[..n_images], &db, w, h, &cal_config)
+            .expect("calibration with recorded velocity");
+        let uncorrected =
+            tetra3::calibrate_camera(&without, &cents[..n_images], &db, w, h, &cal_config)
+                .expect("calibration without velocity");
+        // Bias of the fitted model relative to an ideal pinhole at its own
+        // focal length: the polynomial's order-0/1 terms absorb a uniform
+        // shift and a linear stretch, so the aberration shows up here, not
+        // in the residual.
+        let model_bias = |cam: &tetra3::CameraModel| -> f64 {
+            let f = cam.focal_length_px;
+            let hw = w as f64 / 2.0;
+            let hh = h as f64 / 2.0;
+            [(0.0, 0.0), (hw, hh), (-hw, hh), (hw, -hh), (-hw, -hh)]
+                .iter()
+                .map(|&(x, y)| {
+                    let (px, py) = cam.tanplane_to_pixel(x / f, y / f);
+                    ((px - x).powi(2) + (py - y).powi(2)).sqrt()
+                })
+                .fold(0.0, f64::max)
+        };
+        let bias_with = model_bias(&corrected.camera_model);
+        let bias_without = model_bias(&uncorrected.camera_model);
+        println!(
+            "{n_images} image(s): model bias with velocity {bias_with:.4} px, without {bias_without:.4} px \
+             (rmse after {:.4} / {:.4})",
+            corrected.rmse_after_px, uncorrected.rmse_after_px
+        );
+        // With the recorded velocity the sky is a perfect pinhole.
+        assert!(bias_with < 0.03, "corrected model bias {bias_with} px");
+        // Without it: the single-image path fits the uniform shift (~20″,
+        // 0.75 px here) into the optical center; the multi-image path
+        // re-fits each attitude and is left with the differential part
+        // (~1e-4 of the field, a few hundredths of a pixel at the corners).
+        let min_bias = if n_images == 1 { 0.3 } else { 0.02 };
+        assert!(
+            bias_without > min_bias && bias_without > 20.0 * bias_with,
+            "stripping the velocity should bias the model: {bias_without} px vs {bias_with} px"
+        );
+    }
+}

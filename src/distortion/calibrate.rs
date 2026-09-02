@@ -16,6 +16,7 @@ use tracing::debug;
 
 use crate::camera_model::CameraModel;
 use crate::centroid::Centroid;
+use crate::solver::solve::StarVectors;
 use crate::solver::wcs_refine;
 use crate::solver::{focal_length_from_fov, pixel_scale_from_fov, SolveResult, SolverDatabase};
 
@@ -101,7 +102,13 @@ pub struct CalibrateResult {
 ///
 /// Failed solves (`Err`) in `solve_results` are skipped; each successful one
 /// provides matched catalog IDs and centroid indices into the corresponding
-/// entry of `centroids` (same order).
+/// entry of `centroids` (same order). Each image's catalog positions are
+/// aberration-corrected with the observer velocity its solve recorded
+/// ([`Solution::observer_velocity_km_s`](crate::solver::Solution::observer_velocity_km_s)),
+/// so the differential aberration across the frame (≈ 1e-4 of the field,
+/// 0.15 px at the corners of a 2048 px sensor) is not fitted as lens
+/// distortion — and images taken at different velocities do not pull the
+/// shared model in different directions.
 ///
 /// The distortion model fit is controlled by [`CalibrateConfig::model`] —
 /// SIP polynomial (default) or radial Brown-Conrady. For a single image, the
@@ -256,7 +263,10 @@ fn single_image_calibrate(
         solution.qicrs2cam.to_rotation_matrix(),
         matched_pairs(solution, cents.len(), &id_to_idx),
         cents,
-        &database.star_vectors,
+        StarVectors::with_observer_velocity(
+            &database.star_vectors,
+            solution.observer_velocity_km_s,
+        ),
         parity_sign,
         pixel_scale_from_fov(image_width, fov_rad as f64),
         &mut points,
@@ -398,6 +408,9 @@ fn multi_image_calibrate(
         centroids: &'a [Centroid],
         rotation: Matrix3<f32>,
         fov_rad: f32,
+        /// Catalog vectors as the solve saw them (aberration-corrected for
+        /// the velocity recorded on the solution, if any).
+        stars: StarVectors<'a>,
     }
 
     let mut image_data: Vec<ImageData> = Vec::new();
@@ -419,6 +432,10 @@ fn multi_image_calibrate(
             centroids: centroids[idx],
             rotation: sol.qicrs2cam.to_rotation_matrix(),
             fov_rad: sol.fov_rad,
+            stars: StarVectors::with_observer_velocity(
+                &database.star_vectors,
+                sol.observer_velocity_km_s,
+            ),
         });
     }
 
@@ -436,6 +453,7 @@ fn multi_image_calibrate(
             crval_ra: f64,
             crval_dec: f64,
             cd_matrix: [[f64; 2]; 2],
+            stars: StarVectors<'a>,
         }
 
         let mut refined_images: Vec<RefinedImage> = Vec::new();
@@ -485,7 +503,7 @@ fn multi_image_calibrate(
                 &img.rotation,
                 &initial_matches,
                 &centroids_px,
-                crate::solver::solve::StarVectors::raw(&database.star_vectors),
+                img.stars,
                 &database.star_catalog,
                 per_image_ps,
                 parity_flip,
@@ -518,6 +536,7 @@ fn multi_image_calibrate(
                 crval_ra: wcs_result.crval_rad[0],
                 crval_dec: wcs_result.crval_rad[1],
                 cd_matrix: wcs_result.cd_matrix,
+                stars: img.stars,
             });
         }
 
@@ -546,7 +565,7 @@ fn multi_image_calibrate(
                 rot,
                 ref_img.matches.iter().copied(),
                 cents,
-                &database.star_vectors,
+                ref_img.stars,
                 parity_sign,
                 global_pixel_scale,
                 &mut all_points,

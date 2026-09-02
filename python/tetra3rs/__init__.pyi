@@ -320,6 +320,15 @@ class SolveResult:
         ...
 
     @property
+    def observer_velocity_km_s(self) -> Optional[npt.NDArray[np.float64]]:
+        """Observer velocity (km/s, ICRS) the solve corrected stellar aberration
+        for — the ``observer_velocity_km_s`` it was called with — or ``None``.
+        ``SolverDatabase.calibrate_camera`` reuses it per image so differential
+        aberration is not fitted as lens distortion.
+        """
+        ...
+
+    @property
     def attitude_cov_rad2(self) -> npt.NDArray[np.float64]:
         """Covariance of the refined attitude parameters ``[theta, xi0, eta0]``
         as a 3x3 array in rad²: roll about the boresight and the tangent-plane
