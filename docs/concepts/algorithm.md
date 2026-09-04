@@ -36,7 +36,7 @@ The `SolveResult` includes a `parity_flip` flag indicating whether this correcti
 
 ## Search Strategy
 
-The solver uses a breadth-first (brightest-first) search strategy. Brighter stars are more likely to be real detections (not noise), so trying patterns from the brightest centroids first maximizes the chance of an early match.
+The solver uses a breadth-first (brightest-first) search strategy. Brighter stars are more likely to be real detections (not noise), so trying patterns from the brightest centroids first maximizes the chance of an early match. Only the brightest `pattern_checking_stars` well-separated centroids (default 24) form patterns at all — the database stores patterns among each field's brightest stars, so those are the quads that can hit — which bounds a fruitless search at `C(24, 4) = 10,626` patterns per FOV value; fainter centroids still take part in verification.
 
 The search can be bounded by:
 

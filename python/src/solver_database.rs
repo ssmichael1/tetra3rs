@@ -136,7 +136,8 @@ impl PySolverDatabase {
     ///   ``match_radius``, ``match_threshold``, ``solve_timeout_ms``,
     ///   ``max_patterns_checked``,
     ///   ``observer_velocity_km_s``.
-    /// * **Lost-in-space only:** ``fov_max_error``, ``match_max_error``.
+    /// * **Lost-in-space only:** ``fov_max_error``, ``match_max_error``,
+    ///   ``pattern_checking_stars``.
     /// * **Tracking only** (ignored unless ``attitude_hint`` is set):
     ///   ``attitude_hint``, ``hint_uncertainty_*``, ``strict_hint``.
     ///
@@ -173,6 +174,12 @@ impl PySolverDatabase {
     ///         Composes with ``solve_timeout_ms`` — whichever trips first
     ///         ends the search. None = unbounded. Default: sized so the
     ///         5 s timeout normally trips first. Lost-in-space only.
+    ///     pattern_checking_stars: Number of brightest (well-separated)
+    ///         centroids the lost-in-space search forms 4-star patterns from;
+    ///         fainter centroids still take part in verification. Bounds a
+    ///         no-match search at C(N, 4) patterns per FOV value. Raise it
+    ///         when many of the brightest detections are not catalog stars.
+    ///         Must be >= 4. Default 24. Lost-in-space only.
     ///     match_max_error: Maximum edge-ratio error. None = use database value.
     ///         Values below the database's pattern quantization error are clamped up to it.
     ///     camera_model: A CameraModel specifying focal length, image dimensions,
@@ -228,6 +235,7 @@ impl PySolverDatabase {
         match_threshold = 1e-5,
         solve_timeout_ms = Some(5000),
         max_patterns_checked = Some(SolveConfig::DEFAULT_MAX_PATTERNS_CHECKED),
+        pattern_checking_stars = SolveConfig::DEFAULT_PATTERN_CHECKING_STARS,
         match_max_error = None,
         camera_model = None,
         observer_velocity_km_s = None,
@@ -252,6 +260,7 @@ impl PySolverDatabase {
         match_threshold: f64,
         solve_timeout_ms: Option<u64>,
         max_patterns_checked: Option<u64>,
+        pattern_checking_stars: u32,
         match_max_error: Option<f32>,
         camera_model: Option<PyCameraModel>,
         observer_velocity_km_s: Option<[f64; 3]>,
@@ -329,6 +338,7 @@ impl PySolverDatabase {
             match_threshold,
             solve_timeout_ms,
             max_patterns_checked,
+            pattern_checking_stars,
             match_max_error,
             camera_model: cam,
             observer_velocity_km_s,

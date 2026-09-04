@@ -479,6 +479,22 @@ pub struct SolveConfig {
     /// whichever trips first ends the search. *Lost-in-space only* — tracking
     /// tests a single hinted candidate and never enumerates patterns.
     pub max_patterns_checked: Option<u64>,
+    /// Number of brightest pattern-eligible centroids the lost-in-space
+    /// search forms 4-star patterns from. Default
+    /// [`SolveConfig::DEFAULT_PATTERN_CHECKING_STARS`].
+    ///
+    /// After cluster-buster thinning, only the brightest `N` surviving
+    /// centroids are combined into image patterns (all `C(N, 4)` of them,
+    /// brightest-first); fainter centroids still take part in verification.
+    /// This mirrors database generation, which stores patterns among the
+    /// brightest well-separated catalog stars of each field, so the quads
+    /// most likely to be in the table are exactly the bright ones — and it
+    /// bounds a no-match search at `C(N, 4)` patterns per FOV value instead
+    /// of `C(all, 4)`. Raise it for fields where many of the brightest
+    /// detections are not catalog stars (hot pixels, satellites, planets);
+    /// `u32::MAX` restores the unbounded search. Must be at least 4
+    /// (`validate()`). *Lost-in-space only.*
+    pub pattern_checking_stars: u32,
 
     // ── Tracking (ignored unless `attitude_hint` is set) ──
     /// Optional attitude hint for tracking-mode solving.
@@ -540,6 +556,7 @@ impl Default for SolveConfig {
             solve_timeout_ms: Some(5000),
             match_max_error: None,
             max_patterns_checked: Some(Self::DEFAULT_MAX_PATTERNS_CHECKED),
+            pattern_checking_stars: Self::DEFAULT_PATTERN_CHECKING_STARS,
             camera_model: CameraModel {
                 focal_length_px: 1.0,
                 image_width: 0,
@@ -573,6 +590,9 @@ impl SolveConfig {
     /// default database is ≲ C(40, 4) ≈ 91 k patterns; the budget matters
     /// for dense databases and long FOV sweeps.
     pub const DEFAULT_MAX_PATTERNS_CHECKED: u64 = 10_000_000;
+
+    /// Default [`pattern_checking_stars`](Self::pattern_checking_stars).
+    pub const DEFAULT_PATTERN_CHECKING_STARS: u32 = 24;
 
     /// Create a solve configuration with the given FOV estimate (radians) and
     /// image dimensions, using a simple pinhole camera model (no distortion,
@@ -644,6 +664,8 @@ impl SolveConfig {
     ///   positive.
     /// - [`max_patterns_checked`](Self::max_patterns_checked), if set, is
     ///   positive (`Some(0)` would search nothing; use `None` for unbounded).
+    /// - [`pattern_checking_stars`](Self::pattern_checking_stars) is at
+    ///   least 4 (fewer can never form a pattern).
     /// - [`observer_velocity_km_s`](Self::observer_velocity_km_s), if set,
     ///   has finite components.
     /// - [`hint_uncertainty_rad`](Self::hint_uncertainty_rad) is finite and
@@ -683,6 +705,13 @@ impl SolveConfig {
             return Err(InvalidInput(
                 "max_patterns_checked must be > 0 (None = unbounded)".into(),
             ));
+        }
+        if (self.pattern_checking_stars as usize) < pattern::PATTERN_SIZE {
+            return Err(InvalidInput(format!(
+                "pattern_checking_stars must be >= {} (a 4-star pattern needs 4 stars), got {}",
+                pattern::PATTERN_SIZE,
+                self.pattern_checking_stars
+            )));
         }
         if let Some(v) = self.observer_velocity_km_s {
             if !v.iter().all(|c| c.is_finite()) {
@@ -870,6 +899,7 @@ mod tests {
         bad(|c| c.fov_max_error_rad = Some(f32::INFINITY));
         bad(|c| c.match_max_error = Some(f32::NAN));
         bad(|c| c.max_patterns_checked = Some(0)); // would search nothing
+        bad(|c| c.pattern_checking_stars = 3); // can never form a pattern
         bad(|c| c.observer_velocity_km_s = Some([f64::NAN, 0.0, 0.0]));
         bad(|c| {
             c.attitude_hint = Some(Quaternion::identity());

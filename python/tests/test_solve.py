@@ -247,6 +247,52 @@ class TestSolveFromCentroids:
         assert not result
         assert result.status == "invalid_config"
 
+    def test_pattern_checking_stars_caps_search(self, skyview_db):
+        """A clean field still solves when only the brightest few centroids
+        may form patterns, and the cap bounds a no-match search."""
+        ra, dec = 83.0, -1.0
+        fov_deg = 10.0
+        image_size = 2048
+        f_px = image_size / (2.0 * math.tan(math.radians(fov_deg / 2.0)))
+        stars = skyview_db.cone_search(ra, dec, fov_deg)
+        centroids = project_stars_tan(stars[:50], ra, dec, f_px, image_size)
+        result = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            pattern_checking_stars=8,
+        )
+        assert result, f"solve failed: {result}"
+        assert result.num_matches >= 10
+
+        rng = np.random.default_rng(11)
+        random_field = rng.uniform(-900.0, 900.0, size=(40, 2))
+        result = skyview_db.solve_from_centroids(
+            random_field,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            pattern_checking_stars=6,
+            max_patterns_checked=None,
+        )
+        assert not result
+        assert result.status == "no_match"
+
+    def test_pattern_checking_stars_below_four_is_invalid_config(self, skyview_db):
+        centroids = np.array(
+            [[40.0 * i - 100.0, 25.0 * i - 60.0] for i in range(6)], dtype=np.float64
+        )
+        result = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=10.0,
+            image_width=2048,
+            image_height=2048,
+            pattern_checking_stars=3,
+        )
+        assert not result
+        assert result.status == "invalid_config"
+
     def test_solve_with_numpy_array_3col(self, skyview_db):
         """Verify centroids can be passed as Nx3 numpy array (x, y, brightness)."""
         ra, dec = 83.0, -1.0
