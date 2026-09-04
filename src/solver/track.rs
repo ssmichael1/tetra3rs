@@ -22,10 +22,9 @@ use tracing::debug;
 
 use crate::{Centroid, Quaternion};
 
-use super::solve::{
-    centroid_unit_vectors, diagonal_factor, failure, find_centroid_matches,
-    sort_indices_by_brightness, wahba_rotation,
-};
+use super::preprocess::{centroid_unit_vectors, sort_indices_by_brightness, CentroidVectors};
+use super::solve::{failure, wahba_rotation};
+use super::verify::{diagonal_factor, find_centroid_matches};
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
 
 /// Minimum unique correspondences required to attempt the SVD step.
@@ -175,7 +174,11 @@ impl SolverDatabase {
         // is independent evidence.
         let (verify_matches, prob_mismatch) = self.verify_attitude(
             &rotation_matrix,
-            &centroid_vectors,
+            CentroidVectors {
+                pixel_scale,
+                parity_flip,
+                data: &centroid_vectors,
+            },
             match_centroid_count,
             fov_rad,
             config,

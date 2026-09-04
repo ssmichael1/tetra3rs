@@ -6,6 +6,7 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 ### Changed
 
+- The lost-in-space solve is split into explicit stages — `preprocess` → `PatternSearch` (hypothesis source: FOV sweep, hash lookup, SVD, parity) → `verify_attitude` → `accept_lis_candidate` (pre-gate, refine, re-verify, correction) — with the verification vectors carrying their pixel scale (`CentroidVectors`) so a stage needing a different scale rebuilds instead of silently testing at the wrong one; tracking is the second hypothesis source into the same verify/refine tail. Crate-private; results bit-identical on 1500 synthetic fields across plain, spurious, FOV-sweep, parity, hinted and aberration scenarios. ([#60](https://github.com/ssmichael1/tetra3rs/pull/60))
 - WCS refinement projects catalog stars with the tangent-plane basis at CRVAL (dot products, as Phase-D re-association already did) instead of decoding each matched star to RA/Dec and evaluating per-star trig every pass; `wcs_refine` 16.9 → 12.2 µs per solve on the profiler field (mean solve 50 → 41 µs), results unchanged within f64 rounding. ([#59](https://github.com/ssmichael1/tetra3rs/pull/59))
 
 ### Fixed

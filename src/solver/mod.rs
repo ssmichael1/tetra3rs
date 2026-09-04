@@ -29,10 +29,13 @@ pub(crate) mod combinations;
 pub(crate) mod database;
 pub(crate) mod matching;
 pub(crate) mod pattern;
+pub(crate) mod pattern_search;
+pub(crate) mod preprocess;
 #[cfg(feature = "profile")]
 pub mod profiling;
 pub(crate) mod solve;
 pub(crate) mod track;
+pub(crate) mod verify;
 pub(crate) mod wcs_refine;
 
 use serde::{Deserialize, Serialize};
