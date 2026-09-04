@@ -320,6 +320,28 @@ class SolveResult:
         ...
 
     @property
+    def attitude_cov_rad2(self) -> npt.NDArray[np.float64]:
+        """Covariance of the refined attitude parameters ``[theta, xi0, eta0]``
+        as a 3x3 array in rad²: roll about the boresight and the tangent-plane
+        offsets of the boresight (East, North at CRVAL).
+
+        Estimated from the refinement's normal equations and the observed
+        centroid scatter (``sigma² · (JᵀJ)⁻¹`` with
+        ``sigma² = Σ residual² / (2n − 3)``). The diagonal is ``inf`` when the
+        fit is unconstrained (fewer than 2 matched stars).
+        """
+        ...
+
+    @property
+    def attitude_sigma_rad(self) -> npt.NDArray[np.float64]:
+        """1-sigma uncertainties ``[sigma_theta, sigma_xi, sigma_eta]`` of the
+        refined attitude in radians (square roots of the diagonal of
+        ``attitude_cov_rad2``). Boresight pointing uncertainty is
+        ``hypot(sigma_xi, sigma_eta)``.
+        """
+        ...
+
+    @property
     def crval_ra_deg(self) -> float:
         """WCS reference point RA in degrees.
 

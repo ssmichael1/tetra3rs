@@ -432,6 +432,22 @@ class TestSolveResult:
         assert abs(r2.ra_deg - orion_result.ra_deg) < 1e-6
         assert abs(r2.dec_deg - orion_result.dec_deg) < 1e-6
         assert r2.num_matches == orion_result.num_matches
+        assert np.array_equal(r2.attitude_cov_rad2, orion_result.attitude_cov_rad2)
+
+    def test_attitude_covariance(self, orion_result):
+        cov = orion_result.attitude_cov_rad2
+        assert cov.shape == (3, 3)
+        assert np.allclose(cov, cov.T)
+        assert np.all(np.isfinite(cov)) and np.all(np.diag(cov) > 0)
+        sigma = orion_result.attitude_sigma_rad
+        assert sigma.shape == (3,)
+        assert np.allclose(sigma, np.sqrt(np.diag(cov)))
+        # The boresight uncertainty is a fraction of the per-star RMSE
+        # (n matched stars average down) but not absurdly small.
+        pointing = math.hypot(sigma[1], sigma[2])
+        rmse = math.radians(orion_result.rmse_arcsec / 3600.0)
+        assert pointing < rmse
+        assert pointing > rmse / (10.0 * math.sqrt(orion_result.num_matches))
 
 
 # ---------------------------------------------------------------------------

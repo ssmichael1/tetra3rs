@@ -234,6 +234,35 @@ impl PySolveResult {
         )
     }
 
+    /// Covariance of the refined attitude parameters ``[theta, xi0, eta0]``
+    /// as a 3x3 numpy array in rad²: roll about the boresight and the
+    /// tangent-plane offsets of the boresight (East, North at CRVAL).
+    ///
+    /// Estimated from the refinement's normal equations and the observed
+    /// centroid scatter (``sigma² · (JᵀJ)⁻¹``, ``sigma² = Σ residual² /
+    /// (2n − 3)``). The diagonal is ``inf`` when the fit is unconstrained.
+    #[getter]
+    fn attitude_cov_rad2<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        let c = self.inner.attitude_cov_rad2;
+        PyArray2::from_owned_array(
+            py,
+            ndarray::array![
+                [c[0][0], c[0][1], c[0][2]],
+                [c[1][0], c[1][1], c[1][2]],
+                [c[2][0], c[2][1], c[2][2]]
+            ],
+        )
+    }
+
+    /// 1-sigma uncertainties ``[sigma_theta, sigma_xi, sigma_eta]`` of the
+    /// refined attitude in radians (square roots of the diagonal of
+    /// ``attitude_cov_rad2``). The boresight pointing uncertainty is
+    /// ``hypot(sigma_xi, sigma_eta)``.
+    #[getter]
+    fn attitude_sigma_rad<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.inner.attitude_sigma_rad().to_vec())
+    }
+
     /// WCS reference point RA in degrees.
     ///
     /// The tangent point of the gnomonic (TAN) projection, close to the boresight.

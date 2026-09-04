@@ -12,7 +12,7 @@
 //!
 //! This keeps search time close to local star density instead of full-catalog size.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use numeris::Vector3;
 use serde::{Deserialize, Serialize};
@@ -229,31 +229,47 @@ impl StarCatalog {
         let z_step = 2.0 / self.n_lat as f32;
         let lon_step = TAU / self.n_lon as f32;
 
+        // A cone of radius ≥ 90° reaches past the equator of the sphere it
+        // is centered on; the `z_center ± sin r` band below is only a valid
+        // bound below that, so scan everything.
+        if radius >= FRAC_PI_2 {
+            let mut out: Vec<usize> = Vec::new();
+            for lat_bin in 0..self.n_lat {
+                for lon_bin in 0..self.n_lon {
+                    self.collect_cell_matches(lat_bin, lon_bin, dir, cos_radius, cache, &mut out);
+                }
+            }
+            out.sort_unstable();
+            out.dedup();
+            return out;
+        }
+
         let z_center = dir[2].clamp(-1.0, 1.0);
-        let z_min = (z_center - radius.sin()).max(-1.0);
-        let z_max = (z_center + radius.sin()).min(1.0);
+        let dec_center = z_center.asin();
+        // Exact declination band of the cone, [δc − r, δc + r] clamped to the
+        // poles. (`sin δc ± sin r` is *not* a bound on it once r is large:
+        // for δc = −29°, r = 80° the band reaches sin 51° = 0.78, the sum
+        // only 0.50.)
+        let z_min = (dec_center - radius).max(-FRAC_PI_2).sin();
+        let z_max = (dec_center + radius).min(FRAC_PI_2).sin();
+
+        let mut phi = dir[1].atan2(dir[0]);
+        if phi < 0.0 {
+            phi += TAU;
+        }
 
         let mut out = Vec::new();
         for lat_bin in Self::z_bin_range(self.n_lat, z_min, z_max) {
-            // Bound the RA half-span with the smallest |cos dec| anywhere in
-            // this latitude bin — its edge nearest a pole — not the bin
-            // center. Stars sit anywhere in the bin, and near the poles the
-            // span a star at the polar edge needs is many times the span at
-            // the center (a bin touching a pole needs every RA bin). Using
-            // the center silently dropped most stars within a few degrees of
-            // either pole.
-            let z_lo = -1.0 + lat_bin as f32 * z_step;
-            let z_hi = z_lo + z_step;
-            let z_edge = z_lo.abs().max(z_hi.abs()).min(1.0);
-            let cos_dec = (1.0 - z_edge * z_edge).max(0.0).sqrt().max(1e-6);
-
-            let mut lon_half_span = (radius / cos_dec).min(PI);
-            lon_half_span += lon_step;
-
-            let mut phi = dir[1].atan2(dir[0]);
-            if phi < 0.0 {
-                phi += TAU;
-            }
+            // Exact RA half-width of the cone over this bin's declination
+            // range (plus one RA bin of quantization slack). This must be the
+            // true maximum, not a small-angle estimate: a cone that wraps a
+            // pole is π wide at every declination between the pole and its
+            // far edge, including bins that do not touch the pole.
+            let dec_lo = (-1.0 + lat_bin as f32 * z_step).clamp(-1.0, 1.0).asin();
+            let dec_hi = (-1.0 + (lat_bin + 1) as f32 * z_step)
+                .clamp(-1.0, 1.0)
+                .asin();
+            let lon_half_span = cone_ra_half_span(dec_lo, dec_hi, dec_center, radius) + lon_step;
 
             let lon_min = phi - lon_half_span;
             let lon_max = phi + lon_half_span;
@@ -310,7 +326,11 @@ impl StarCatalog {
         let start_bin = Self::phi_to_lon_bin(self.n_lon, start);
         let end_bin = Self::phi_to_lon_bin(self.n_lon, end);
 
-        if start_bin <= end_bin {
+        // The range wraps through 0 exactly when the wrapped start *angle*
+        // lies past the wrapped end angle. Comparing bin indices instead
+        // mis-handled a range just short of a full turn whose two ends fall
+        // in the same bin: start_bin == end_bin looked like a one-bin range.
+        if start <= end {
             for lon_bin in start_bin..=end_bin {
                 f(lon_bin);
             }
@@ -359,6 +379,47 @@ impl StarCatalog {
         }
         idx
     }
+}
+
+/// Half-width in right ascension of a cone (center declination `dec_c`,
+/// angular radius `r` < 90°) along the parallel at declination `dec`:
+/// the largest |Δα| of any point of the cone at that declination, from
+/// `cos r = sin δc sin δ + cos δc cos δ cos Δα`. `0` when the parallel
+/// misses the cone, `π` when the cone wraps the whole parallel (it contains
+/// the pole on that side).
+fn cone_width_at_dec(dec: f32, dec_c: f32, r: f32) -> f32 {
+    let num = r.cos() - dec_c.sin() * dec.sin();
+    let den = dec_c.cos() * dec.cos();
+    if den <= 1e-12 {
+        // At a pole: inside iff the pole is within `r` of the center.
+        return if num <= 0.0 { PI } else { 0.0 };
+    }
+    let c = num / den;
+    if c >= 1.0 {
+        0.0
+    } else if c <= -1.0 {
+        PI
+    } else {
+        c.acos()
+    }
+}
+
+/// Largest RA half-width of the cone over the declination band
+/// `[dec_lo, dec_hi]`. The width along a parallel is unimodal in
+/// declination, peaking at the cone's tangent declination
+/// `sin δ* = sin δc / cos r` (when that exists), so the band maximum is at
+/// an edge or at `δ*` clamped into the band.
+fn cone_ra_half_span(dec_lo: f32, dec_hi: f32, dec_c: f32, r: f32) -> f32 {
+    let mut span = cone_width_at_dec(dec_lo, dec_c, r).max(cone_width_at_dec(dec_hi, dec_c, r));
+    let cos_r = r.cos();
+    if cos_r > 0.0 {
+        let s = dec_c.sin() / cos_r;
+        if s.abs() <= 1.0 {
+            let dec_star = s.asin().clamp(dec_lo, dec_hi);
+            span = span.max(cone_width_at_dec(dec_star, dec_c, r));
+        }
+    }
+    span.min(PI)
 }
 
 fn wrap_angle(theta_rad: f32) -> f32 {
@@ -627,8 +688,8 @@ mod tests {
             .collect();
         let catalog = StarCatalog::new(16, stars);
 
-        for dec_deg in [0.0f32, 45.0, 80.0, 85.0, 88.0, 89.5, -89.5] {
-            for radius_deg in [1.0f32, 3.0, 7.0] {
+        for dec_deg in [0.0f32, 45.0, 80.0, 85.0, 88.0, 89.5, -89.5, -87.0] {
+            for radius_deg in [1.0f32, 3.0, 7.0, 20.0, 45.0] {
                 for ra_deg in [10.0f32, 100.0, 200.0, 300.0] {
                     let dir = radec_to_uvec(deg2rad(ra_deg), deg2rad(dec_deg));
                     let radius = deg2rad(radius_deg);

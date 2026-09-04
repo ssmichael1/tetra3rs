@@ -302,6 +302,77 @@ pub struct WcsRefineResult {
     pub matches: Vec<(usize, usize)>,
     /// RMSE of angular residuals in radians.
     pub rmse_rad: f64,
+    /// Covariance of the fitted parameters `[θ, ξ₀, η₀]` (rad²): roll about
+    /// the boresight and the tangent-plane offsets of the boresight, East and
+    /// North at CRVAL. `σ²·(JᵀJ)⁻¹` with `σ² = Σ residual² / (2n − 3)`; the
+    /// diagonal is `+∞` when the fit is unconstrained (fewer than 2 matches)
+    /// or the normal matrix is singular.
+    pub covariance: [[f64; 3]; 3],
+}
+
+/// Covariance of `[θ, ξ₀, η₀]` from the normal matrix `JᵀJ` of the
+/// converged fit, the sum of squared residuals, and the number of matched
+/// stars (two residual components each). See [`WcsRefineResult::covariance`].
+fn covariance_from_normal(ata: &[[f64; 3]; 3], sum_r2: f64, n_matches: usize) -> [[f64; 3]; 3] {
+    const UNCONSTRAINED: [[f64; 3]; 3] = [
+        [f64::INFINITY, 0.0, 0.0],
+        [0.0, f64::INFINITY, 0.0],
+        [0.0, 0.0, f64::INFINITY],
+    ];
+    let dof = 2 * n_matches as i64 - 3;
+    if dof < 1 {
+        return UNCONSTRAINED;
+    }
+    let sigma2 = sum_r2 / dof as f64;
+    // (JᵀJ)⁻¹ column by column.
+    let mut inv = [[0.0f64; 3]; 3];
+    for col in 0..3 {
+        let mut e = [0.0f64; 3];
+        e[col] = 1.0;
+        let Some(x) = solve_3x3(ata, &e) else {
+            return UNCONSTRAINED;
+        };
+        for row in 0..3 {
+            inv[row][col] = x[row];
+        }
+    }
+    // Symmetrize (the two triangles differ only by solver rounding).
+    let mut cov = [[0.0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            cov[i][j] = sigma2 * 0.5 * (inv[i][j] + inv[j][i]);
+        }
+    }
+    cov
+}
+
+/// Normal matrix `JᵀJ` of the 3-parameter fit over `matches` at the given
+/// `(θ, CRVAL)` (no right-hand side), and the number of stars that projected
+/// validly.
+fn normal_matrix(
+    matches: &[(usize, usize)],
+    star_vectors: StarVectors<'_>,
+    centroids_px: &[(f64, f64)],
+    theta: f64,
+    crval_ra: f64,
+    crval_dec: f64,
+    ps: f64,
+) -> ([[f64; 3]; 3], usize) {
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let basis = tan_basis(crval_ra, crval_dec);
+    let mut ata = [[0.0f64; 3]; 3];
+    let mut atb = [0.0f64; 3];
+    let mut n = 0usize;
+    for &(cent_idx, cat_idx) in matches {
+        if tan_project_vec(&star_vectors.get(cat_idx), &basis).is_none() {
+            continue;
+        }
+        let (px, py) = centroids_px[cent_idx];
+        accumulate_normal_equations(&mut ata, &mut atb, px, py, cos_t, sin_t, ps, 0.0, 0.0);
+        n += 1;
+    }
+    (ata, n)
 }
 
 // ── Main refinement entry point ─────────────────────────────────────────────
@@ -843,11 +914,24 @@ pub fn wcs_refine(
     .map(|(_, r)| r)
     .collect();
 
+    let sum_r2: f64 = final_residuals.iter().map(|r| r * r).sum();
     let rmse = if final_residuals.is_empty() {
         0.0
     } else {
-        (final_residuals.iter().map(|r| r * r).sum::<f64>() / final_residuals.len() as f64).sqrt()
+        (sum_r2 / final_residuals.len() as f64).sqrt()
     };
+
+    // Parameter covariance at the converged fit (see `WcsRefineResult`).
+    let (ata, n_fit) = normal_matrix(
+        &current_matches,
+        star_vectors,
+        centroids_px,
+        theta,
+        crval_ra,
+        crval_dec,
+        ps,
+    );
+    let covariance = covariance_from_normal(&ata, sum_r2, n_fit);
 
     // Derive CD matrix from (theta, pixel_scale, parity)
     let cd = cd_from_theta(theta, ps, parity_flip);
@@ -877,6 +961,7 @@ pub fn wcs_refine(
         pixel_scale: ps,
         matches: current_matches,
         rmse_rad: rmse,
+        covariance,
     }
 }
 
@@ -1098,6 +1183,23 @@ mod tests {
         let a = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 1.0, 1.0]];
         let b = [6.0, 12.0, 3.0];
         assert!(solve_3x3(&a, &b).is_none());
+    }
+
+    #[test]
+    fn covariance_from_normal_scales_the_inverse() {
+        // Diagonal normal matrix: cov = σ²·diag(1/a).
+        let ata = [[4.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]];
+        let n = 10; // dof = 17
+        let sum_r2 = 17.0 * 1e-10; // σ² = 1e-10
+        let cov = covariance_from_normal(&ata, sum_r2, n);
+        assert!((cov[0][0] - 1e-10 / 4.0).abs() < 1e-22);
+        assert!((cov[1][1] - 1e-10 / 2.0).abs() < 1e-22);
+        assert!((cov[2][2] - 1e-10).abs() < 1e-22);
+        assert_eq!(cov[0][1], 0.0);
+        // Unconstrained: too few stars, or singular normal matrix.
+        assert!(covariance_from_normal(&ata, 1.0, 1)[0][0].is_infinite());
+        let singular = [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        assert!(covariance_from_normal(&singular, 1.0, 10)[1][1].is_infinite());
     }
 
     #[test]

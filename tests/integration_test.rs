@@ -139,6 +139,33 @@ fn test_generate_and_solve() {
     let result = db.solve_from_centroids(&centroids, &solve_config);
 
     let solution = result.expect("Solver should find a match");
+
+    // Attitude covariance: finite, symmetric, positive-diagonal, and the
+    // boresight uncertainty sits between rmse/(10·√n) and rmse — the matched
+    // stars average the per-star scatter down, but only by ~√n.
+    let cov = solution.attitude_cov_rad2;
+    for i in 0..3 {
+        assert!(
+            cov[i][i].is_finite() && cov[i][i] > 0.0,
+            "cov diag {i}: {}",
+            cov[i][i]
+        );
+        for j in 0..3 {
+            assert!((cov[i][j] - cov[j][i]).abs() <= 1e-12 * cov[i][i].abs().max(cov[j][j].abs()));
+        }
+    }
+    let sigma = solution.attitude_sigma_rad();
+    let pointing = sigma[1].hypot(sigma[2]);
+    let rmse = solution.rmse_rad as f64;
+    let n = solution.num_matches as f64;
+    assert!(
+        pointing < rmse,
+        "pointing σ {pointing:.3e} vs rmse {rmse:.3e}"
+    );
+    assert!(
+        pointing > rmse / (10.0 * n.sqrt()),
+        "pointing σ {pointing:.3e} implausibly small"
+    );
     println!("Solve time: {:.1} ms", solution.solve_time_ms);
     println!("Matches: {}", solution.num_matches);
     println!(
