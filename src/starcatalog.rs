@@ -235,9 +235,17 @@ impl StarCatalog {
 
         let mut out = Vec::new();
         for lat_bin in Self::z_bin_range(self.n_lat, z_min, z_max) {
-            let zc = -1.0 + (lat_bin as f32 + 0.5) * z_step;
-            let dec_center = zc.clamp(-1.0, 1.0).asin();
-            let cos_dec = dec_center.cos().abs().max(1e-6);
+            // Bound the RA half-span with the smallest |cos dec| anywhere in
+            // this latitude bin — its edge nearest a pole — not the bin
+            // center. Stars sit anywhere in the bin, and near the poles the
+            // span a star at the polar edge needs is many times the span at
+            // the center (a bin touching a pole needs every RA bin). Using
+            // the center silently dropped most stars within a few degrees of
+            // either pole.
+            let z_lo = -1.0 + lat_bin as f32 * z_step;
+            let z_hi = z_lo + z_step;
+            let z_edge = z_lo.abs().max(z_hi.abs()).min(1.0);
+            let cos_dec = (1.0 - z_edge * z_edge).max(0.0).sqrt().max(1e-6);
 
             let mut lon_half_span = (radius / cos_dec).min(PI);
             lon_half_span += lon_step;
@@ -590,5 +598,55 @@ mod tests {
             .query_indices_from_uvec(radec_to_uvec(deg2rad(122.0), deg2rad(30.0)), deg2rad(3.0));
 
         assert_eq!(by_radec, by_uvec);
+    }
+    /// Regression for the polar RA-span bug: every latitude bin's RA span
+    /// must be sized for its polar edge, not its center, or queries within
+    /// a few degrees of either pole miss most of their stars. Compares the
+    /// indexed query against a brute-force dot-product scan on a uniform
+    /// synthetic sky at declinations from the equator to 89.5°.
+    #[test]
+    fn cone_query_matches_brute_force_near_poles() {
+        // Deterministic xorshift64* — keeps the test dependency-free.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut unit = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / (1u32 << 24) as f32
+        };
+        let stars: Vec<Star> = (0..50_000)
+            .map(|i| {
+                let z = 2.0 * unit() - 1.0;
+                Star {
+                    id: i,
+                    ra_rad: unit() * TAU,
+                    dec_rad: z.asin(),
+                    mag: 5.0,
+                }
+            })
+            .collect();
+        let catalog = StarCatalog::new(16, stars);
+
+        for dec_deg in [0.0f32, 45.0, 80.0, 85.0, 88.0, 89.5, -89.5] {
+            for radius_deg in [1.0f32, 3.0, 7.0] {
+                for ra_deg in [10.0f32, 100.0, 200.0, 300.0] {
+                    let dir = radec_to_uvec(deg2rad(ra_deg), deg2rad(dec_deg));
+                    let radius = deg2rad(radius_deg);
+                    let got = catalog.query_indices_from_uvec(dir, radius);
+                    let cos_r = radius.cos();
+                    let expected: Vec<usize> = catalog
+                        .stars
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| dir.dot(&s.uvec()) >= cos_r)
+                        .map(|(i, _)| i)
+                        .collect();
+                    assert_eq!(
+                        got, expected,
+                        "cone query at dec {dec_deg}°, ra {ra_deg}°, radius {radius_deg}°"
+                    );
+                }
+            }
+        }
     }
 }

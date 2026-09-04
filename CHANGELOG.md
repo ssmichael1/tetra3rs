@@ -2,6 +2,17 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
+## Unreleased
+
+### Changed
+
+- WCS refinement projects catalog stars with the tangent-plane basis at CRVAL (dot products, as Phase-D re-association already did) instead of decoding each matched star to RA/Dec and evaluating per-star trig every pass; `wcs_refine` 16.9 → 12.2 µs per solve on the profiler field (mean solve 50 → 41 µs), results unchanged within f64 rounding. ([#59](https://github.com/ssmichael1/tetra3rs/pull/59))
+
+### Fixed
+
+- `StarCatalog` cone queries sized each latitude bin's RA span from the bin center, missing most stars within a few degrees of either pole (dec 88°: ~65% missed; dec 89.5°: ~85%) — verification, tracking, WCS re-association, and database generation all share the query, so polar fields solved with half the matches or not at all. The span is now bounded at the bin's polar edge; brute-force regression test added. Regenerate databases built before this fix. ([#59](https://github.com/ssmichael1/tetra3rs/pull/59))
+- The post-refinement acceptance re-verify reused verification vectors built at the swept FOV whenever the measured-FOV rebuild was skipped, so on wide frames (≳3000 px) true edge matches fell outside the tightened 2.5 px radius floor and weakened the acceptance statistic; the re-verify now always uses vectors at the refined scale. ([#59](https://github.com/ssmichael1/tetra3rs/pull/59))
+
 ## 0.12.0 - 2026-08-30
 
 ### Changed
