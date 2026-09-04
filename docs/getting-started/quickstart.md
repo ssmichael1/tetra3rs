@@ -20,6 +20,11 @@ db.save_to_file("my_database.bin")
 db = tetra3rs.SolverDatabase.load_from_file("my_database.bin")
 ```
 
+Saved databases start with a 6-byte header (`"T3DB"` plus a format version);
+files written by 0.12 and earlier have no header and still load. Every load
+validates the file's cross-field invariants, so a corrupt or tampered file is
+rejected with an error rather than failing mid-solve.
+
 ### Solve from centroids
 
 ```python

@@ -77,6 +77,12 @@ plugins:
             show_root_full_path: false
             heading_level: 2
   - mkdocs-jupyter:
+      # Notebooks only. By default the plugin probes every .md page as a
+      # possible jupytext notebook; jupytext takes the mkdocstrings
+      # `::: module.Name` directives for pandoc divs and, when pandoc is
+      # installed, runs it and prints an "unclosed Div" warning per page.
+      # `ignore` is checked before that probe from mkdocs-jupyter 0.26.3.
+      ignore: ["*.md"]
       execute: true
       kernel_name: python3
       include_source: true

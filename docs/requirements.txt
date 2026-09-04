@@ -1,7 +1,8 @@
 mkdocs>=1.6
 mkdocs-material>=9.5
 mkdocstrings[python]>=0.27
-mkdocs-jupyter>=0.25
+# >= 0.26.3: honors `ignore` before probing .md pages as jupytext notebooks
+mkdocs-jupyter>=0.26.3
 
 # Notebook execution dependencies
 astropy
