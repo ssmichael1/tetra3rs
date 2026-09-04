@@ -277,6 +277,16 @@ impl PySolveResult {
         self.inner.crval_rad[1].to_degrees()
     }
 
+    /// Observer velocity (km/s, ICRS) the solve corrected stellar aberration
+    /// for — the ``observer_velocity_km_s`` it was called with — or ``None``.
+    /// ``SolverDatabase.calibrate_camera`` reuses it per image.
+    #[getter]
+    fn observer_velocity_km_s<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.inner
+            .observer_velocity_km_s
+            .map(|v| PyArray1::from_vec(py, v.to_vec()))
+    }
+
     /// Optical center offset from the geometric image center, in pixels [x, y].
     #[getter]
     fn crpix<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {

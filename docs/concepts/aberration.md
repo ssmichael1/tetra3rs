@@ -60,3 +60,19 @@ The convenience function `earth_barycentric_velocity()` provides an approximate 
 
 !!! note
     Enabling aberration correction shifts the entire solved pointing by up to ~20″, not just the within-field residuals. This is the physically correct result. Most plate solvers (e.g., astrometry.net) do not account for aberration, so comparing results may show a systematic offset.
+
+## Calibration
+
+`calibrate_camera` corrects each image's catalog positions with the observer
+velocity recorded on its solve (`Solution.observer_velocity_km_s`, i.e. the
+`observer_velocity_km_s` the solve was called with). This matters more for
+calibration than for a single solve: the uniform part of the aberration
+(~20″ for Earth's orbital velocity) is harmless to a solve — it is absorbed
+by the attitude — but a single-image calibration fits it into the optical
+center, and the differential part across the frame (about 10⁻⁴ of the field,
+≈ 0.15 px at the corners of a 2048 px sensor) looks exactly like a linear
+stretch along the velocity direction and is otherwise fitted as distortion.
+Images taken at different times or pointings carry different stretches, so
+without the correction a multi-image fit is pulled in different directions.
+Pass the velocity to every solve you calibrate from; solves made without one
+are calibrated uncorrected, as before.

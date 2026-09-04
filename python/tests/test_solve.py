@@ -434,6 +434,26 @@ class TestSolveResult:
         assert r2.num_matches == orion_result.num_matches
         assert np.array_equal(r2.attitude_cov_rad2, orion_result.attitude_cov_rad2)
 
+    def test_observer_velocity_recorded(self, skyview_db, orion_result):
+        assert orion_result.observer_velocity_km_s is None
+        ra, dec = 83.0, -1.0
+        fov_deg = 10.0
+        image_size = 2048
+        f_px = image_size / (2.0 * math.tan(math.radians(fov_deg / 2.0)))
+        stars = skyview_db.cone_search(ra, dec, fov_deg)
+        centroids = project_stars_tan(stars[:50], ra, dec, f_px, image_size)
+        result = skyview_db.solve_from_centroids(
+            centroids,
+            fov_estimate_deg=fov_deg,
+            image_width=image_size,
+            image_height=image_size,
+            observer_velocity_km_s=[10.0, -20.0, 5.0],
+        )
+        assert result
+        assert np.allclose(result.observer_velocity_km_s, [10.0, -20.0, 5.0])
+        r2 = pickle.loads(pickle.dumps(result))
+        assert np.allclose(r2.observer_velocity_km_s, [10.0, -20.0, 5.0])
+
     def test_attitude_covariance(self, orion_result):
         cov = orion_result.attitude_cov_rad2
         assert cov.shape == (3, 3)

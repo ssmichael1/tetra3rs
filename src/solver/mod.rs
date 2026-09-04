@@ -781,6 +781,12 @@ pub struct Solution {
     /// When `true`, the rotation matrix assumes negated x-coordinates.
     /// Pixel↔sky conversions must account for this flip.
     pub parity_flip: bool,
+    /// The observer velocity (km/s, ICRS) the solve corrected stellar
+    /// aberration for — [`SolveConfig::observer_velocity_km_s`] as given.
+    /// [`crate::calibrate_camera`] reuses it per image so the differential
+    /// aberration across the frame (~1e-4 of the field, ≈ 0.15 px at the
+    /// corners of a 2048 px sensor) is not fitted as lens distortion.
+    pub observer_velocity_km_s: Option<[f64; 3]>,
     /// Catalog IDs of matched stars.
     pub matched_catalog_ids: Vec<i64>,
     /// Indices into the input centroid slice for each match.
