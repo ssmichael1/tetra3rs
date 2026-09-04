@@ -2,7 +2,7 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
-## Unreleased
+## 0.13.0 - 2026-09-04
 
 **Upgrading from 0.12:** `SolveConfig` gains `pattern_checking_stars` (Rust struct literals need the field or `..Default::default()`); pickled Python `SolveResult`s from earlier versions do not load; databases saved by 0.12 and earlier still load, but were built with cone queries that missed stars near the poles and on wide fields — regenerate them with `generate_from_gaia` to get full coverage; verification is now a likelihood ratio, so `prob` values differ from 0.12 while `match_threshold` keeps its meaning as a per-solve false-accept budget.
 
