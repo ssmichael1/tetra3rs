@@ -304,9 +304,15 @@ impl<'a> PatternSearch<'a> {
         for image_pattern_local in
             BreadthFirstCombinations::<PATTERN_SIZE>::new(&pattern_centroid_inds)
         {
-            // Check search budgets (wall-clock and pattern count)
+            // Check search budgets (wall-clock and pattern count). Reading
+            // the clock costs ~3% of a no-match search at one read per
+            // combination, so sample it every 256; the overshoot past the
+            // deadline is at most 256 combinations (well under a millisecond).
+            const CLOCK_CHECK_INTERVAL: u64 = 256;
             if let Some(t) = timeout_ms {
-                if elapsed_ms(t0) > t as f32 {
+                if self.patterns_checked.is_multiple_of(CLOCK_CHECK_INTERVAL)
+                    && elapsed_ms(t0) > t as f32
+                {
                     debug!(
                         "Timeout after {:.1}ms ({} patterns checked)",
                         elapsed_ms(t0),

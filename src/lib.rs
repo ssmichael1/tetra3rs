@@ -206,7 +206,8 @@ pub use centroid::*;
 #[cfg(feature = "image")]
 pub use centroid_extraction::{
     extract_centroids_fast, extract_centroids_from_image, extract_centroids_from_raw,
-    CentroidExtractionConfig, CentroidExtractionResult, DeblendMode, FastCentroidConfig,
+    CentroidExtractionConfig, CentroidExtractionResult, CentroidExtractor, DeblendMode,
+    FastCentroidConfig,
 };
 pub use distortion::{
     calibrate_camera, num_coeffs, CalibrateConfig, CalibrateResult, Distortion,

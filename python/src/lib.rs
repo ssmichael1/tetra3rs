@@ -26,6 +26,7 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<camera_model::PyCameraModel>()?;
     m.add_class::<calibrate::PyCalibrateResult>()?;
     m.add_class::<extraction::PyExtractionResult>()?;
+    m.add_class::<extraction::PyCentroidExtractor>()?;
     m.add_class::<solve_result::PySolveResult>()?;
     m.add_class::<solve_result::PySolveFailure>()?;
     m.add_class::<solver_database::PySolverDatabase>()?;

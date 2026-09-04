@@ -94,7 +94,7 @@ Public re-exports in `src/lib.rs` — `CameraModel`, `SolveConfig`, `SolveResult
 
 - PyO3 0.28, setuptools-rust build backend
 - `crate-type = cdylib`, depends on root crate with `image` feature
-- All public types pickle via postcard: `SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion`
+- All public types pickle via postcard: `SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion` (`CentroidExtractor` pickles as a fresh instance — its buffers are scratch)
 - Gaia catalog bundled via the `gaia-catalog` PyPI package — no manual download needed
 - Wheels: cibuildwheel, cp310–cp314, skips i686/musllinux
 

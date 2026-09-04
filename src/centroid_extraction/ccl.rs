@@ -16,15 +16,59 @@ use super::{
 use crate::centroid::Centroid;
 use crate::error::{Error, Result};
 
+/// Full-image working buffers of the pipeline, owned by
+/// [`CentroidExtractor`](super::CentroidExtractor) so consecutive frames of
+/// the same size reuse them instead of paying `calloc` + first-touch page
+/// faults on ~48 MB per 2048² frame. Every element of every buffer is
+/// rewritten before it is read, so stale contents never leak into a result
+/// and a fresh `Scratch` gives the same output as a reused one.
+pub(super) struct Scratch {
+    /// Clamped (≥ 0) background-subtracted measurement image.
+    clamped: Vec<f32>,
+    /// Unclamped residuals — the matched filter's input (only used when the
+    /// filter is on). Lent to a `DynMatrix` for the blur and taken back.
+    unclamped: Vec<f32>,
+    /// The matched filter's output; `gaussian_blur_into` resizes it itself.
+    filtered: DynMatrix<f32>,
+    /// 1-bit-per-pixel detection mask.
+    mask: Vec<u64>,
+}
+
+impl Scratch {
+    pub(super) fn new() -> Self {
+        Self {
+            clamped: Vec::new(),
+            unclamped: Vec::new(),
+            filtered: DynMatrix::zeros(0, 0),
+            mask: Vec::new(),
+        }
+    }
+}
+
+/// Set `v`'s length to `n` without zeroing what is already there (the
+/// caller overwrites every element).
+fn set_len_uninit<T: Copy + Default>(v: &mut Vec<T>, n: usize) {
+    if v.len() != n {
+        v.resize(n, T::default());
+    }
+}
+
 /// Shared extraction pipeline for both image and raw-pixel entry points.
 pub(super) fn extract_from_gray(
     gray_input: &[f32],
     width: u32,
     height: u32,
     config: &CentroidExtractionConfig,
+    scratch: &mut Scratch,
 ) -> Result<CentroidExtractionResult> {
     let w = width as usize;
     let h = height as usize;
+    let Scratch {
+        clamped,
+        unclamped,
+        filtered,
+        mask,
+    } = scratch;
 
     // ── Step 0: validate geometry and config ──
     // The pipeline below indexes `width - 1` and chunks the image into rows of
@@ -102,10 +146,10 @@ pub(super) fn extract_from_gray(
         // the grid's column plan — so the residuals are bit-identical to the
         // per-pixel form.
         let nx = bg.grid_width();
-        let mut clamped = vec![0.0_f32; w * h];
+        set_len_uninit(clamped, w * h);
         if filter_sigma.is_some() {
-            let mut unclamped = vec![0.0_f32; w * h];
-            par::for_each_chunk_pair_mut(&mut clamped, &mut unclamped, w, |y, cr, ur| {
+            set_len_uninit(unclamped, w * h);
+            par::for_each_chunk_pair_mut(clamped, unclamped, w, |y, cr, ur| {
                 let mut row_blend = vec![0.0_f32; nx];
                 bg.blend_row(bg.row_params(y), &mut row_blend);
                 // Surface into `ur`, then residuals in place.
@@ -120,9 +164,9 @@ pub(super) fn extract_from_gray(
                     *u = r;
                 }
             });
-            filter_input = Some(DynMatrix::from_vec(w, h, unclamped));
+            filter_input = Some(DynMatrix::from_vec(w, h, std::mem::take(unclamped)));
         } else {
-            par::for_each_chunk_mut(&mut clamped, w, |y, cr| {
+            par::for_each_chunk_mut(clamped, w, |y, cr| {
                 let mut row_blend = vec![0.0_f32; nx];
                 bg.blend_row(bg.row_params(y), &mut row_blend);
                 bg.blend_columns(&row_blend, cr, |v| v);
@@ -136,7 +180,7 @@ pub(super) fn extract_from_gray(
                 }
             });
         }
-        gray = Cow::Owned(clamped);
+        gray = Cow::Borrowed(clamped);
     } else {
         (bg_mean, bg_sigma) = estimate_background(gray_input, width, height, config);
         // Same non-finite policy as the local-background branch; the copy is
@@ -152,7 +196,9 @@ pub(super) fn extract_from_gray(
             )
         };
         if filter_sigma.is_some() {
-            filter_input = Some(DynMatrix::from_vec(w, h, gray.to_vec()));
+            set_len_uninit(unclamped, w * h);
+            unclamped.copy_from_slice(&gray);
+            filter_input = Some(DynMatrix::from_vec(w, h, std::mem::take(unclamped)));
         }
     }
     let gray: &[f32] = &gray;
@@ -169,22 +215,18 @@ pub(super) fn extract_from_gray(
     // full-image intermediate — bit-identical to `gaussian_blur`, one 16 MB
     // buffer less at 2048². Under the `parallel` feature the bands run
     // multi-threaded.
-    let (thresh_src, mask_threshold): (Cow<[f32]>, f32) = match (filter_sigma, filter_input) {
+    let (thresh_src, mask_threshold): (&[f32], f32) = match (filter_sigma, filter_input) {
         (Some(sigma), Some(mat)) => {
-            let mut filtered = DynMatrix::<f32>::zeros(0, 0);
-            gaussian_blur_into(&mat, sigma, BorderMode::Replicate, &mut filtered);
-            drop(mat);
-            let filtered = filtered.into_vec();
+            gaussian_blur_into(&mat, sigma, BorderMode::Replicate, filtered);
+            // Hand the filter input back to the scratch for the next frame.
+            *unclamped = mat.into_vec();
             let suppression = gaussian_noise_suppression(sigma);
             (
-                Cow::Owned(filtered),
+                filtered.as_slice(),
                 bg_mean + config.sigma_threshold * bg_sigma * suppression,
             )
         }
-        _ => (
-            Cow::Borrowed(gray),
-            bg_mean + config.sigma_threshold * bg_sigma,
-        ),
+        _ => (gray, bg_mean + config.sigma_threshold * bg_sigma),
     };
 
     // ── Step 4: threshold into a bit mask, sweep into runs and regions ──
@@ -194,16 +236,16 @@ pub(super) fn extract_from_gray(
     // runs rather than pixels. Downstream stages iterate each region's run
     // list; the annulus's "not in any blob" test is a bit test on the same
     // mask (equivalent: every lit pixel was in some region). 8-connectivity
-    // is inherent to the run merging. The filtered image is released here —
-    // nothing downstream reads it.
-    let (mask, words_per_row) = threshold_to_mask(&thresh_src, w, h, mask_threshold);
-    drop(thresh_src);
+    // is inherent to the run merging. Nothing downstream reads the filtered
+    // image.
+    let words_per_row = threshold_to_mask(thresh_src, w, h, mask_threshold, mask);
+    let mask: &[u64] = mask;
     // Under `parallel` the rows are labeled in 64-row bands (one task each)
     // and stitched — the same `RunRegions` as the sequential sweep.
     #[cfg(feature = "parallel")]
-    let regions = runs::sweep_runs_mask_banded(w, h, words_per_row, &mask, 64);
+    let regions = runs::sweep_runs_mask_banded(w, h, words_per_row, mask, 64);
     #[cfg(not(feature = "parallel"))]
-    let regions = runs::sweep_runs_mask(w, h, words_per_row, &mask);
+    let regions = runs::sweep_runs_mask(w, h, words_per_row, mask);
 
     // ── Step 5: compute centroids ──
     // Origin at the geometric image center, (W-1)/2 and (H-1)/2 (pixel centers
@@ -215,7 +257,7 @@ pub(super) fn extract_from_gray(
     let mut centroids = compute_blob_centroids(
         gray,
         gray_input,
-        (&mask, words_per_row),
+        (mask, words_per_row),
         &regions,
         (w, h),
         (cx, cy),
@@ -239,22 +281,22 @@ pub(super) fn extract_from_gray(
     })
 }
 
-/// Pack `src > thr` into a 1-bit-per-pixel mask, `words_per_row =
-/// ⌈w/64⌉` `u64`s per image row (returned with the mask; padding bits are
-/// zero). Rows are packed in independent 16-row chunks — multi-threaded
-/// under the `parallel` feature — with [`runs::pack_above_row`], so the mask
-/// is identical either way.
-fn threshold_to_mask(src: &[f32], w: usize, h: usize, thr: f32) -> (Vec<u64>, usize) {
+/// Pack `src > thr` into the 1-bit-per-pixel `mask`, `words_per_row =
+/// ⌈w/64⌉` `u64`s per image row (returned; padding bits are zero). Rows are
+/// packed in independent 16-row chunks — multi-threaded under the `parallel`
+/// feature — with [`runs::pack_above_row`], which writes every word of its
+/// row, so the mask is identical either way and needs no pre-zeroing.
+fn threshold_to_mask(src: &[f32], w: usize, h: usize, thr: f32, mask: &mut Vec<u64>) -> usize {
     const ROWS_PER_CHUNK: usize = 16;
     let words_per_row = w.div_ceil(64);
-    let mut mask = vec![0u64; words_per_row * h];
-    par::for_each_chunk_mut(&mut mask, words_per_row * ROWS_PER_CHUNK, |ci, chunk| {
+    set_len_uninit(mask, words_per_row * h);
+    par::for_each_chunk_mut(mask, words_per_row * ROWS_PER_CHUNK, |ci, chunk| {
         for (i, words) in chunk.chunks_exact_mut(words_per_row).enumerate() {
             let r = ci * ROWS_PER_CHUNK + i;
             runs::pack_above_row(&src[r * w..(r + 1) * w], thr, words);
         }
     });
-    (mask, words_per_row)
+    words_per_row
 }
 
 /// Background-subtracted residuals at the block subsample lattice (the same

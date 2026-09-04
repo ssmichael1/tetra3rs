@@ -287,25 +287,11 @@ pub(crate) fn extract_centroids(
     deblend: &str,
     border_margin: u32,
 ) -> PyResult<PyExtractionResult> {
-    let (pixels, width, height) = image_to_f32(image)?;
-
-    let deblend = match deblend {
-        "off" => DeblendMode::Off,
-        "reject" => DeblendMode::Reject,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "deblend must be 'off' or 'reject', got '{other}'"
-            )))
-        }
-    };
-
-    let config = CentroidExtractionConfig {
+    let config = ccl_config(
         sigma_threshold,
         min_pixels,
         max_pixels,
         max_centroids,
-        sigma_clip_iterations: 5,
-        sigma_clip_factor: 3.0,
         local_bg_block_size,
         max_elongation,
         matched_filter_sigma,
@@ -313,7 +299,8 @@ pub(crate) fn extract_centroids(
         saturation_level,
         deblend,
         border_margin,
-    };
+    )?;
+    let (pixels, width, height) = image_to_f32(image)?;
 
     // The image was copied into a pure-Rust buffer above; release the GIL for
     // the (potentially long) extraction so other Python threads keep running.
@@ -327,6 +314,150 @@ pub(crate) fn extract_centroids(
     Ok(PyExtractionResult {
         inner: result.into(),
     })
+}
+
+/// The `extract_centroids` keyword arguments as a [`CentroidExtractionConfig`].
+#[allow(clippy::too_many_arguments)]
+fn ccl_config(
+    sigma_threshold: f32,
+    min_pixels: usize,
+    max_pixels: usize,
+    max_centroids: Option<usize>,
+    local_bg_block_size: Option<u32>,
+    max_elongation: Option<f32>,
+    matched_filter_sigma: Option<f32>,
+    max_sharpness: Option<f32>,
+    saturation_level: Option<f32>,
+    deblend: &str,
+    border_margin: u32,
+) -> PyResult<CentroidExtractionConfig> {
+    let deblend = match deblend {
+        "off" => DeblendMode::Off,
+        "reject" => DeblendMode::Reject,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "deblend must be 'off' or 'reject', got '{other}'"
+            )))
+        }
+    };
+    Ok(CentroidExtractionConfig {
+        sigma_threshold,
+        min_pixels,
+        max_pixels,
+        max_centroids,
+        sigma_clip_iterations: 5,
+        sigma_clip_factor: 3.0,
+        local_bg_block_size,
+        max_elongation,
+        matched_filter_sigma,
+        max_sharpness,
+        saturation_level,
+        deblend,
+        border_margin,
+    })
+}
+
+/// The :func:`extract_centroids` pipeline with its working buffers kept
+/// between calls.
+///
+/// :func:`extract_centroids` allocates its full-image buffers (~48 MB at
+/// 2048²) fresh on every call, and the first touch of each page costs
+/// more than the allocation (~0.3–0.5 ms per 2048² frame). An extractor
+/// reuses them, resizing only when the frame size changes, so a frame loop
+/// pays that once. Results are bit-identical to :func:`extract_centroids`.
+///
+/// The buffers are sized for the largest frame seen and freed with the
+/// object. Use one extractor per thread. Pickling keeps no buffers — an
+/// unpickled extractor starts empty.
+///
+/// Example::
+///
+///     extractor = tetra3rs.CentroidExtractor()
+///     for frame in frames:
+///         result = extractor.extract(frame, sigma_threshold=5.0)
+#[pyclass(name = "CentroidExtractor", module = "tetra3rs")]
+pub(crate) struct PyCentroidExtractor {
+    inner: tetra3::centroid_extraction::CentroidExtractor,
+}
+
+#[pymethods]
+impl PyCentroidExtractor {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: tetra3::centroid_extraction::CentroidExtractor::new(),
+        }
+    }
+
+    /// Extract star centroids from a 2D image array, reusing this
+    /// extractor's buffers.
+    ///
+    /// Takes exactly the arguments of :func:`extract_centroids`, with the
+    /// same defaults, and returns the same ``ExtractionResult``.
+    #[pyo3(signature = (
+        image,
+        sigma_threshold = 5.0,
+        min_pixels = 3,
+        max_pixels = 10000,
+        max_centroids = None,
+        local_bg_block_size = Some(64),
+        max_elongation = Some(3.0),
+        matched_filter_sigma = Some(1.5),
+        max_sharpness = Some(0.9),
+        saturation_level = None,
+        deblend = "off",
+        border_margin = 0,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn extract(
+        &mut self,
+        image: &Bound<'_, pyo3::PyAny>,
+        sigma_threshold: f32,
+        min_pixels: usize,
+        max_pixels: usize,
+        max_centroids: Option<usize>,
+        local_bg_block_size: Option<u32>,
+        max_elongation: Option<f32>,
+        matched_filter_sigma: Option<f32>,
+        max_sharpness: Option<f32>,
+        saturation_level: Option<f32>,
+        deblend: &str,
+        border_margin: u32,
+    ) -> PyResult<PyExtractionResult> {
+        let config = ccl_config(
+            sigma_threshold,
+            min_pixels,
+            max_pixels,
+            max_centroids,
+            local_bg_block_size,
+            max_elongation,
+            matched_filter_sigma,
+            max_sharpness,
+            saturation_level,
+            deblend,
+            border_margin,
+        )?;
+        let (pixels, width, height) = image_to_f32(image)?;
+        let inner = &mut self.inner;
+        // Input copied to a pure-Rust buffer; release the GIL for the
+        // extraction (the `&mut self` borrow keeps Python from re-entering).
+        let result = image
+            .py()
+            .detach(|| inner.extract_from_raw(&pixels, width, height, &config))
+            .map_err(crate::helpers::map_tetra3_err)?;
+        Ok(PyExtractionResult {
+            inner: result.into(),
+        })
+    }
+
+    /// Pickles as a fresh extractor: the buffers are scratch, not state.
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, ())> {
+        Ok((slf.get_type().into_any().unbind(), ()))
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "CentroidExtractor()"
+    }
 }
 
 /// Fast single-pass centroid extraction — the "adequate star tracker" path.

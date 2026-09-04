@@ -1140,6 +1140,90 @@ class PolynomialDistortion:
         """Inverse distortion: distorted → ideal."""
         ...
 
+@final
+class CentroidExtractor:
+    """The :func:`extract_centroids` pipeline with its working buffers kept
+    between calls.
+
+    :func:`extract_centroids` allocates its full-image buffers (~48 MB at
+    2048²) fresh on every call, and the first touch of each page costs more
+    than the allocation (~0.3–0.5 ms per 2048² frame). An extractor reuses
+    them, resizing only when the frame size changes, so a frame loop pays
+    that once. Results are bit-identical to :func:`extract_centroids`.
+
+    The buffers are sized for the largest frame seen and freed with the
+    object. Use one extractor per thread. Pickling keeps no buffers — an
+    unpickled extractor starts empty.
+
+    Example::
+
+        extractor = tetra3rs.CentroidExtractor()
+        for frame in frames:
+            result = extractor.extract(frame, sigma_threshold=5.0)
+    """
+
+    def __init__(self) -> None: ...
+    def extract(
+        self,
+        image: npt.NDArray,
+        sigma_threshold: float = 5.0,
+        min_pixels: int = 3,
+        max_pixels: int = 10000,
+        max_centroids: Optional[int] = None,
+        local_bg_block_size: Optional[int] = 64,
+        max_elongation: Optional[float] = 3.0,
+        matched_filter_sigma: Optional[float] = 1.5,
+        max_sharpness: Optional[float] = 0.9,
+        saturation_level: Optional[float] = None,
+        deblend: str = "off",
+        border_margin: int = 0,
+    ) -> ExtractionResult:
+        """Extract star centroids from a 2D image array, reusing this
+        extractor's buffers.
+
+        Takes exactly the arguments of :func:`extract_centroids`, with the
+        same defaults.
+
+        Args:
+            image: 2D numpy array (height x width) of pixel values.
+                Supported dtypes: float64, float32, uint16, int16, uint8.
+            sigma_threshold: Detection threshold in sigma above background.
+            min_pixels: Minimum blob size in pixels.
+            max_pixels: Maximum blob size in pixels.
+            max_centroids: Maximum number of centroids to return. None = all.
+            local_bg_block_size: Block size for local background estimation.
+                None = global background only.
+            max_elongation: Maximum blob elongation ratio. None = disabled.
+            matched_filter_sigma: Apply a Gaussian matched filter of this sigma
+                (in pixels) before thresholding (~2x point-source SNR for a
+                sigma~1.5 px PSF). Used only to form the detection mask, so
+                photometry is unaffected, and the threshold is automatically
+                scaled for the filtered noise level — no retuning needed.
+                None = disabled. Default 1.5.
+            max_sharpness: Reject blobs whose peak sharpness
+                ``(peak - mean(8 neighbors)) / peak`` exceeds this — values near
+                1 are hot pixels / cosmic rays, not stars. A critically sampled
+                PSF scores ~0.5; strongly undersampled optics up to ~0.85.
+                Set to None for severely undersampled data (PSF FWHM below
+                ~1.5 px), where real stars are indistinguishable from hot
+                pixels. Default 0.9.
+            saturation_level: Pixel value at or above which the sensor is
+                saturated; such blobs skip sub-pixel peak refinement (a flat top
+                has no meaningful maximum) and keep the center-of-mass position.
+                None = disabled.
+            deblend: Policy for blobs with more than one distinct intensity
+                peak (blended pairs centroid to a wrong midpoint position).
+                "off" keeps them merged; "reject" drops them — the safe choice
+                for plate solving. Saturated blobs are exempt.
+            border_margin: Drop blobs whose bounding box comes within this many
+                pixels of an image edge (truncated PSFs bias the center-of-mass
+                inward).
+
+        Returns:
+            ExtractionResult with centroids and image statistics.
+        """
+        ...
+
 def extract_centroids(
     image: npt.NDArray,
     sigma_threshold: float = 5.0,
