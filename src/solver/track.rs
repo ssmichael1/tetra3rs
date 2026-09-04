@@ -22,9 +22,11 @@ use tracing::debug;
 
 use crate::{Centroid, Quaternion};
 
-use super::preprocess::{centroid_unit_vectors, sort_indices_by_brightness, CentroidVectors};
+use super::preprocess::{
+    centroid_sigma_px, centroid_unit_vectors, sort_indices_by_brightness, CentroidVectors,
+};
 use super::solve::{failure, wahba_rotation};
-use super::verify::{diagonal_factor, find_centroid_matches};
+use super::verify::{diagonal_factor, find_centroid_matches, VerifyStage};
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
 
 /// Minimum unique correspondences required to attempt the SVD step.
@@ -169,9 +171,10 @@ impl SolverDatabase {
         }
 
         // ── Verification (same path as LIS) ──
-        // `hypothesis_matches = 0`: the attitude hypothesis comes from the
+        // No excluded centroids: the attitude hypothesis comes from the
         // caller's hint, not from any of the tested centroids, so every match
         // is independent evidence.
+        let sigma_px = centroid_sigma_px(preprocessed, &sorted_indices);
         let (verify_matches, prob_mismatch) = self.verify_attitude(
             &rotation_matrix,
             CentroidVectors {
@@ -183,8 +186,9 @@ impl SolverDatabase {
             fov_rad,
             config,
             star_vectors,
-            0,
-            None,
+            &[],
+            &sigma_px,
+            VerifyStage::Coarse,
             &mut match_xy,
             &mut match_scratch,
         );

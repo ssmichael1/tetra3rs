@@ -48,10 +48,10 @@ pub(super) struct Hypothesis<'a> {
     /// applied, built either at the swept scale or (when the measured FOV
     /// differs meaningfully) rebuilt at `fov`'s scale — see `pixel_scale`.
     pub vectors: CentroidVectors<'a>,
-    /// Number of *tested* centroids (index < `match_centroid_count`) used to
-    /// form this hypothesis. They match by construction and are excluded
-    /// from the verification statistic.
-    pub hypothesis_stars: usize,
+    /// Local (brightness-rank) indices of the centroids that formed this
+    /// hypothesis. They match by construction and are excluded from the
+    /// verification statistic.
+    pub pattern: [usize; PATTERN_SIZE],
 }
 
 /// The lost-in-space pattern search over one centroid set.
@@ -64,8 +64,6 @@ pub(super) struct PatternSearch<'a> {
     sorted_indices: &'a [usize],
     /// (Possibly aberration-corrected) catalog unit vectors.
     star_vectors: &'a [[f32; 3]],
-    /// Number of brightest centroids the verification tests.
-    match_centroid_count: usize,
     t0: Instant,
     /// FOV values to try: exact estimate first, then spiraling outward.
     fov_values: Vec<f32>,
@@ -83,7 +81,6 @@ impl<'a> PatternSearch<'a> {
         sorted_indices: &'a [usize],
         config: &'a SolveConfig,
         star_vectors: &'a [[f32; 3]],
-        match_centroid_count: usize,
         t0: Instant,
     ) -> Self {
         let fov_values = build_fov_sweep(
@@ -98,7 +95,6 @@ impl<'a> PatternSearch<'a> {
             centroids,
             sorted_indices,
             star_vectors,
-            match_centroid_count,
             t0,
             fov_values,
             patterns_checked: 0,
@@ -568,14 +564,8 @@ impl<'a> PatternSearch<'a> {
                     };
 
                     // ── Hand the hypothesis to the acceptance stage ──
-                    // The pattern stars that fall inside the tested
-                    // (brightest `match_centroid_count`) set are
-                    // hypothesis-forming, not evidence — the verification
-                    // excludes them from its statistic.
-                    let hypothesis_stars = image_pattern_local
-                        .iter()
-                        .filter(|&&i| i < self.match_centroid_count)
-                        .count();
+                    // The pattern stars are hypothesis-forming, not evidence —
+                    // the verification excludes them from its statistic.
                     let hypothesis = Hypothesis {
                         rotation: rotation_matrix,
                         fov,
@@ -584,7 +574,7 @@ impl<'a> PatternSearch<'a> {
                             parity_flip,
                             data: working_vectors,
                         },
-                        hypothesis_stars,
+                        pattern: image_pattern_local,
                     };
                     if let Some(solution) = on_hypothesis(&hypothesis) {
                         return Ok(solution);

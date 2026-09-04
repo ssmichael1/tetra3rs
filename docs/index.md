@@ -16,7 +16,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 
 - **Lost-in-space solving** — determines attitude from star patterns with no initial guess
 - **Fast** — geometric hashing of 4-star patterns with breadth-first (brightest-first) search
-- **Robust** — statistical verification via binomial false-positive probability
+- **Robust** — statistical verification via a per-star likelihood ratio with a bounded false-positive probability
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
 - **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard) in a portable, lightweight format

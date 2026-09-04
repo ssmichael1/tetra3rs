@@ -64,7 +64,7 @@ largest internal cost.
 
 | Module | Responsibility |
 |---|---|
-| `solver/` | Staged solve pipeline: `preprocess.rs` (CRPIX/undistort/brightness order) → hypothesis source (`pattern_search.rs`: 4-star geometric hash + FOV sweep + Wahba SVD; or `track.rs`: attitude hint) → `verify.rs` (measured-density binomial FPR) → `solve.rs` (driver, LIS acceptance stage, refinement + `Solution` assembly) |
+| `solver/` | Staged solve pipeline: `preprocess.rs` (CRPIX/undistort/brightness order) → hypothesis source (`pattern_search.rs`: 4-star geometric hash + FOV sweep + Wahba SVD; or `track.rs`: attitude hint) → `verify.rs` (per-star likelihood ratio against the measured catalog density; `1/Λ` is the p-value) → `solve.rs` (driver, LIS acceptance stage, refinement + `Solution` assembly) |
 | `solver/clock.rs` | Cfg-switched `Instant`: `std` everywhere except `wasm32-unknown-unknown`, where it is `web_time::Instant` (`performance.now()`). All solver timing (`solve_timeout_ms`, `solve_time_ms`, `timed!`) goes through it |
 | `solver/wcs_refine.rs` | Constrained 3-DOF refinement: rotation angle θ + CRVAL offset (dξ₀, dη₀). Pixel scale locked. Sigma-clipped |
 | `camera_model/` | `CameraModel` struct: `focal_length_px`, `image_width`, `image_height`, `crpix`, `parity_flip`, `distortion`. Methods `fov_deg()` / `fov_rad()`, `pixel_to_tanplane` / `tanplane_to_pixel` |

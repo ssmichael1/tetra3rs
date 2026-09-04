@@ -428,15 +428,19 @@ pub struct SolveConfig {
     /// False-positive probability budget for accepting a solution.
     /// Default 1e-5.
     ///
-    /// Each candidate attitude's verification yields a binomial p-value (the
-    /// probability that a wrong attitude would coincidentally match as many
-    /// stars); candidate `k` of a lost-in-space search is accepted when
-    /// `p·k < match_threshold` — a sequential Bonferroni correction over the
-    /// candidates actually tested, so the total false-accept probability of a
-    /// full search stays within a small (logarithmic) multiple of this
-    /// budget. Tracking tests a single hinted candidate against the budget
-    /// directly. Raising this (e.g. `1e-3`) accepts weaker evidence — useful
-    /// for very sparse fields (≲7 stars) at increased false-positive risk.
+    /// Each candidate attitude's verification scores the field with a
+    /// per-star likelihood ratio Λ between "attitude right" and "attitude
+    /// wrong" (matched stars weighted by how closely they fit relative to
+    /// the measured catalog density, unmatched bright detections counting
+    /// against — see `solver::verify`); `1/Λ` bounds the probability that a
+    /// wrong attitude scores as well, i.e. it is a p-value. Candidate `k` of
+    /// a lost-in-space search is accepted when `p·k < match_threshold` — a
+    /// sequential Bonferroni correction over the candidates actually
+    /// tested, so the total false-accept probability of a full search stays
+    /// within a small (logarithmic) multiple of this budget. Tracking tests
+    /// a single hinted candidate against the budget directly. Raising this
+    /// (e.g. `1e-3`) accepts weaker evidence — useful for very sparse fields
+    /// at increased false-positive risk.
     pub match_threshold: f64,
     /// Wall-clock timeout in milliseconds. None = no timeout. Default 5000.
     ///
@@ -755,9 +759,10 @@ pub struct Solution {
     pub p90e_rad: f32,
     /// Maximum angular residual (radians).
     pub max_err_rad: f32,
-    /// False-positive probability of the accepted match (lower is better):
-    /// the verification p-value after the multiple-comparison correction
-    /// that was tested against [`SolveConfig::match_threshold`].
+    /// False-positive probability bound of the accepted match (lower is
+    /// better): `1/Λ` from the verification likelihood ratio, after the
+    /// multiple-comparison correction, as tested against
+    /// [`SolveConfig::match_threshold`].
     pub prob: f64,
     /// Wall-clock time spent solving, in milliseconds.
     pub solve_time_ms: f32,

@@ -65,6 +65,28 @@ pub(super) fn preprocess(centroids: &[Centroid], cam: &CameraModel) -> Preproces
     }
 }
 
+/// Per-centroid position uncertainty in pixels, in brightness order:
+/// `sqrt(mean of the covariance diagonal)` when [`Centroid::cov`] is
+/// present and finite, else `0.0` (unknown — the verification then uses
+/// its stage σ alone). Isotropic on purpose: the verification's position
+/// likelihood is radial.
+pub(super) fn centroid_sigma_px(centroids: &[Centroid], sorted_indices: &[usize]) -> Vec<f32> {
+    sorted_indices
+        .iter()
+        .map(|&i| match centroids[i].cov {
+            Some(c) => {
+                let v = 0.5 * (c[(0, 0)] + c[(1, 1)]);
+                if v.is_finite() && v > 0.0 {
+                    v.sqrt()
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        })
+        .collect()
+}
+
 /// Brightness-ordered camera-frame unit vectors together with the geometry
 /// they were built at.
 ///

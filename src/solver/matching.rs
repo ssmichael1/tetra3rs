@@ -31,6 +31,8 @@ pub(super) struct MatchScratch<F = f64> {
     used_pred: Vec<bool>,
     /// Resulting `(point_idx, catalog_star_idx)` matches.
     matches: Vec<(usize, usize)>,
+    /// Squared distance of each accepted match, aligned with `matches`.
+    matched_d2: Vec<F>,
 }
 
 impl<F> MatchScratch<F> {
@@ -40,6 +42,12 @@ impl<F> MatchScratch<F> {
     /// still reusing the (larger) candidate/flag buffers across calls.
     pub(super) fn take_matches(&mut self) -> Vec<(usize, usize)> {
         std::mem::take(&mut self.matches)
+    }
+
+    /// Squared distances of the last computed match set, aligned with the
+    /// matches (still valid after [`Self::take_matches`]).
+    pub(super) fn matched_d2(&self) -> &[F] {
+        &self.matched_d2
     }
 }
 
@@ -87,12 +95,15 @@ pub(super) fn greedy_unique_matches<'a, F: MatchCoord>(
     used_pred.resize(predicted.len(), false);
     let matches = &mut scratch.matches;
     matches.clear();
+    let matched_d2 = &mut scratch.matched_d2;
+    matched_d2.clear();
 
-    for &(_, pt_idx, pred_idx) in candidates.iter() {
+    for &(d2, pt_idx, pred_idx) in candidates.iter() {
         if !used_point[pt_idx] && !used_pred[pred_idx] {
             used_point[pt_idx] = true;
             used_pred[pred_idx] = true;
             matches.push((pt_idx, predicted[pred_idx].0));
+            matched_d2.push(d2);
         }
     }
 
