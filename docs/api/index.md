@@ -17,6 +17,7 @@ Python API documentation for tetra3rs, auto-generated from type stubs.
 |--------|-------------|
 | [`extract_centroids()`](extraction.md) | Extract star centroids from an image array (connected-component pipeline; default) |
 | [`extract_centroids_fast()`](extraction.md#tetra3rs.extract_centroids_fast) | Fast single-pass extractor — lower latency, lower fidelity ("adequate star tracker") |
+| [`CentroidExtractor`](extraction.md#tetra3rs.CentroidExtractor) | `extract_centroids()` with its working buffers kept between frames |
 | [`ExtractionResult`](extraction.md#tetra3rs.ExtractionResult) | Extraction result with centroids and image statistics |
 | [`Centroid`](extraction.md#tetra3rs.Centroid) | A single star centroid with position, brightness, and shape |
 

@@ -22,6 +22,9 @@
 //!   run-length connected-component moments) for markedly lower latency, at
 //!   the cost of faint-star sensitivity and sub-pixel accuracy. The two
 //!   functions above stay the default and the right choice for calibration.
+//! - [`CentroidExtractor`] runs the same pipeline as the two default
+//!   functions but keeps its full-image working buffers between calls, for
+//!   a frame loop where every frame has the same size.
 //!
 //! With the `parallel` feature, the dominant local-background stage and the
 //! full-image element-wise maps of the connected-component path, and the
@@ -253,9 +256,7 @@ pub fn extract_centroids_from_image(
     img: &image::DynamicImage,
     config: &CentroidExtractionConfig,
 ) -> Result<CentroidExtractionResult> {
-    let (width, height) = img.dimensions();
-    let gray = to_grayscale_f32(img);
-    ccl::extract_from_gray(&gray, width, height, config)
+    CentroidExtractor::new().extract_from_image(img, config)
 }
 
 /// Extract star centroids from raw grayscale pixel data.
@@ -275,8 +276,80 @@ pub fn extract_centroids_from_raw(
     height: u32,
     config: &CentroidExtractionConfig,
 ) -> Result<CentroidExtractionResult> {
-    check_pixel_len(pixels.len(), width, height)?;
-    ccl::extract_from_gray(pixels, width, height, config)
+    CentroidExtractor::new().extract_from_raw(pixels, width, height, config)
+}
+
+/// The default extraction pipeline with its working buffers kept between
+/// calls.
+///
+/// [`extract_centroids_from_image`] and [`extract_centroids_from_raw`]
+/// allocate their full-image buffers — the grayscale conversion, the clamped
+/// and unclamped residual images, the matched filter's output and the
+/// detection bit mask, ~48 MB at 2048² — fresh on every call, and the first
+/// touch of each page costs more than the allocation itself (~0.3 ms serial,
+/// ~0.5 ms with the `parallel` feature at 2048²). An extractor reuses them,
+/// resizing only when the frame size changes, so a frame loop pays that once.
+/// Results are bit-identical to the free functions, which are exactly
+/// `CentroidExtractor::new().extract_*(…)`.
+///
+/// The buffers are sized for the largest frame seen and released when the
+/// extractor is dropped. An extractor is not shared between threads
+/// (`&mut self`); use one per thread.
+///
+/// ```no_run
+/// use tetra3::centroid_extraction::{CentroidExtractionConfig, CentroidExtractor};
+///
+/// let config = CentroidExtractionConfig::default();
+/// let mut extractor = CentroidExtractor::new();
+/// # let frames: Vec<(Vec<f32>, u32, u32)> = Vec::new();
+/// for (pixels, width, height) in &frames {
+///     let result = extractor.extract_from_raw(pixels, *width, *height, &config).unwrap();
+///     println!("{} stars", result.centroids.len());
+/// }
+/// ```
+pub struct CentroidExtractor {
+    /// Grayscale conversion of the last `DynamicImage` (image path only).
+    gray: Vec<f32>,
+    scratch: ccl::Scratch,
+}
+
+impl Default for CentroidExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CentroidExtractor {
+    /// An extractor with no buffers allocated yet; the first call sizes them.
+    pub fn new() -> Self {
+        Self {
+            gray: Vec::new(),
+            scratch: ccl::Scratch::new(),
+        }
+    }
+
+    /// [`extract_centroids_from_image`] on this extractor's buffers.
+    pub fn extract_from_image(
+        &mut self,
+        img: &image::DynamicImage,
+        config: &CentroidExtractionConfig,
+    ) -> Result<CentroidExtractionResult> {
+        let (width, height) = img.dimensions();
+        to_grayscale_f32_into(img, &mut self.gray);
+        ccl::extract_from_gray(&self.gray, width, height, config, &mut self.scratch)
+    }
+
+    /// [`extract_centroids_from_raw`] on this extractor's buffers.
+    pub fn extract_from_raw(
+        &mut self,
+        pixels: &[f32],
+        width: u32,
+        height: u32,
+        config: &CentroidExtractionConfig,
+    ) -> Result<CentroidExtractionResult> {
+        check_pixel_len(pixels.len(), width, height)?;
+        ccl::extract_from_gray(pixels, width, height, config, &mut self.scratch)
+    }
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
@@ -871,50 +944,39 @@ fn peak_sharpness(
 }
 
 /// Convert a DynamicImage to a Vec<f32> of grayscale values.
-fn to_grayscale_f32(img: &image::DynamicImage) -> Vec<f32> {
+fn to_grayscale_f32_into(img: &image::DynamicImage, out: &mut Vec<f32>) {
     use image::DynamicImage;
+    out.clear();
     match img {
         // 8-bit grayscale: read the buffer directly (the `to_luma8()`
         // fallback below would clone it first). Alpha is dropped, exactly
         // as the Luma8 conversion does.
-        DynamicImage::ImageLuma8(g) => g.as_raw().iter().map(|&v| v as f32).collect(),
-        DynamicImage::ImageLumaA8(g) => g.pixels().map(|p| p.0[0] as f32).collect(),
+        DynamicImage::ImageLuma8(g) => out.extend(g.as_raw().iter().map(|&v| v as f32)),
+        DynamicImage::ImageLumaA8(g) => out.extend(g.pixels().map(|p| p.0[0] as f32)),
         // 16-bit images: cast to f32 (values keep their native [0, 65535] range)
-        DynamicImage::ImageLuma16(g) => g.as_raw().iter().map(|&v| v as f32).collect(),
-        DynamicImage::ImageLumaA16(g) => g.pixels().map(|p| p.0[0] as f32).collect(),
-        DynamicImage::ImageRgb16(rgb) => rgb
-            .pixels()
-            .map(|p| {
-                let [r, g, b] = p.0;
-                0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
-            })
-            .collect(),
-        DynamicImage::ImageRgba16(rgba) => rgba
-            .pixels()
-            .map(|p| {
-                let [r, g, b, _] = p.0;
-                0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
-            })
-            .collect(),
+        DynamicImage::ImageLuma16(g) => out.extend(g.as_raw().iter().map(|&v| v as f32)),
+        DynamicImage::ImageLumaA16(g) => out.extend(g.pixels().map(|p| p.0[0] as f32)),
+        DynamicImage::ImageRgb16(rgb) => out.extend(rgb.pixels().map(|p| {
+            let [r, g, b] = p.0;
+            0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+        })),
+        DynamicImage::ImageRgba16(rgba) => out.extend(rgba.pixels().map(|p| {
+            let [r, g, b, _] = p.0;
+            0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+        })),
         // For 32-bit float images
-        DynamicImage::ImageRgb32F(rgb) => rgb
-            .pixels()
-            .map(|p| {
-                let [r, g, b] = p.0;
-                0.2126 * r + 0.7152 * g + 0.0722 * b
-            })
-            .collect(),
-        DynamicImage::ImageRgba32F(rgba) => rgba
-            .pixels()
-            .map(|p| {
-                let [r, g, b, _] = p.0;
-                0.2126 * r + 0.7152 * g + 0.0722 * b
-            })
-            .collect(),
+        DynamicImage::ImageRgb32F(rgb) => out.extend(rgb.pixels().map(|p| {
+            let [r, g, b] = p.0;
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        })),
+        DynamicImage::ImageRgba32F(rgba) => out.extend(rgba.pixels().map(|p| {
+            let [r, g, b, _] = p.0;
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        })),
         // 8-bit and other formats: convert via luma8
         _ => {
             let gray = img.to_luma8();
-            gray.as_raw().iter().map(|&v| v as f32).collect()
+            out.extend(gray.as_raw().iter().map(|&v| v as f32));
         }
     }
 }
@@ -961,7 +1023,7 @@ mod tests {
         let luma =
             image::DynamicImage::ImageLuma8(image::GrayImage::from_raw(w, h, raw.clone()).unwrap());
         let expect: Vec<f32> = luma.to_luma8().as_raw().iter().map(|&v| v as f32).collect();
-        assert_eq!(to_grayscale_f32(&luma), expect);
+        assert_eq!(gray_of(&luma), expect);
         // LumaA8: alpha is dropped, exactly as `to_luma8()` does.
         let raw_a: Vec<u8> = raw
             .iter()
@@ -976,7 +1038,7 @@ mod tests {
             .iter()
             .map(|&v| v as f32)
             .collect();
-        assert_eq!(to_grayscale_f32(&luma_a), expect_a);
+        assert_eq!(gray_of(&luma_a), expect_a);
         assert_eq!(expect, expect_a);
     }
 
@@ -987,6 +1049,100 @@ mod tests {
         // underflow) rather than return an error.
         assert!(extract_centroids_from_raw(&[], 0, 0, &cfg).is_err());
         assert!(extract_centroids_from_raw(&[1.0], 1, 1, &cfg).is_err());
+    }
+
+    /// A reused extractor must give exactly the free functions' output —
+    /// including after a *larger* frame left stale data in its buffers and
+    /// with the matched filter both on and off (different buffers in play).
+    fn gray_of(img: &image::DynamicImage) -> Vec<f32> {
+        let mut v = Vec::new();
+        to_grayscale_f32_into(img, &mut v);
+        v
+    }
+
+    #[test]
+    fn test_extractor_reuse_is_bit_identical() {
+        fn scene(w: u32, h: u32, seed: u32) -> Vec<f32> {
+            let mut pixels = vec![50.0_f32; (w * h) as usize];
+            let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state
+            };
+            for p in pixels.iter_mut() {
+                *p += (next() % 7) as f32; // a little quantized noise
+            }
+            for k in 0..12 {
+                let sx = 8.0 + (next() % (w - 16)) as f32;
+                let sy = 8.0 + (next() % (h - 16)) as f32;
+                let amp = 300.0 + 100.0 * (k % 5) as f32;
+                for row in 0..h {
+                    for col in 0..w {
+                        let dx = col as f32 - sx;
+                        let dy = row as f32 - sy;
+                        pixels[(row * w + col) as usize] +=
+                            amp * (-(dx * dx + dy * dy) / (2.0 * 1.5 * 1.5)).exp();
+                    }
+                }
+            }
+            pixels
+        }
+        let same = |a: &CentroidExtractionResult, b: &CentroidExtractionResult| {
+            assert_eq!(a.centroids.len(), b.centroids.len());
+            for (x, y) in a.centroids.iter().zip(&b.centroids) {
+                assert_eq!(x.x.to_bits(), y.x.to_bits());
+                assert_eq!(x.y.to_bits(), y.y.to_bits());
+                assert_eq!(x.mass.map(f32::to_bits), y.mass.map(f32::to_bits));
+                assert_eq!(x.cov, y.cov);
+            }
+            assert_eq!(a.background_mean.to_bits(), b.background_mean.to_bits());
+            assert_eq!(a.background_sigma.to_bits(), b.background_sigma.to_bits());
+            assert_eq!(a.threshold.to_bits(), b.threshold.to_bits());
+            assert_eq!(a.num_blobs_raw, b.num_blobs_raw);
+        };
+        let filtered = CentroidExtractionConfig::default();
+        let unfiltered = CentroidExtractionConfig {
+            matched_filter_sigma: None,
+            ..Default::default()
+        };
+        let global_bg = CentroidExtractionConfig {
+            local_bg_block_size: None,
+            ..Default::default()
+        };
+        // (w, h, config) sequence: big → small → big, filter on/off, local/global bg.
+        let frames: [(u32, u32, &CentroidExtractionConfig); 6] = [
+            (160, 120, &filtered),
+            (96, 80, &filtered),
+            (96, 80, &unfiltered),
+            (160, 120, &global_bg),
+            (130, 70, &filtered),
+            (96, 80, &filtered),
+        ];
+        let mut extractor = CentroidExtractor::new();
+        for (i, &(w, h, cfg)) in frames.iter().enumerate() {
+            let pixels = scene(w, h, i as u32 + 1);
+            let fresh = extract_centroids_from_raw(&pixels, w, h, cfg).unwrap();
+            assert!(
+                fresh.centroids.len() >= 3,
+                "frame {i}: {} stars",
+                fresh.centroids.len()
+            );
+            let reused = extractor.extract_from_raw(&pixels, w, h, cfg).unwrap();
+            same(&fresh, &reused);
+        }
+        // Image path shares the grayscale buffer across sizes too.
+        for &(w, h) in &[(160u32, 120u32), (96, 80), (160, 120)] {
+            let pixels = scene(w, h, 7);
+            let img =
+                image::DynamicImage::ImageLuma16(image::ImageBuffer::from_fn(w, h, |x, y| {
+                    image::Luma([pixels[(y * w + x) as usize] as u16])
+                }));
+            let fresh = extract_centroids_from_image(&img, &filtered).unwrap();
+            let reused = extractor.extract_from_image(&img, &filtered).unwrap();
+            same(&fresh, &reused);
+        }
     }
 
     #[test]

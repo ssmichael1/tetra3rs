@@ -752,15 +752,19 @@ pub fn wcs_refine(
                 None => true,
             };
             if need_query {
+                // The cached query reads the catalog's precomputed unit
+                // vectors instead of recomputing each candidate's with
+                // `sin`/`cos` — same star set, ~4x cheaper.
                 let idx = timed!(
                     buckets::WCS_REASSOC_QUERY,
-                    star_catalog.query_indices_from_uvec(
+                    star_catalog.query_indices_from_uvec_cached(
                         Vector3::from_array([
                             boresight[0] as f32,
                             boresight[1] as f32,
                             boresight[2] as f32,
                         ]),
                         (search_radius + requery_margin) as f32,
+                        star_vectors.base(),
                     )
                 );
                 #[cfg(feature = "profile")]

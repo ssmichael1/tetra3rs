@@ -196,6 +196,26 @@ typical fields — is left sequential, as is the run-merging detection sweep
 
 Build with `cargo build --release --features image,parallel`.
 
+## Reusing buffers across frames (`CentroidExtractor`)
+
+`extract_centroids` allocates its full-image working buffers — the residual
+images, the matched filter's output and the detection bit mask, about 48 MB
+at 2048² — fresh on every call. The allocation itself is cheap, but the first
+touch of each page is not: roughly 0.3 ms per 2048² frame serially, 0.5 ms
+with the `parallel` feature. In a frame loop, `CentroidExtractor` keeps those
+buffers between calls (resizing only when the frame size changes) and gives
+bit-identical results:
+
+```python
+extractor = tetra3rs.CentroidExtractor()
+for frame in frames:
+    result = extractor.extract(frame, sigma_threshold=5.0, max_centroids=100)
+```
+
+`extract()` takes exactly the arguments of `extract_centroids`. Use one
+extractor per thread. (Rust: `CentroidExtractor::extract_from_raw` /
+`extract_from_image`.)
+
 ## Fast single-pass extraction (`extract_centroids_fast`)
 
 The pipeline above prioritizes fidelity — local-background interpolation, an

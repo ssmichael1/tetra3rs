@@ -23,6 +23,7 @@ tetra3rs.SolverDatabase.generate_from_gaia
 tetra3rs.SolverDatabase.solve_from_centroids
 tetra3rs.extract_centroids
 tetra3rs.extract_centroids_fast
+tetra3rs.CentroidExtractor.extract
 
 # The runtime module defines __all__; the stub omits it. Every public name is
 # already declared in the stub, so re-listing them in an __all__ would only add

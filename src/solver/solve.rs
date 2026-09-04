@@ -78,6 +78,15 @@ impl<'a> StarVectors<'a> {
         }
     }
 
+    /// The uncorrected (catalog-frame) unit vectors, index-aligned with the
+    /// catalog — for cone queries via
+    /// [`StarCatalog::query_indices_from_uvec_cached`](crate::starcatalog::StarCatalog::query_indices_from_uvec_cached).
+    /// Aberration moves a star by ≲ 20″, far inside any query margin.
+    #[inline]
+    pub(crate) fn base(&self) -> &'a [[f32; 3]] {
+        self.base
+    }
+
     /// Apparent unit vector of catalog star `idx`.
     #[inline]
     pub(crate) fn get(&self, idx: usize) -> [f32; 3] {

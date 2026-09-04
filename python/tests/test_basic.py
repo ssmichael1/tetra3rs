@@ -578,3 +578,70 @@ class TestArgumentValidation:
         with pytest.raises(Exception) as excinfo:
             pickle.loads(blob[:-4])
         assert "Panic" not in type(excinfo.value).__name__
+
+
+class TestCentroidExtractor:
+    """`CentroidExtractor` reuses buffers across frames; output must equal
+    `extract_centroids` bit for bit, including after a larger frame."""
+
+    @staticmethod
+    def _scene(w, h, seed):
+        rng = np.random.default_rng(seed)
+        image = rng.normal(100.0, 3.0, size=(h, w)).astype(np.float32)
+        yy, xx = np.mgrid[0:h, 0:w]
+        for _ in range(10):
+            cx = rng.uniform(8, w - 8)
+            cy = rng.uniform(8, h - 8)
+            amp = rng.uniform(500, 3000)
+            image += (
+                amp * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 1.6**2))
+            ).astype(np.float32)
+        return image
+
+    @staticmethod
+    def _flat(result):
+        return [
+            (c.x, c.y, c.brightness, None if c.cov is None else c.cov.tobytes())
+            for c in result.centroids
+        ] + [
+            result.background_mean,
+            result.background_sigma,
+            result.threshold,
+            result.num_blobs_raw,
+            result.image_width,
+            result.image_height,
+        ]
+
+    def test_reuse_matches_free_function(self):
+        extractor = tetra3rs.CentroidExtractor()
+        assert repr(extractor) == "CentroidExtractor()"
+        # big -> small -> big, matched filter on and off, local/global background
+        frames = [
+            ((200, 160), dict(matched_filter_sigma=1.5)),
+            ((96, 80), dict(matched_filter_sigma=1.5)),
+            ((96, 80), dict(matched_filter_sigma=None)),
+            ((200, 160), dict(local_bg_block_size=None)),
+            ((130, 70), {}),
+        ]
+        for i, ((w, h), kw) in enumerate(frames):
+            image = self._scene(w, h, seed=i)
+            fresh = tetra3rs.extract_centroids(image, sigma_threshold=5.0, **kw)
+            reused = extractor.extract(image, sigma_threshold=5.0, **kw)
+            assert len(fresh.centroids) >= 2
+            assert self._flat(fresh) == self._flat(reused)
+
+    def test_pickle_gives_a_working_extractor(self):
+        extractor = tetra3rs.CentroidExtractor()
+        image = self._scene(120, 90, seed=3)
+        before = extractor.extract(image, sigma_threshold=5.0)
+        restored = pickle.loads(pickle.dumps(extractor))
+        assert isinstance(restored, tetra3rs.CentroidExtractor)
+        after = restored.extract(image, sigma_threshold=5.0)
+        assert self._flat(before) == self._flat(after)
+
+    def test_rejects_bad_input_like_free_function(self):
+        extractor = tetra3rs.CentroidExtractor()
+        with pytest.raises(ValueError):
+            extractor.extract(np.zeros((1, 1), dtype=np.float32))
+        with pytest.raises(ValueError):
+            extractor.extract(np.zeros((32, 32), dtype=np.float32), deblend="maybe")
