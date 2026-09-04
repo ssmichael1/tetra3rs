@@ -50,6 +50,7 @@ use numeris::{Matrix3, Vector3};
 
 use super::matching;
 use super::preprocess::CentroidVectors;
+use super::solve::StarVectors;
 use super::{pixel_scale_from_fov, SolveConfig, SolverDatabase};
 
 #[cfg(feature = "profile")]
@@ -126,7 +127,7 @@ impl SolverDatabase {
         match_centroid_count: usize,
         fov: f32,
         config: &SolveConfig,
-        star_vectors: &[[f32; 3]],
+        star_vectors: StarVectors<'_>,
         exclude: &[usize],
         sigma_px: &[f32],
         stage: VerifyStage,
@@ -158,7 +159,7 @@ impl SolverDatabase {
         // Project catalog stars to camera frame; keep stars in front (z > 0).
         let mut nearby_cam_positions: Vec<(usize, f32, f32)> = Vec::new();
         for &cat_idx in &nearby_inds {
-            let sv = &star_vectors[cat_idx];
+            let sv = star_vectors.get(cat_idx);
             let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
             let cam_v = *rotation_matrix * icrs_v;
             if cam_v[2] > 0.0 {

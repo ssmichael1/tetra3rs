@@ -27,6 +27,7 @@ use numeris::{Matrix3, Vector3};
 use tracing::debug;
 
 use super::matching::{greedy_unique_matches, MatchScratch};
+use super::solve::StarVectors;
 use crate::starcatalog::StarCatalog;
 
 #[cfg(feature = "profile")]
@@ -348,7 +349,7 @@ fn mad_clip_matches(
 /// pairs; matches whose star projects behind the tangent plane are skipped.
 fn compute_residuals(
     matches: &[(usize, usize)],
-    star_vectors: &[[f32; 3]],
+    star_vectors: StarVectors<'_>,
     centroids_px: &[(f64, f64)],
     theta: f64,
     crval_ra: f64,
@@ -361,7 +362,7 @@ fn compute_residuals(
 
     let mut residuals: Vec<(usize, f64)> = Vec::with_capacity(matches.len());
     for (match_idx, &(cent_idx, cat_idx)) in matches.iter().enumerate() {
-        if let Some((xi_cat, eta_cat)) = tan_project_vec(&star_vectors[cat_idx], &basis) {
+        if let Some((xi_cat, eta_cat)) = tan_project_vec(&star_vectors.get(cat_idx), &basis) {
             let (px, py) = centroids_px[cent_idx];
             let (xi_pred, eta_pred) = predict_tanplane(px, py, cos_t, sin_t, ps);
             let dxi = xi_pred - xi_cat;
@@ -379,7 +380,7 @@ fn compute_residuals(
 /// equations are singular — callers skip the update / stop iterating.
 fn ls_fit_once(
     matches: &[(usize, usize)],
-    star_vectors: &[[f32; 3]],
+    star_vectors: StarVectors<'_>,
     centroids_px: &[(f64, f64)],
     theta: f64,
     crval_ra: f64,
@@ -396,7 +397,7 @@ fn ls_fit_once(
     let mut n_valid = 0u32;
 
     for &(cent_idx, cat_idx) in matches {
-        let Some((xi_cat, eta_cat)) = tan_project_vec(&star_vectors[cat_idx], &basis) else {
+        let Some((xi_cat, eta_cat)) = tan_project_vec(&star_vectors.get(cat_idx), &basis) else {
             continue;
         };
 
@@ -435,7 +436,8 @@ fn ls_fit_once(
 /// * `initial_matches` — initial matched pairs `(centroid_local_idx, catalog_star_idx)`.
 /// * `centroids_px` — pixel coordinates of centroids after undistortion and CRPIX
 ///   subtraction, with parity already applied. Indexed by local_idx (brightness-sorted).
-/// * `star_vectors` — catalog star ICRS unit vectors, indexed by catalog star index.
+/// * `star_vectors` — catalog star ICRS unit vectors (aberration-corrected on
+///   access when the solve asked for it), indexed by catalog star index.
 /// * `star_catalog` — spatial index for cone queries.
 /// * `pixel_scale` — radians per pixel (1/focal_length_px from CameraModel).
 /// * `parity_flip` — whether the image x-axis is flipped.
@@ -452,7 +454,7 @@ pub fn wcs_refine(
     initial_rotation: &Matrix3<f32>,
     initial_matches: &[(usize, usize)],
     centroids_px: &[(f64, f64)],
-    star_vectors: &[[f32; 3]],
+    star_vectors: StarVectors<'_>,
     star_catalog: &StarCatalog,
     pixel_scale: f64,
     parity_flip: bool,
@@ -710,7 +712,7 @@ pub fn wcs_refine(
                 let mut kept = 0usize;
                 for k in 0..nearby_indices.len() {
                     let cat_idx = nearby_indices[k];
-                    let sv = &star_vectors[cat_idx];
+                    let sv = star_vectors.get(cat_idx);
                     let v = [sv[0] as f64, sv[1] as f64, sv[2] as f64];
                     let z = row_z[0] * v[0] + row_z[1] * v[1] + row_z[2] * v[2];
                     if z <= 1e-12 {

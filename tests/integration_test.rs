@@ -1016,6 +1016,20 @@ fn test_save_and_load_database() {
     assert_eq!(db.props.num_patterns, loaded_db.props.num_patterns);
     assert_eq!(db.pattern_catalog.len(), loaded_db.pattern_catalog.len());
 
+    // The file carries the format header, and a legacy (pre-header) bare
+    // postcard payload still loads through the same entry point.
+    let bytes = std::fs::read(tmp_path).expect("read saved database");
+    assert_eq!(
+        &bytes[..4],
+        b"T3DB",
+        "saved database must start with the magic"
+    );
+    let legacy = postcard::to_allocvec(&db).expect("bare postcard payload");
+    let from_legacy = SolverDatabase::from_bytes(&legacy).expect("legacy payload must load");
+    assert_eq!(from_legacy.props.num_patterns, db.props.num_patterns);
+    let from_header = SolverDatabase::from_bytes(&bytes).expect("header payload must load");
+    assert_eq!(from_header.pattern_catalog.len(), db.pattern_catalog.len());
+
     // Clean up temporary file
     std::fs::remove_file(tmp_path).expect("Failed to delete temporary file");
 

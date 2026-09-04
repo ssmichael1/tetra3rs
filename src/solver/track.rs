@@ -25,7 +25,7 @@ use crate::{Centroid, Quaternion};
 use super::preprocess::{
     centroid_sigma_px, centroid_unit_vectors, sort_indices_by_brightness, CentroidVectors,
 };
-use super::solve::{failure, wahba_rotation};
+use super::solve::{failure, wahba_rotation, StarVectors};
 use super::verify::{diagonal_factor, find_centroid_matches, VerifyStage};
 use super::{SolveConfig, SolveResult, SolveStatus, SolverDatabase};
 
@@ -45,7 +45,7 @@ impl SolverDatabase {
     pub(crate) fn solve_with_hint(
         &self,
         preprocessed: &[Centroid],
-        star_vectors: &[[f32; 3]],
+        star_vectors: StarVectors<'_>,
         config: &SolveConfig,
         hint: &Quaternion,
         t0: Instant,
@@ -108,7 +108,7 @@ impl SolverDatabase {
         let half_h = (config.image_height() as f32 / 2.0 + 4.0) * pixel_scale;
         let mut projected: Vec<(usize, f32, f32)> = Vec::with_capacity(nearby_inds.len());
         for &cat_idx in &nearby_inds {
-            let sv = &star_vectors[cat_idx];
+            let sv = star_vectors.get(cat_idx);
             let icrs_v = Vector3::from_array([sv[0], sv[1], sv[2]]);
             let cam_v = r_hint * icrs_v;
             if cam_v[2] > 0.0 {
@@ -158,11 +158,11 @@ impl SolverDatabase {
         // A failed SVD (degenerate cross-covariance) or a negative determinant
         // (likely parity mismatch) both bail — the caller may still fall back
         // to LIS.
-        let Some(rotation_matrix) = wahba_rotation(
-            initial_matches
-                .iter()
-                .map(|&(cent_idx, cat_idx)| (&centroid_vectors[cent_idx], &star_vectors[cat_idx])),
-        ) else {
+        let Some(rotation_matrix) =
+            wahba_rotation(initial_matches.iter().map(|&(cent_idx, cat_idx)| {
+                (centroid_vectors[cent_idx], star_vectors.get(cat_idx))
+            }))
+        else {
             return failure(SolveStatus::NoMatch, t0);
         };
         let det = rotation_matrix.det();

@@ -147,6 +147,12 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(SolveConfig::DEFAULT_PATTERN_CHECKING_STARS);
 
+    // T3_ABERRATION=1 sets an observer velocity (Earth-like, 30 km/s) so
+    // the catalog is aberration-corrected on every solve.
+    let observer_velocity_km_s = std::env::var("T3_ABERRATION")
+        .ok()
+        .map(|_| [10.0, -20.0, 20.0]);
+
     let solve_config = SolveConfig {
         fov_max_error_rad: Some(2.0_f32.to_radians()),
         match_radius: 0.01,
@@ -154,6 +160,7 @@ fn main() {
         solve_timeout_ms: Some(10_000),
         match_max_error: None,
         pattern_checking_stars,
+        observer_velocity_km_s,
         ..SolveConfig::new(fov_rad * (1.0 + fov_bias), image_width, image_width)
     };
 
@@ -164,6 +171,7 @@ fn main() {
     //   T3_FOV_BIAS=x  bias the solver's FOV estimate by fraction x (see below)
     //   T3_MAX_CENTROIDS=N  keep only the N brightest true centroids per field
     //   T3_PATTERN_STARS=N  cap pattern-forming centroids at the N brightest
+    //   T3_ABERRATION=1     aberration-correct the catalog (observer velocity set)
     //                  (sparse-field scenario; fields with fewer than 4 are
     //                  regenerated as usual)
     let spurious: usize = std::env::var("T3_SPURIOUS")

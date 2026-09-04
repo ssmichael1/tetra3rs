@@ -485,7 +485,7 @@ fn multi_image_calibrate(
                 &img.rotation,
                 &initial_matches,
                 &centroids_px,
-                &database.star_vectors,
+                crate::solver::solve::StarVectors::raw(&database.star_vectors),
                 &database.star_catalog,
                 per_image_ps,
                 parity_flip,
