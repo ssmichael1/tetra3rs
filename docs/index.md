@@ -20,10 +20,11 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates Gaia DR3 / Hipparcos catalog positions to any observation epoch
 - **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard) in a portable, lightweight format
-- **Centroid extraction** — detect stars from in-memory pixel data with local background subtraction, matched-filter detection, run-length connected-region grouping, and sub-pixel peak refinement (accepts a decoded `DynamicImage` or a raw `&[f32]` pixel buffer)
+- **Centroid extraction** — detect stars from in-memory pixel data with local background subtraction, matched-filter detection, run-length connected-region grouping, and sub-pixel peak refinement (accepts a decoded `DynamicImage` or a raw `&[f32]` pixel buffer); `CentroidExtractor` keeps the working buffers between frames
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit SIP polynomial or Brown-Conrady radial distortion models from one or more solved images via `calibrate_camera`
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
+- **Attitude covariance** — every solution carries the 3×3 covariance of its refined attitude parameters (roll and boresight offsets) from the refinement's normal equations, with 1σ values via `attitude_sigma_rad()`
 - **Stellar aberration** — optional correction for the ~20″ apparent shift caused by the observer's barycentric velocity
 
 ## Quick Links

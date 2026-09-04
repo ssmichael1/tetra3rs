@@ -157,13 +157,11 @@ field whose value other code indexes by or divides by, extend the owning
 
 ## Data assets (`data/`)
 
-Downloaded on first integration-test run from GCS (`tetra3rs-testvecs` bucket). Not in git.
+Downloaded on first test run from GCS (`tetra3rs-testvecs` bucket; `tests/test_data.rs`, `python/tests/conftest.py`). Not in git.
 
-- `hipsolver_10_30.bin` (455M) — main solver database
-- `test_tess_db.bin` (144M), `test_skyview_db.bin` (38M)
-- `gaia_merged.bin` (17M) — binary Gaia+Hipparcos catalog
-- `gaia_merged.csv` (81M) — CSV form (used by `scripts/`; no in-tree Rust CSV parser — the crate loads only the `.bin` GDR3 format)
-- FITS test images (skyview, TESS). TIFF/JPEG variants exist in the bucket but aren't exercised in CI — the library no longer ships file-format decoders, so callers must decode files themselves before calling `extract_centroids_from_image`.
+- In the bucket: `gaia_merged.bin` (17M, binary Gaia+Hipparcos catalog; also `.zip`), `hip2.dat` (Hipparcos), and the FITS test images (`skyview_10deg_test_images/`, `tess_test_images/`, `tess_same_ccd/`). Callers must decode image files themselves before `extract_centroids_from_image` — the library ships no file-format decoders.
+- **Solver databases are not in the bucket.** Rust tests generate theirs from `gaia_merged.bin` in memory each run; the Python fixtures generate and cache `data/test_skyview_db.bin` and `data/test_tess_db.bin` on first use. After a change that affects database generation (cone query, pattern selection, file format) delete those two cached files so they regenerate.
+- `gaia_merged.csv` (81M) — CSV form used by `scripts/`; no in-tree Rust CSV parser.
 
 ## Scripts (`scripts/`)
 

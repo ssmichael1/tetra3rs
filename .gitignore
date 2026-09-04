@@ -73,3 +73,6 @@ build
 
 # MkDocs build output
 site/
+
+# mkdocs-jupyter executed-notebook cache
+.cache/
