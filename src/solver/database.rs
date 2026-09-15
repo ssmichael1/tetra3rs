@@ -10,6 +10,10 @@ use std::collections::HashSet;
 
 use tracing::info;
 
+use serde::Deserialize;
+#[cfg(test)]
+use serde::Serialize;
+
 use crate::{Star, StarCatalog};
 
 use super::combinations::BreadthFirstCombinations;
@@ -434,9 +438,51 @@ fn compute_magnitude_cutoff(stars: &[Star], min_fov: f32, verification_stars_per
 const DB_MAGIC: &[u8; 4] = b"T3DB";
 /// Current serialized-database format version, written after the magic as
 /// a little-endian `u16`. Bump when the postcard payload's layout changes so
-/// an old crate fails a new file with a clear message (and vice versa)
-/// instead of an opaque decode error or a silently mis-decoded table.
-const DB_FORMAT_VERSION: u16 = 1;
+/// an old crate fails a new file with a clear message instead of an opaque
+/// decode error or a silently mis-decoded table; keep reading the previous
+/// version if a frozen mirror of its layout (like [`SolverDatabaseV1`]) is
+/// cheap.
+///
+/// - 1: every field derived; the pattern table a postcard `Vec<PatternEntry>`.
+///   Written by 0.13 and earlier (pre-0.13 files carry no header at all).
+/// - 2: the pattern table as an occupancy bitmap + packed entries
+///   (`pattern_wire`); the other fields unchanged.
+const DB_FORMAT_VERSION: u16 = 2;
+
+/// Format version 1 layout, frozen. Its pattern table decodes through
+/// serde's per-element path, so a v1 load is slower than v2 — regenerate or
+/// re-save large databases to upgrade them. The other fields are the current
+/// types: if any of those change, bump the version again and drop this
+/// rather than adapt it.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct SolverDatabaseV1 {
+    star_catalog: StarCatalog,
+    star_vectors: Vec<[f32; 3]>,
+    star_catalog_ids: Vec<i64>,
+    pattern_catalog: PatternCatalogV1,
+    props: DatabaseProperties,
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
+struct PatternCatalogV1 {
+    entries: Vec<PatternEntry>,
+}
+
+impl From<SolverDatabaseV1> for SolverDatabase {
+    fn from(v1: SolverDatabaseV1) -> Self {
+        Self {
+            star_catalog: v1.star_catalog,
+            star_vectors: v1.star_vectors,
+            star_catalog_ids: v1.star_catalog_ids,
+            pattern_catalog: super::PatternCatalog {
+                entries: v1.pattern_catalog.entries,
+            },
+            props: v1.props,
+        }
+    }
+}
 
 impl SolverDatabase {
     /// Serialize the database: a 6-byte header (`"T3DB"` + format version)
@@ -448,35 +494,37 @@ impl SolverDatabase {
         postcard::to_extend(self, bytes).map_err(Into::into)
     }
 
-    /// Decode a database produced by [`Self::to_bytes`] (or, for files
-    /// written before the header existed, a bare postcard payload — detected
-    /// by the missing magic) and check its invariants with
+    /// Decode a database produced by [`Self::to_bytes`] — the current format
+    /// or version 1 (0.13 and earlier; also the bare pre-header payload,
+    /// detected by the missing magic) — and check its invariants with
     /// [`Self::validate`].
     ///
     /// Fails with [`crate::Error::InvalidInput`] on an unsupported format
     /// version, and with the decode error on a truncated or corrupt payload.
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
-        let payload = match bytes.strip_prefix(DB_MAGIC) {
+        let (version, payload) = match bytes.strip_prefix(DB_MAGIC) {
             Some(rest) => {
                 let (ver, payload) = rest.split_at_checked(2).ok_or_else(|| {
                     crate::Error::InvalidInput("database header truncated after the magic".into())
                 })?;
-                let version = u16::from_le_bytes([ver[0], ver[1]]);
-                if version != DB_FORMAT_VERSION {
-                    return Err(crate::Error::InvalidInput(format!(
-                        "unsupported database format version {version} \
-                         (this crate reads version {DB_FORMAT_VERSION})"
-                    )));
-                }
-                payload
+                (u16::from_le_bytes([ver[0], ver[1]]), payload)
             }
-            // Legacy (pre-header) file: the whole buffer is the payload. A
+            // Legacy (pre-header) file: the whole buffer is a v1 payload. A
             // legacy payload starting with the magic bytes would need
             // nside = 0x54 followed by n_lat = 0x33, which `validate()`
             // rejects (n_lat must be 3·nside), so misdetection cannot load.
-            None => bytes,
+            None => (1, bytes),
         };
-        let db = postcard::from_bytes::<Self>(payload)?;
+        let db = match version {
+            1 => postcard::from_bytes::<SolverDatabaseV1>(payload)?.into(),
+            2 => postcard::from_bytes::<Self>(payload)?,
+            _ => {
+                return Err(crate::Error::InvalidInput(format!(
+                    "unsupported database format version {version} \
+                     (this crate reads versions 1 and {DB_FORMAT_VERSION})"
+                )));
+            }
+        };
         db.validate()?;
         Ok(db)
     }
@@ -577,25 +625,144 @@ impl SolverDatabase {
         }
 
         // Every non-empty pattern entry is indexed straight into star_vectors
-        // during hash probing — before any filter can reject it.
-        for entry in &self.pattern_catalog.entries {
-            if entry.is_empty() {
-                continue;
-            }
-            if entry.star_indices.iter().any(|&i| i as usize >= n_stars) {
-                return Err(InvalidInput(format!(
-                    "SolverDatabase: pattern entry references star index past the \
-                     {n_stars}-star table"
-                )));
-            }
+        // during hash probing — before any filter can reject it. Empty slots
+        // are all-zero, so "every index of every occupied slot is in range"
+        // is "the largest index in the table is in range" — a branchless,
+        // memory-bound max-reduce (4× faster than the per-slot empty test and
+        // early-exit compare on a 127M-slot table; parallel on top of that).
+        // With an empty star table the only valid pattern table is one with
+        // no occupied slots, i.e. max index 0 — hence the `max(1)`.
+        let limit = u32::try_from(n_stars.max(1)).unwrap_or(u32::MAX);
+        if max_star_index(&self.pattern_catalog.entries) >= limit {
+            return Err(InvalidInput(format!(
+                "SolverDatabase: pattern entry references star index past the \
+                 {n_stars}-star table"
+            )));
         }
         Ok(())
     }
 }
 
+#[inline]
+fn entry_max(e: &PatternEntry) -> u32 {
+    let [a, b, c, d] = e.star_indices;
+    a.max(b).max(c.max(d))
+}
+
+#[cfg(not(feature = "parallel"))]
+fn max_star_index(entries: &[PatternEntry]) -> u32 {
+    entries.iter().map(entry_max).fold(0, u32::max)
+}
+
+#[cfg(feature = "parallel")]
+fn max_star_index(entries: &[PatternEntry]) -> u32 {
+    use rayon::prelude::*;
+    entries.par_iter().map(entry_max).reduce(|| 0, u32::max)
+}
+
 #[cfg(test)]
 mod header_tests {
     use super::*;
+    use crate::solver::PatternCatalog;
+
+    /// A small but `validate()`-clean database.
+    fn tiny_db() -> SolverDatabase {
+        let stars: Vec<Star> = (0..5)
+            .map(|i| Star {
+                id: 100 + i as i64,
+                ra_rad: 0.3 * i as f32,
+                dec_rad: 0.1 * i as f32 - 0.2,
+                mag: 3.0 + i as f32,
+            })
+            .collect();
+        let star_vectors = stars
+            .iter()
+            .map(|s| {
+                let v = s.uvec();
+                [v[0], v[1], v[2]]
+            })
+            .collect();
+        let star_catalog_ids = stars.iter().map(|s| s.id).collect();
+        let star_catalog = StarCatalog::new(1, stars);
+        let mut pattern_catalog = PatternCatalog::with_capacity(101);
+        *pattern_catalog.get_mut(7) = PatternEntry::new([0, 1, 2, 3], 0.05, 0xabcd);
+        *pattern_catalog.get_mut(100) = PatternEntry::new([1, 2, 3, 4], 0.06, 0x1234);
+        SolverDatabase {
+            star_catalog,
+            star_vectors,
+            star_catalog_ids,
+            pattern_catalog,
+            props: DatabaseProperties {
+                pattern_bins: 250,
+                pattern_max_error: 0.001,
+                max_fov_rad: 0.2,
+                min_fov_rad: 0.05,
+                star_max_magnitude: 8.0,
+                num_patterns: 2,
+                epoch_equinox: 2000,
+                epoch_proper_motion_year: 2026.0,
+                verification_stars_per_fov: 20,
+                lattice_field_oversampling: 100,
+                patterns_per_lattice_field: 50,
+            },
+        }
+    }
+
+    fn assert_same(a: &SolverDatabase, b: &SolverDatabase) {
+        assert_eq!(a.star_catalog.stars(), b.star_catalog.stars());
+        assert_eq!(a.star_vectors, b.star_vectors);
+        assert_eq!(a.star_catalog_ids, b.star_catalog_ids);
+        assert_eq!(a.pattern_catalog, b.pattern_catalog);
+        assert_eq!(a.props, b.props);
+    }
+
+    #[test]
+    fn current_format_roundtrips() {
+        let db = tiny_db();
+        let bytes = db.to_bytes().unwrap();
+        assert_eq!(&bytes[..4], DB_MAGIC);
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 2);
+        assert_same(&SolverDatabase::from_bytes(&bytes).unwrap(), &db);
+    }
+
+    #[test]
+    fn version_1_and_legacy_files_still_load() {
+        let db = tiny_db();
+        let v1 = SolverDatabaseV1 {
+            star_catalog: db.star_catalog.clone(),
+            star_vectors: db.star_vectors.clone(),
+            star_catalog_ids: db.star_catalog_ids.clone(),
+            pattern_catalog: PatternCatalogV1 {
+                entries: db.pattern_catalog.entries.clone(),
+            },
+            props: db.props.clone(),
+        };
+        let payload = postcard::to_allocvec(&v1).unwrap();
+
+        let mut with_header = DB_MAGIC.to_vec();
+        with_header.extend_from_slice(&1u16.to_le_bytes());
+        with_header.extend_from_slice(&payload);
+        assert_same(&SolverDatabase::from_bytes(&with_header).unwrap(), &db);
+
+        // Pre-0.13: no header, bare v1 payload.
+        assert_same(&SolverDatabase::from_bytes(&payload).unwrap(), &db);
+
+        // A v1 payload labelled v2 (or vice versa) is an error, not a panic.
+        with_header[4..6].copy_from_slice(&2u16.to_le_bytes());
+        assert!(SolverDatabase::from_bytes(&with_header).is_err());
+        let mut v2_as_v1 = db.to_bytes().unwrap();
+        v2_as_v1[4..6].copy_from_slice(&1u16.to_le_bytes());
+        assert!(SolverDatabase::from_bytes(&v2_as_v1).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_star_index_past_the_table() {
+        let mut db = tiny_db();
+        assert!(db.validate().is_ok());
+        *db.pattern_catalog.get_mut(50) = PatternEntry::new([0, 0, 0, 5], 0.05, 1);
+        let err = db.validate().unwrap_err().to_string();
+        assert!(err.contains("past the 5-star table"), "{err}");
+    }
 
     #[test]
     fn rejects_unsupported_version_and_truncated_header() {

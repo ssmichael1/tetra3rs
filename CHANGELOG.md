@@ -2,6 +2,15 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
+## Unreleased
+
+**Upgrading from 0.13:** databases saved by this version (files and Python pickles) use format version 2, which 0.13 cannot read; 0.13 and earlier databases still load here.
+
+### Changed
+
+- Database format version 2: the pattern table is serialized as an occupancy bitmap plus the occupied entries packed little-endian (22 bytes each) instead of a postcard `Vec` of every slot (half of them empty), and loads by bulk scatter straight from the file buffer — a 2–10°, mag-12 database (127M slots) loads in ~0.6 s instead of 2.0 s (warm cache, M3) and its file shrinks from 1.95 GB to 1.55 GB. Version-1 files (0.13 and earlier, with or without the header) still load through the old, slower path; re-save them with `save_to_file` to upgrade. Closes #69. ([#70](https://github.com/ssmichael1/tetra3rs/pull/70))
+- `SolverDatabase::validate` bounds-checks pattern star indices with a branchless max-reduce (0.37 → 0.09 s on the same table), threaded under the `parallel` feature (0.04 s), which now also parallelizes the format-2 table scatter. ([#70](https://github.com/ssmichael1/tetra3rs/pull/70))
+
 ## 0.13.0 - 2026-09-04
 
 **Upgrading from 0.12:** `SolveConfig` gains `pattern_checking_stars` (Rust struct literals need the field or `..Default::default()`); pickled Python `SolveResult`s from earlier versions do not load; databases saved by 0.12 and earlier still load, but were built with cone queries that missed stars near the poles and on wide fields — regenerate them with `generate_from_gaia` to get full coverage; verification is now a likelihood ratio, so `prob` values differ from 0.12 while `match_threshold` keeps its meaning as a per-solve false-accept budget.
