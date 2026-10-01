@@ -254,6 +254,12 @@ impl PyExtractionResult {
 ///     border_margin: Drop blobs whose bounding box comes within this many
 ///         pixels of an image edge (truncated PSFs bias the center-of-mass
 ///         inward). Default 0 (disabled).
+///     threads: Worker threads for this call (keyword-only). None (default)
+///         uses every available core — or ``RAYON_NUM_THREADS`` if set —
+///         except for frames under ~512×512, which run on one thread
+///         because waking the workers costs more than it saves. An integer
+///         uses exactly that many; 1 is single-threaded. The result is the
+///         same for every setting. Safe to use in forked child processes.
 ///
 /// Returns:
 ///     ExtractionResult with centroids and image statistics.
@@ -271,6 +277,8 @@ impl PyExtractionResult {
     saturation_level = None,
     deblend = "off",
     border_margin = 0,
+    *,
+    threads = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_centroids(
@@ -286,6 +294,7 @@ pub(crate) fn extract_centroids(
     saturation_level: Option<f32>,
     deblend: &str,
     border_margin: u32,
+    threads: Option<usize>,
 ) -> PyResult<PyExtractionResult> {
     let config = ccl_config(
         sigma_threshold,
@@ -302,14 +311,13 @@ pub(crate) fn extract_centroids(
     )?;
     let (pixels, width, height) = image_to_f32(image)?;
 
-    // The image was copied into a pure-Rust buffer above; release the GIL for
-    // the (potentially long) extraction so other Python threads keep running.
-    let result = image
-        .py()
-        .detach(|| {
-            tetra3::centroid_extraction::extract_centroids_from_raw(&pixels, width, height, &config)
-        })
-        .map_err(crate::helpers::map_tetra3_err)?;
+    // The image was copied into a pure-Rust buffer above; the extraction
+    // runs with the GIL released (so other Python threads keep running), on
+    // the module's own thread pool (see `threads`).
+    let result = crate::threads::run(image.py(), threads, pixels.len(), || {
+        tetra3::centroid_extraction::extract_centroids_from_raw(&pixels, width, height, &config)
+    })?
+    .map_err(crate::helpers::map_tetra3_err)?;
 
     Ok(PyExtractionResult {
         inner: result.into(),
@@ -392,8 +400,9 @@ impl PyCentroidExtractor {
     /// Extract star centroids from a 2D image array, reusing this
     /// extractor's buffers.
     ///
-    /// Takes exactly the arguments of :func:`extract_centroids`, with the
-    /// same defaults, and returns the same ``ExtractionResult``.
+    /// Takes exactly the arguments of :func:`extract_centroids` (including
+    /// the keyword-only ``threads``), with the same defaults, and returns
+    /// the same ``ExtractionResult``.
     #[pyo3(signature = (
         image,
         sigma_threshold = 5.0,
@@ -407,6 +416,8 @@ impl PyCentroidExtractor {
         saturation_level = None,
         deblend = "off",
         border_margin = 0,
+        *,
+        threads = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn extract(
@@ -423,6 +434,7 @@ impl PyCentroidExtractor {
         saturation_level: Option<f32>,
         deblend: &str,
         border_margin: u32,
+        threads: Option<usize>,
     ) -> PyResult<PyExtractionResult> {
         let config = ccl_config(
             sigma_threshold,
@@ -439,12 +451,13 @@ impl PyCentroidExtractor {
         )?;
         let (pixels, width, height) = image_to_f32(image)?;
         let inner = &mut self.inner;
-        // Input copied to a pure-Rust buffer; release the GIL for the
-        // extraction (the `&mut self` borrow keeps Python from re-entering).
-        let result = image
-            .py()
-            .detach(|| inner.extract_from_raw(&pixels, width, height, &config))
-            .map_err(crate::helpers::map_tetra3_err)?;
+        // Input copied to a pure-Rust buffer; the extraction runs with the
+        // GIL released (the `&mut self` borrow keeps Python from
+        // re-entering), on the module's own thread pool (see `threads`).
+        let result = crate::threads::run(image.py(), threads, pixels.len(), || {
+            inner.extract_from_raw(&pixels, width, height, &config)
+        })?
+        .map_err(crate::helpers::map_tetra3_err)?;
         Ok(PyExtractionResult {
             inner: result.into(),
         })
@@ -503,6 +516,12 @@ impl PyCentroidExtractor {
 ///     border_margin: Drop regions whose bounding box comes within this many
 ///         pixels of an image edge (truncated PSFs bias the center-of-mass
 ///         inward). Default 0 (disabled).
+///     threads: Worker threads for this call (keyword-only). None (default)
+///         uses every available core — or ``RAYON_NUM_THREADS`` if set —
+///         except for frames under ~512×512, which run on one thread
+///         because waking the workers costs more than it saves. An integer
+///         uses exactly that many; 1 is single-threaded. The result is the
+///         same for every setting. Safe to use in forked child processes.
 ///
 /// Returns:
 ///     ExtractionResult with centroids and image statistics.
@@ -518,6 +537,8 @@ impl PyCentroidExtractor {
     max_pixels = 10000,
     max_elongation = None,
     border_margin = 0,
+    *,
+    threads = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_centroids_fast(
@@ -531,6 +552,7 @@ pub(crate) fn extract_centroids_fast(
     max_pixels: usize,
     max_elongation: Option<f32>,
     border_margin: u32,
+    threads: Option<usize>,
 ) -> PyResult<PyExtractionResult> {
     let (pixels, width, height) = image_to_f32(image)?;
 
@@ -546,14 +568,12 @@ pub(crate) fn extract_centroids_fast(
         border_margin,
     };
 
-    // Input already copied to a pure-Rust buffer; release the GIL during the
-    // sweep.
-    let result = image
-        .py()
-        .detach(|| {
-            tetra3::centroid_extraction::extract_centroids_fast(&pixels, width, height, &config)
-        })
-        .map_err(crate::helpers::map_tetra3_err)?;
+    // Input already copied to a pure-Rust buffer; the sweep runs with the
+    // GIL released, on the module's own thread pool (see `threads`).
+    let result = crate::threads::run(image.py(), threads, pixels.len(), || {
+        tetra3::centroid_extraction::extract_centroids_fast(&pixels, width, height, &config)
+    })?
+    .map_err(crate::helpers::map_tetra3_err)?;
 
     Ok(PyExtractionResult {
         inner: result.into(),

@@ -11,6 +11,7 @@ mod extraction;
 mod helpers;
 mod solve_result;
 mod solver_database;
+mod threads;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDateTime;
