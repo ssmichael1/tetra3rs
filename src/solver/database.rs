@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use tracing::info;
+use log::info;
 
 use serde::Deserialize;
 #[cfg(test)]

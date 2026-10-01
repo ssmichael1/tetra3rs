@@ -1,0 +1,84 @@
+name: Docs check
+
+# docs.yml builds and deploys the site only on push to main, so a change that
+# breaks the docs build (a raising tutorial notebook, a bad mkdocs.yml, a stub
+# the API pages can't render) was caught only after merge. This runs the same
+# build on pull requests that touch its inputs. The API pages are built from
+# the type stub through tools/griffe_overloads.py, so stub changes run it too.
+# PR events only; a new push cancels the superseded run.
+on:
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "mkdocs.yml"
+      - "python/tetra3rs/*.pyi"
+      - "tools/griffe_overloads.py"
+      - ".github/workflows/docs-check.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: docs build (notebooks executed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Restore-only: docs.yml saves this cache on main.
+      - name: Restore Cargo registry and build
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Same data as docs.yml (the notebooks solve and calibrate real images).
+      - name: Cache test data
+        id: cache-test-data
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: test-data-v6
+
+      - name: Download test data
+        if: steps.cache-test-data.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p data/tess_same_ccd
+          BASE=https://storage.googleapis.com/tetra3rs-testvecs
+          curl --fail -o data/gaia_merged.bin "$BASE/gaia_merged.bin"
+          for s in 01 02 03 04 05 06 13 14 15 17; do
+            curl --fail -o "data/tess_same_ccd/sector${s}_cam1_ccd1.fits" \
+              "$BASE/tess_same_ccd/sector${s}_cam1_ccd1.fits"
+          done
+
+      - name: Install tetra3rs and docs dependencies
+        run: |
+          pip install -e .[test]
+          pip install -r docs/requirements.txt
+
+      - name: Build docs (fail on any warning)
+        run: mkdocs build --strict

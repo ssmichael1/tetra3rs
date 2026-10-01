@@ -11,8 +11,8 @@
 //! refine) with the global fit, which correctly handles different per-image
 //! pointings.
 
+use log::debug;
 use numeris::Matrix3;
-use tracing::debug;
 
 use crate::camera_model::CameraModel;
 use crate::centroid::Centroid;

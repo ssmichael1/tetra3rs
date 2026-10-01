@@ -69,6 +69,10 @@ plugins:
           paths: [python]
           options:
             allow_inspection: false
+            # Stub methods defined only by @overload (pixel_to_world, ...)
+            extensions:
+              - tools/griffe_overloads.py:OverloadOnlyFunctions
+            overloads_only: true
             show_source: false
             show_bases: false
             members_order: source
@@ -84,6 +88,9 @@ plugins:
       # `ignore` is checked before that probe from mkdocs-jupyter 0.26.3.
       ignore: ["*.md"]
       execute: true
+      # Fail the build when a notebook cell raises (the default renders the
+      # traceback into the page and carries on).
+      allow_errors: false
       kernel_name: python3
       include_source: true
 
@@ -93,6 +100,7 @@ nav:
       - Installation: getting-started/installation.md
       - Star Catalog: getting-started/catalog.md
       - Quick Start: getting-started/quickstart.md
+      - Logging: getting-started/logging.md
   - Concepts:
       - Algorithm Overview: concepts/algorithm.md
       - Centroid Extraction: concepts/centroid-extraction.md

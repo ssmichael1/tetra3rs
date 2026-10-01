@@ -1,4 +1,5 @@
-use numpy::PyReadonlyArray2;
+use numpy::ndarray::{Dimension, Ix2};
+use numpy::PyReadonlyArray;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use serde::de::DeserializeOwned;
@@ -85,24 +86,13 @@ pub(crate) fn parse_centroids_single(
             })
             .collect();
     }
-    // numpy array path. Accept any numeric 2-D dtype (float32, ints, big-endian
-    // FITS data, …). Extract a native-float64 array zero-copy when the caller
-    // already passed one (the documented common case); only fall back to an
-    // `astype("float64")` copy for other dtypes.
+    // numpy array path: any numeric 2-D dtype.
     if centroids.hasattr("dtype").unwrap_or(false) {
-        // `converted` outlives the borrow so `arr` can reference it in the
-        // non-f64 fallback branch.
-        let converted;
-        let arr = if let Ok(arr) = centroids.extract::<PyReadonlyArray2<f64>>() {
-            arr
-        } else {
-            converted = centroids.call_method1("astype", ("float64",))?;
-            converted.extract::<PyReadonlyArray2<f64>>().map_err(|_| {
-                pyo3::exceptions::PyTypeError::new_err(
-                    "centroids array must be a 2-D numeric numpy array (Nx2 or Nx3)",
-                )
-            })?
-        };
+        let arr = extract_f64_array::<Ix2>(centroids)?.ok_or_else(|| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "centroids array must be a 2-D numeric numpy array (Nx2 or Nx3)",
+            )
+        })?;
         let a = arr.as_array();
         let ncols = a.shape()[1];
         if ncols < 2 {
@@ -126,6 +116,22 @@ pub(crate) fn parse_centroids_single(
     Err(pyo3::exceptions::PyTypeError::new_err(
         "centroids must be a list of Centroid objects or an Nx2/Nx3 numpy array",
     ))
+}
+
+/// View `obj` as a native-float64 numpy array of rank `D`: zero-copy when it
+/// already is one (the common case), otherwise an `astype("float64")` copy of
+/// any other numeric dtype (float32, ints, big-endian FITS data, …).
+/// `Ok(None)` when `obj` is not an ndarray, or is one of another rank.
+pub(crate) fn extract_f64_array<'py, D: Dimension>(
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Option<PyReadonlyArray<'py, f64, D>>> {
+    if let Ok(arr) = obj.extract::<PyReadonlyArray<'py, f64, D>>() {
+        return Ok(Some(arr));
+    }
+    if !obj.hasattr("dtype").unwrap_or(false) {
+        return Ok(None);
+    }
+    Ok(obj.call_method1("astype", ("float64",))?.extract().ok())
 }
 
 /// Map a `tetra3::Error` to the most appropriate Python exception type, so

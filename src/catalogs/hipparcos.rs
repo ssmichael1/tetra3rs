@@ -87,7 +87,7 @@ pub fn load_hipparcos_catalog_from_file<P: AsRef<std::path::Path>>(
     }
     let dropped = total_lines - stars.len();
     if dropped > 0 {
-        tracing::warn!("Hipparcos catalog: skipped {dropped} unparseable line(s)");
+        log::warn!("Hipparcos catalog: skipped {dropped} unparseable line(s)");
     }
     Ok(stars)
 }
