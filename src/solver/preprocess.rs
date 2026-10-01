@@ -2,7 +2,7 @@
 //! inputs, subtract the optical center, undistort, order by brightness, and
 //! build camera-frame unit vectors at a given pixel scale.
 
-use tracing::debug;
+use log::debug;
 
 use crate::camera_model::CameraModel;
 use crate::Centroid;

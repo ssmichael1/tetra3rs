@@ -306,8 +306,8 @@ fn build_skyview_database() -> SolverDatabase {
 
 #[test]
 fn test_skyview_fits_solve() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("debug")
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        .is_test(true)
         .try_init();
 
     // Ensure all test files are downloaded

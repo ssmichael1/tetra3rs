@@ -17,8 +17,10 @@ fn gaia_catalog_path() -> String {
 /// Build a small test database (wide FOV for speed) and solve a synthetic image.
 #[test]
 fn test_generate_and_solve() {
-    // Initialize tracing for debug output
-    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    // Initialize logging for debug output
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
 
     // ── Step 1: Generate a small database ──
     let config = GenerateDatabaseConfig {
@@ -207,7 +209,9 @@ fn test_generate_and_solve() {
 /// `calibrate_camera` distortion fit).
 #[test]
 fn test_matched_indices_survive_dropped_centroid() {
-    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
 
     let config = GenerateDatabaseConfig {
         max_fov_deg: 20.0,
@@ -516,7 +520,9 @@ fn test_nan_mass_treated_as_unknown() {
 /// refinement → quaternion / residuals / pixel_to_world.
 #[test]
 fn test_parity_flipped_solve() {
-    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
 
     let config = GenerateDatabaseConfig {
         max_fov_deg: 20.0,
@@ -745,7 +751,9 @@ fn generate_centroids(
 /// Solve 1000 random orientations with a 10° FOV camera and report statistics.
 #[test]
 fn test_statistical_1000_random_orientations() {
-    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
 
     // ── Build database for 10° FOV ──
     let config = GenerateDatabaseConfig {
@@ -1013,7 +1021,9 @@ fn test_statistical_1000_random_orientations() {
 
 #[test]
 fn test_save_and_load_database() {
-    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
 
     let config = GenerateDatabaseConfig {
         max_fov_deg: 12.0,
@@ -1137,7 +1147,9 @@ fn test_save_and_load_database() {
 /// Solve 1000 random orientations with a 10° FOV camera and 4"/axis centroid noise.
 #[test]
 fn test_statistical_1000_noisy_centroids() {
-    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
 
     let noise_sigma_arcsec = 4.0;
 
@@ -1456,8 +1468,8 @@ fn test_statistical_1000_noisy_centroids() {
 /// (and ideally faster).
 #[test]
 fn test_tracking_with_attitude_hint() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
         .try_init();
 
     // Small DB matching test_generate_and_solve so it builds quickly.
@@ -1643,7 +1655,9 @@ fn test_tracking_with_attitude_hint() {
 #[test]
 #[ignore = "slow: generates a multi-GB pattern catalog; run with --ignored"]
 fn test_multiscale_database() {
-    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
 
     let config = GenerateDatabaseConfig {
         max_fov_deg: 5.0,

@@ -93,6 +93,7 @@ nav:
       - Installation: getting-started/installation.md
       - Star Catalog: getting-started/catalog.md
       - Quick Start: getting-started/quickstart.md
+      - Logging: getting-started/logging.md
   - Concepts:
       - Algorithm Overview: concepts/algorithm.md
       - Centroid Extraction: concepts/centroid-extraction.md

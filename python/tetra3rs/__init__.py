@@ -21,6 +21,7 @@ from .tetra3rs import (
     earth_barycentric_velocity,
     extract_centroids,
     extract_centroids_fast,
+    reset_log_cache,
     __git_hash__,
 )
 
@@ -39,5 +40,6 @@ __all__ = [
     "earth_barycentric_velocity",
     "extract_centroids",
     "extract_centroids_fast",
+    "reset_log_cache",
     "__git_hash__",
 ]

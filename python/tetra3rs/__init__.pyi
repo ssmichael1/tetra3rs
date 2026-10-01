@@ -1357,3 +1357,15 @@ def earth_barycentric_velocity(dt: datetime.datetime) -> list[float]:
         result = db.solve_from_centroids(centroids, ..., observer_velocity_km_s=v)
     """
     ...
+
+def reset_log_cache() -> None:
+    """Re-read Python logging levels for tetra3rs log records.
+
+    tetra3rs forwards its Rust log records to Python's ``logging`` (logger
+    names follow the Rust module path, e.g. ``tetra3.solver.solve``). Each
+    logger's effective level is cached on first use so that disabled messages
+    cost nothing inside the solver; call this after changing a level (e.g.
+    ``logging.getLogger("tetra3").setLevel(logging.DEBUG)``) so the change
+    takes effect.
+    """
+    ...

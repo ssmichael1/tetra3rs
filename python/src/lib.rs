@@ -14,6 +14,9 @@ mod solver_database;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDateTime;
+use std::sync::OnceLock;
+
+static LOG_RESET: OnceLock<pyo3_log::ResetHandle> = OnceLock::new();
 
 /// tetra3rs: Fast star plate solver
 ///
@@ -21,6 +24,17 @@ use pyo3::types::PyDateTime;
 /// exposed to Python via PyO3.
 #[pymodule]
 fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Route the crate's `log` records into Python's `logging` (logger names
+    // follow the Rust module path, e.g. `tetra3.solver.solve`). Levels are
+    // cached per logger so disabled messages never take the GIL — solves run
+    // detached. `reset_log_cache()` re-reads them after a level change.
+    // `install` fails only if a logger is already set; keep that one.
+    if let Ok(handle) = pyo3_log::Logger::new(m.py(), pyo3_log::Caching::LoggersAndLevels)?
+        .filter(log::LevelFilter::Debug)
+        .install()
+    {
+        let _ = LOG_RESET.set(handle);
+    }
     m.add_class::<centroid::PyCentroid>()?;
     m.add_class::<catalog_star::PyCatalogStar>()?;
     m.add_class::<camera_model::PyCameraModel>()?;
@@ -35,8 +49,24 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extraction::extract_centroids, m)?)?;
     m.add_function(wrap_pyfunction!(extraction::extract_centroids_fast, m)?)?;
     m.add_function(wrap_pyfunction!(earth_barycentric_velocity, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_log_cache, m)?)?;
     m.add("__git_hash__", env!("TETRA3RS_GIT_HASH"))?;
     Ok(())
+}
+
+/// Re-read Python logging levels for tetra3rs log records.
+///
+/// tetra3rs forwards its Rust log records to Python's ``logging`` (logger
+/// names follow the Rust module path, e.g. ``tetra3.solver.solve``). Each
+/// logger's effective level is cached on first use so that disabled messages
+/// cost nothing inside the solver; call this after changing a level (e.g.
+/// ``logging.getLogger("tetra3").setLevel(logging.DEBUG)``) so the change
+/// takes effect.
+#[pyfunction]
+fn reset_log_cache() {
+    if let Some(handle) = LOG_RESET.get() {
+        handle.reset();
+    }
 }
 
 /// Approximate Earth barycentric velocity in km/s (ICRS equatorial frame).
