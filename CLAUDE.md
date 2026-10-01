@@ -155,6 +155,14 @@ invariants are enforced by `validate()` methods (`SolverDatabase`,
 field whose value other code indexes by or divides by, extend the owning
 `validate()`.
 
+`SolverDatabase` bytes (files and pickles) carry a `T3DB` header + format
+version (`DB_FORMAT_VERSION` in `src/solver/database.rs`, currently 2). The
+pattern table's wire form is an occupancy bitmap + packed entries
+(`src/solver/pattern_wire.rs`, bulk scatter on load); version 1 (0.13 and
+earlier, plus pre-header files) loads through the frozen `SolverDatabaseV1`
+mirror. Bump the version when the payload layout changes, and if a field of
+the mirror's *current* types changes, drop v1 support rather than adapt it.
+
 ## Data assets (`data/`)
 
 Downloaded on first test run from GCS (`tetra3rs-testvecs` bucket; `tests/test_data.rs`, `python/tests/conftest.py`). Not in git.

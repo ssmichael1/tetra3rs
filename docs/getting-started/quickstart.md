@@ -20,10 +20,15 @@ db.save_to_file("my_database.bin")
 db = tetra3rs.SolverDatabase.load_from_file("my_database.bin")
 ```
 
-Saved databases start with a 6-byte header (`"T3DB"` plus a format version);
-files written by 0.12 and earlier have no header and still load. Every load
-validates the file's cross-field invariants, so a corrupt or tampered file is
-rejected with an error rather than failing mid-solve.
+Saved databases start with a 6-byte header (`"T3DB"` plus a format version).
+The current format is version 2 (0.14 and later): the pattern table is stored
+as an occupancy bitmap plus the occupied entries, which loads by bulk copy and
+is about 20% smaller on disk. Databases from 0.13 and earlier (version 1, or
+no header before 0.13) still load, but through a slower per-entry decode —
+re-save a large one with `save_to_file` to upgrade it. 0.13 cannot read
+version-2 files. Every load validates the file's cross-field invariants, so a
+corrupt or tampered file is rejected with an error rather than failing
+mid-solve.
 
 ### Solve from centroids
 

@@ -30,6 +30,7 @@ pub(crate) mod database;
 pub(crate) mod matching;
 pub(crate) mod pattern;
 pub(crate) mod pattern_search;
+pub(crate) mod pattern_wire;
 pub(crate) mod preprocess;
 #[cfg(feature = "profile")]
 pub mod profiling;
@@ -96,7 +97,11 @@ impl PatternEntry {
 ///
 /// Open addressing with quadratic probing; empty slots have
 /// `star_indices == [0, 0, 0, 0]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Serialized as an occupancy bitmap plus the occupied entries packed
+/// little-endian (see `pattern_wire`), not as a plain `Vec` — half the slots
+/// are empty by construction, and the packed form loads by bulk scatter.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PatternCatalog {
     pub entries: Vec<PatternEntry>,
 }
@@ -211,7 +216,7 @@ pub struct SolveFailure {
 // ── Database properties ─────────────────────────────────────────────────────
 
 /// Metadata describing how a solver database was built.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseProperties {
     /// Number of quantization bins per edge-ratio dimension.
     /// Computed as round(0.25 / pattern_max_error).
