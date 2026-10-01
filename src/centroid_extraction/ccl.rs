@@ -19,14 +19,17 @@ use crate::error::{Error, Result};
 /// Full-image working buffers of the pipeline, owned by
 /// [`CentroidExtractor`](super::CentroidExtractor) so consecutive frames of
 /// the same size reuse them instead of paying `calloc` + first-touch page
-/// faults on ~48 MB per 2048² frame. Every element of every buffer is
+/// faults on ~32 MB per 2048² frame. Every element of every buffer is
 /// rewritten before it is read, so stale contents never leak into a result
 /// and a fresh `Scratch` gives the same output as a reused one.
 pub(super) struct Scratch {
-    /// Clamped (≥ 0) background-subtracted measurement image.
+    /// Clamped (≥ 0) background-subtracted measurement image — only used
+    /// when the matched filter is off.
     clamped: Vec<f32>,
     /// Unclamped residuals — the matched filter's input (only used when the
-    /// filter is on). Lent to a `DynMatrix` for the blur and taken back.
+    /// filter is on), lent to a `DynMatrix` for the blur and taken back.
+    /// With local background it is also the measurement image, clamped on
+    /// read.
     unclamped: Vec<f32>,
     /// The matched filter's output; `gaussian_blur_into` resizes it itself.
     filtered: DynMatrix<f32>,
@@ -110,20 +113,28 @@ pub(super) fn extract_from_gray(
     // ── Steps 1-2: background model, residuals, and noise stats ──
     // With `local_bg_block_size` set, a block-median grid is built (from a
     // staggered subsample) and everything downstream works from residuals
-    // against its bilinear surface. The residuals are produced by ONE fused
-    // pass over the image that interpolates the surface on the fly and
-    // writes the clamped measurement image and — only when the matched
-    // filter is on — the unclamped filter input directly into the blur's
-    // matrix. (Blurring the clamped image would rectify negative noise into
-    // a positive DC offset; measuring on the unclamped one would let
-    // negative pixels cancel star flux.) The materialized full-image
-    // background buffer and its separate subtract passes are gone.
+    // against its bilinear surface, produced by ONE fused pass over the
+    // image that interpolates the surface on the fly. Two images are needed
+    // from those residuals `r`: the matched filter's input is `r` itself
+    // (blurring a clamped image would rectify negative noise into a positive
+    // DC offset), while centroids are measured on `max(r, 0)` (negative
+    // pixels would otherwise cancel star flux).
+    //
+    // With the filter on, only `r` is stored: the blur borrows the buffer
+    // and hands it back, and the per-region stage — which touches only the
+    // pixels in and around blobs — clamps as it reads. That is one
+    // full-image write stream (16 MB at 2048²) less per frame than storing
+    // both. With the filter off, nothing needs the unclamped values, so the
+    // pass stores `max(r, 0)` directly and thresholds on it.
     //
     // Noise statistics use the same estimator either way; on the local-bg
     // path it runs on bilinear residuals at the block subsample lattice
     // (identical reference surface, ~stride² fewer samples) instead of a
     // full-image residual buffer.
-    let gray: Cow<[f32]>;
+    //
+    // `stored_gray` is the measurement image when it is stored as such;
+    // `None` means "the filter input, clamped on read".
+    let stored_gray: Option<Cow<[f32]>>;
     let bg_mean: f32;
     let bg_sigma: f32;
     let mut filter_input: Option<DynMatrix<f32>> = None;
@@ -144,28 +155,28 @@ pub(super) fn extract_from_gray(
         // `blend_columns` — the same expression and operation order as
         // `value_at`, with the per-pixel divide / floor / clamp hoisted into
         // the grid's column plan — so the residuals are bit-identical to the
-        // per-pixel form.
+        // per-pixel form: the surface goes into the output row, then the
+        // residuals replace it in place.
+        //
+        // Non-finite pixels (dead/hot columns, NaN padding) are treated as
+        // background (residual 0): `inf.max(0.0)` is `inf`, and one such
+        // pixel otherwise becomes a NaN centroid ranked first.
         let nx = bg.grid_width();
-        set_len_uninit(clamped, w * h);
         if filter_sigma.is_some() {
             set_len_uninit(unclamped, w * h);
-            par::for_each_chunk_pair_mut(clamped, unclamped, w, |y, cr, ur| {
+            par::for_each_chunk_mut(unclamped, w, |y, ur| {
                 let mut row_blend = vec![0.0_f32; nx];
                 bg.blend_row(bg.row_params(y), &mut row_blend);
-                // Surface into `ur`, then residuals in place.
                 bg.blend_columns(&row_blend, ur, |v| v);
                 let src = &gray_input[y * w..(y + 1) * w];
-                for ((c, u), &p) in cr.iter_mut().zip(ur.iter_mut()).zip(src) {
-                    // Non-finite pixels (dead/hot columns, NaN padding) are
-                    // treated as background: `inf.max(0.0)` is `inf`, and one
-                    // such pixel otherwise becomes a NaN centroid ranked first.
-                    let r = if p.is_finite() { p - *u } else { 0.0 };
-                    *c = r.max(0.0);
-                    *u = r;
+                for (u, &p) in ur.iter_mut().zip(src) {
+                    *u = if p.is_finite() { p - *u } else { 0.0 };
                 }
             });
             filter_input = Some(DynMatrix::from_vec(w, h, std::mem::take(unclamped)));
+            stored_gray = None;
         } else {
+            set_len_uninit(clamped, w * h);
             par::for_each_chunk_mut(clamped, w, |y, cr| {
                 let mut row_blend = vec![0.0_f32; nx];
                 bg.blend_row(bg.row_params(y), &mut row_blend);
@@ -179,13 +190,13 @@ pub(super) fn extract_from_gray(
                     };
                 }
             });
+            stored_gray = Some(Cow::Borrowed(clamped));
         }
-        gray = Cow::Borrowed(clamped);
     } else {
         (bg_mean, bg_sigma) = estimate_background(gray_input, width, height, config);
         // Same non-finite policy as the local-background branch; the copy is
         // only made when the image actually contains such pixels.
-        gray = if gray_input.iter().all(|p| p.is_finite()) {
+        let gray: Cow<[f32]> = if gray_input.iter().all(|p| p.is_finite()) {
             Cow::Borrowed(gray_input)
         } else {
             Cow::Owned(
@@ -200,13 +211,13 @@ pub(super) fn extract_from_gray(
             unclamped.copy_from_slice(&gray);
             filter_input = Some(DynMatrix::from_vec(w, h, std::mem::take(unclamped)));
         }
+        stored_gray = Some(gray);
     }
-    let gray: &[f32] = &gray;
 
     // ── Step 3: optional matched filter for thresholding only ──
     // The unclamped residual is convolved with a Gaussian and threshold/CCL
     // run on the filtered copy; centroids are still measured on the
-    // unfiltered `gray`, so intensities and CoM positions are unaffected.
+    // unfiltered image, so intensities and CoM positions are unaffected.
     // The detection threshold is scaled by the kernel's white-noise
     // suppression factor so `sigma_threshold` keeps meaning "sigmas of the
     // noise actually present in the thresholded image", filter on or off.
@@ -215,18 +226,29 @@ pub(super) fn extract_from_gray(
     // full-image intermediate — bit-identical to `gaussian_blur`, one 16 MB
     // buffer less at 2048². Under the `parallel` feature the bands run
     // multi-threaded.
-    let (thresh_src, mask_threshold): (&[f32], f32) = match (filter_sigma, filter_input) {
+    let (mask_threshold, filtered_on) = match (filter_sigma, filter_input) {
         (Some(sigma), Some(mat)) => {
             gaussian_blur_into(&mat, sigma, BorderMode::Replicate, filtered);
-            // Hand the filter input back to the scratch for the next frame.
+            // Hand the filter input back: it is the next frame's buffer and,
+            // with local background, this frame's measurement image.
             *unclamped = mat.into_vec();
             let suppression = gaussian_noise_suppression(sigma);
             (
-                filtered.as_slice(),
                 bg_mean + config.sigma_threshold * bg_sigma * suppression,
+                true,
             )
         }
-        _ => (gray, bg_mean + config.sigma_threshold * bg_sigma),
+        _ => (bg_mean + config.sigma_threshold * bg_sigma, false),
+    };
+    // The measurement image, and whether its readers must clamp at zero.
+    let (gray, clamp): (&[f32], bool) = match &stored_gray {
+        Some(g) => (g, false),
+        None => (unclamped, true),
+    };
+    let thresh_src: &[f32] = if filtered_on {
+        filtered.as_slice()
+    } else {
+        gray
     };
 
     // ── Step 4: threshold into a bit mask, sweep into runs and regions ──
@@ -255,7 +277,7 @@ pub(super) fn extract_from_gray(
     let cx = (width - 1) as f32 / 2.0;
     let cy = (height - 1) as f32 / 2.0;
     let mut centroids = compute_blob_centroids(
-        gray,
+        (gray, clamp),
         gray_input,
         (mask, words_per_row),
         &regions,
@@ -492,7 +514,7 @@ fn estimate_background_finite(
 /// and writes its own `Option<Centroid>` slot, and the results are collected
 /// in region order, so the output is identical to the sequential loop.
 fn compute_blob_centroids(
-    gray: &[f32],
+    (gray, clamp): (&[f32], bool),
     raw: &[f32],
     (mask, words_per_row): (&[u64], usize),
     regions: &runs::RunRegions,
@@ -503,6 +525,7 @@ fn compute_blob_centroids(
     let (offsets, order) = regions.group_by_region();
     let ctx = BlobContext {
         gray,
+        clamp,
         raw,
         mask,
         words_per_row,
@@ -523,9 +546,13 @@ fn compute_blob_centroids(
 
 /// Read-only inputs shared by every region of one extraction.
 struct BlobContext<'a> {
-    /// Measurement image (clamped residuals, or the raw image without local
-    /// background).
+    /// Measurement image: background residuals, or the raw image without
+    /// local background.
     gray: &'a [f32],
+    /// `gray` holds unclamped residuals (it doubled as the matched filter's
+    /// input): every read takes `max(v, 0)`, which is exactly the value a
+    /// stored clamped image would hold.
+    clamp: bool,
     /// Raw sensor image (saturation is judged on it).
     raw: &'a [f32],
     /// Detection bit mask and its words per row (see `threshold_to_mask`).
@@ -558,6 +585,7 @@ impl BlobContext<'_> {
     fn region_centroid(&self, k: usize, scratch: &mut BlobScratch) -> Option<Centroid> {
         let Self {
             gray,
+            clamp,
             raw,
             mask,
             words_per_row,
@@ -576,6 +604,15 @@ impl BlobContext<'_> {
         if !extent.clear_of_border(config.border_margin as usize, w, h) {
             return None;
         }
+        // The measurement image's value at flat index `i`.
+        let px = |i: usize| -> f32 {
+            let v = gray[i];
+            if clamp {
+                v.max(0.0)
+            } else {
+                v
+            }
+        };
         let (min_row, max_row, min_col, max_col) = (
             extent.min_row,
             extent.max_row,
@@ -605,6 +642,11 @@ impl BlobContext<'_> {
             &mut scratch.annulus_vals,
         );
         let annulus_vals = &mut scratch.annulus_vals[..n_annulus];
+        if clamp {
+            for v in annulus_vals.iter_mut() {
+                *v = v.max(0.0);
+            }
+        }
 
         // Median of annulus (residual local background in bg-subtracted image).
         let local_bg = median_f32(annulus_vals) as f64;
@@ -626,7 +668,7 @@ impl BlobContext<'_> {
             let r = run.row as usize;
             let row_off = r * w;
             for c in run.c0 as usize..=run.c1 as usize {
-                let raw = gray[row_off + c];
+                let raw = px(row_off + c);
                 if raw > peak_val {
                     peak_val = raw;
                     peak_col = c;
@@ -691,7 +733,7 @@ impl BlobContext<'_> {
                 let r = run.row as usize;
                 let row_off = r * w;
                 for c in run.c0 as usize..=run.c1 as usize {
-                    let v = gray[row_off + c];
+                    let v = px(row_off + c);
                     if (v as f64) <= thresh {
                         continue;
                     }
@@ -706,7 +748,7 @@ impl BlobContext<'_> {
                             if rr < 0 || cc < 0 || rr >= h as isize || cc >= w as isize {
                                 continue;
                             }
-                            if gray[rr as usize * w + cc as usize] >= v {
+                            if px(rr as usize * w + cc as usize) >= v {
                                 is_max = false;
                                 break 'nb;
                             }
@@ -740,7 +782,7 @@ impl BlobContext<'_> {
         let v = |dy: isize, dx: isize| -> f64 {
             let r = (pr as isize + dy) as usize;
             let c = (pc as isize + dx) as usize;
-            gray[r * w + c] as f64 - local_bg
+            px(r * w + c) as f64 - local_bg
         };
 
         // Sharpness gate, peak refinement, and assembly are shared with the

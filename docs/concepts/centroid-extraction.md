@@ -199,12 +199,11 @@ Build with `cargo build --release --features image,parallel`.
 ## Reusing buffers across frames (`CentroidExtractor`)
 
 `extract_centroids` allocates its full-image working buffers — the residual
-images, the matched filter's output and the detection bit mask, about 48 MB
+image, the matched filter's output and the detection bit mask, about 32 MB
 at 2048² — fresh on every call. The allocation itself is cheap, but the first
-touch of each page is not: roughly 0.3 ms per 2048² frame serially, 0.5 ms
-with the `parallel` feature. In a frame loop, `CentroidExtractor` keeps those
-buffers between calls (resizing only when the frame size changes) and gives
-bit-identical results:
+touch of each page is not: roughly 0.4 ms per 2048² frame. In a frame loop,
+`CentroidExtractor` keeps those buffers between calls (resizing only when the
+frame size changes) and gives bit-identical results:
 
 ```python
 extractor = tetra3rs.CentroidExtractor()

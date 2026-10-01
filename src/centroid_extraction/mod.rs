@@ -283,11 +283,11 @@ pub fn extract_centroids_from_raw(
 /// calls.
 ///
 /// [`extract_centroids_from_image`] and [`extract_centroids_from_raw`]
-/// allocate their full-image buffers — the grayscale conversion, the clamped
-/// and unclamped residual images, the matched filter's output and the
-/// detection bit mask, ~48 MB at 2048² — fresh on every call, and the first
-/// touch of each page costs more than the allocation itself (~0.3 ms serial,
-/// ~0.5 ms with the `parallel` feature at 2048²). An extractor reuses them,
+/// allocate their full-image buffers — the grayscale conversion, the
+/// residual image, the matched filter's output and the detection bit mask,
+/// ~32 MB at 2048² for raw input with the default configuration — fresh on
+/// every call, and the first touch of each page costs more than the
+/// allocation itself (~0.4 ms at 2048²). An extractor reuses them,
 /// resizing only when the frame size changes, so a frame loop pays that once.
 /// Results are bit-identical to the free functions, which are exactly
 /// `CentroidExtractor::new().extract_*(…)`.
@@ -443,7 +443,8 @@ fn check_pixel_len(len: usize, width: u32, height: u32) -> Result<()> {
 ///
 /// Both paths parallelize their background grid (one task per block row)
 /// and their detection bit mask (16-row chunks). The CCL path additionally
-/// runs its residual pass by rows, its run sweep in 64-row bands, and its
+/// gathers its noise subsample in bands of sampled rows, runs its residual
+/// pass by rows, its run sweep in 64-row bands, and its
 /// per-region annulus / moment / deblend stage as one task per region
 /// (`map_indices_init`, order preserved by index); the fast path's run
 /// sweep stays sequential.
@@ -516,34 +517,6 @@ pub(super) mod par {
     {
         for (i, c) in buf.chunks_mut(chunk_len).enumerate() {
             f(i, c);
-        }
-    }
-
-    /// Apply `f(i, chunk_a, chunk_b)` to corresponding disjoint
-    /// `chunk_len`-sized chunks of two buffers (one image row each).
-    #[cfg(feature = "parallel")]
-    pub fn for_each_chunk_pair_mut<T, U, F>(a: &mut [T], b: &mut [U], chunk_len: usize, f: F)
-    where
-        T: Send,
-        U: Send,
-        F: Fn(usize, &mut [T], &mut [U]) + Sync + Send,
-    {
-        a.par_chunks_mut(chunk_len)
-            .zip(b.par_chunks_mut(chunk_len))
-            .enumerate()
-            .for_each(|(i, (ca, cb))| f(i, ca, cb));
-    }
-    #[cfg(not(feature = "parallel"))]
-    pub fn for_each_chunk_pair_mut<T, U, F>(a: &mut [T], b: &mut [U], chunk_len: usize, mut f: F)
-    where
-        F: FnMut(usize, &mut [T], &mut [U]),
-    {
-        for (i, (ca, cb)) in a
-            .chunks_mut(chunk_len)
-            .zip(b.chunks_mut(chunk_len))
-            .enumerate()
-        {
-            f(i, ca, cb);
         }
     }
 }

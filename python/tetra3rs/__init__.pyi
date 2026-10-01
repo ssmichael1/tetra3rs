@@ -1179,9 +1179,9 @@ class CentroidExtractor:
     """The :func:`extract_centroids` pipeline with its working buffers kept
     between calls.
 
-    :func:`extract_centroids` allocates its full-image buffers (~48 MB at
+    :func:`extract_centroids` allocates its full-image buffers (~32 MB at
     2048²) fresh on every call, and the first touch of each page costs more
-    than the allocation (~0.3–0.5 ms per 2048² frame). An extractor reuses
+    than the allocation (~0.4 ms per 2048² frame). An extractor reuses
     them, resizing only when the frame size changes, so a frame loop pays
     that once. Results are bit-identical to :func:`extract_centroids`.
 
