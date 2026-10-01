@@ -17,6 +17,8 @@
 //! The row packers ([`pack_lit_row`], [`pack_above_row`]) build that bit mask
 //! one image row at a time with a vectorizable compare and a byte→bit fold.
 
+use std::ops::Range;
+
 use super::par;
 
 /// A horizontal run of lit pixels: columns `c0..=c1` of `row`.
@@ -198,17 +200,18 @@ pub(super) fn sweep_runs_mask_banded(
     let band_rows = band_rows.max(1);
     let n_bands = h.div_ceil(band_rows);
 
-    /// One band's labeling: its `Sweep` (runs, local parents, `prev` = last
-    /// row's runs) plus the runs of its first row.
+    /// One band's labeling: its `Sweep` (runs, local parents, and — once
+    /// every row is in — `prev_start`, where its last row's runs begin)
+    /// plus the number of runs in its first row.
     struct Band {
         sweep: Sweep,
-        first: Vec<(u32, u32, u32)>,
+        first_len: usize,
     }
     let bands: Vec<Band> = par::map_indices(n_bands, |b| {
         let y0 = b * band_rows;
         let y1 = (y0 + band_rows).min(h);
         let mut sweep = Sweep::new();
-        let mut first = Vec::new();
+        let mut first_len = 0;
         for r in y0..y1 {
             geom.push_row(
                 &mut sweep,
@@ -216,29 +219,34 @@ pub(super) fn sweep_runs_mask_banded(
                 &mask[r * words_per_row..(r + 1) * words_per_row],
             );
             if r == y0 {
-                first = sweep.cur.clone();
+                first_len = sweep.runs.len();
             }
             sweep.end_row();
         }
-        Band { sweep, first }
+        Band { sweep, first_len }
     });
 
     // Concatenate (run order stays row-major) with labels offset by each
-    // band's first global run index, stitching every band boundary.
+    // band's first global run index, stitching every band boundary: a
+    // band's first row against its predecessor's last row, both addressed
+    // as index ranges of the concatenated run list.
     let total: usize = bands.iter().map(|b| b.sweep.runs.len()).sum();
     let mut all = Sweep::new();
     all.runs.reserve_exact(total);
     all.parents.reserve_exact(total);
-    let mut prev_last: Vec<(u32, u32, u32)> = Vec::new();
+    let mut prev_last = 0..0;
     for band in bands {
-        let off = all.runs.len() as u32;
-        let offset = |&(c0, c1, l): &(u32, u32, u32)| (c0, c1, l + off);
+        let off = all.runs.len();
         all.runs.extend_from_slice(&band.sweep.runs);
         all.parents
-            .extend(band.sweep.parents.iter().map(|&p| p + off));
-        let first: Vec<_> = band.first.iter().map(offset).collect();
-        merge_rows(&mut all.parents, &first, &prev_last);
-        prev_last = band.sweep.prev.iter().map(offset).collect();
+            .extend(band.sweep.parents.iter().map(|&p| p + off as u32));
+        merge_rows(
+            &mut all.parents,
+            &all.runs,
+            off..off + band.first_len,
+            prev_last,
+        );
+        prev_last = off + band.sweep.prev_start..all.runs.len();
     }
     all.finish()
 }
@@ -377,9 +385,12 @@ fn pack_bytes(bytes: &[u8; 64]) -> u64 {
 struct Sweep {
     parents: Vec<u32>,
     runs: Vec<Run>,
-    /// Runs of the previous / current row: (c0, c1, label).
-    prev: Vec<(u32, u32, u32)>,
-    cur: Vec<(u32, u32, u32)>,
+    /// Where the previous and the current row begin in `runs`. A row's runs
+    /// are pushed consecutively, so the previous row is
+    /// `runs[prev_start..cur_start]` and the current one `runs[cur_start..]`
+    /// — no per-row copies of the runs are kept.
+    prev_start: usize,
+    cur_start: usize,
 }
 
 impl Sweep {
@@ -387,8 +398,8 @@ impl Sweep {
         Self {
             parents: Vec::new(),
             runs: Vec::new(),
-            prev: Vec::new(),
-            cur: Vec::new(),
+            prev_start: 0,
+            cur_start: 0,
         }
     }
 
@@ -403,15 +414,20 @@ impl Sweep {
             c0: c0 as u32,
             c1: c1 as u32,
         });
-        self.cur.push((c0 as u32, c1 as u32, label));
     }
 
     /// Merge the current row's runs with 8-connected runs of the previous
     /// row, then make it the previous row.
     fn end_row(&mut self) {
-        merge_rows(&mut self.parents, &self.cur, &self.prev);
-        std::mem::swap(&mut self.prev, &mut self.cur);
-        self.cur.clear();
+        let end = self.runs.len();
+        merge_rows(
+            &mut self.parents,
+            &self.runs,
+            self.cur_start..end,
+            self.prev_start..self.cur_start,
+        );
+        self.prev_start = self.cur_start;
+        self.cur_start = end;
     }
 
     /// Resolve roots and compact them to dense region ids in
@@ -439,19 +455,21 @@ impl Sweep {
     }
 }
 
-/// Union every current-row run with each 8-connected previous-row run. Both
-/// lists are column-sorted, so a two-pointer sweep finds all overlaps.
-fn merge_rows(parents: &mut [u32], cur: &[(u32, u32, u32)], prev: &[(u32, u32, u32)]) {
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < cur.len() && j < prev.len() {
-        let (cs, ce, cl) = cur[i];
-        let (ps, pe, pl) = prev[j];
+/// Union every current-row run with each 8-connected previous-row run.
+/// `cur` and `prev` are the two rows' index ranges in `runs` (a run's label
+/// is its index); each row is column-sorted, so a two-pointer sweep finds
+/// all overlaps.
+fn merge_rows(parents: &mut [u32], runs: &[Run], cur: Range<usize>, prev: Range<usize>) {
+    let (mut i, mut j) = (cur.start, prev.start);
+    while i < cur.end && j < prev.end {
+        let (cs, ce) = (runs[i].c0, runs[i].c1);
+        let (ps, pe) = (runs[j].c0, runs[j].c1);
         if ce + 1 < ps {
             i += 1; // current run ends left of (and not adjacent to) prev
         } else if pe + 1 < cs {
             j += 1; // prev run ends left of current
         } else {
-            union(parents, cl, pl);
+            union(parents, i as u32, j as u32);
             if ce < pe {
                 i += 1;
             } else {
