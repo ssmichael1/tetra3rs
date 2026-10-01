@@ -544,15 +544,15 @@ impl BlobContext<'_> {
         let r1 = (max_row + ANNULUS_MARGIN + 1).min(h);
         let c0 = min_col.saturating_sub(ANNULUS_MARGIN);
         let c1 = (max_col + ANNULUS_MARGIN + 1).min(w);
-        let annulus_vals = &mut scratch.annulus_vals;
-        gather_unlit(
+        let n_annulus = gather_unlit(
             gray,
             (mask, words_per_row),
             w,
             (r0, r1),
             (c0, c1),
-            annulus_vals,
+            &mut scratch.annulus_vals,
         );
+        let annulus_vals = &mut scratch.annulus_vals[..n_annulus];
 
         // Median of annulus (residual local background in bg-subtracted image).
         let local_bg = median_f32(annulus_vals) as f64;
@@ -708,12 +708,16 @@ impl BlobContext<'_> {
     }
 }
 
-/// Gather into `out` (cleared first), in raster order, the `gray` values of
-/// the window rows `r0..r1` × columns `c0..c1` whose detection-mask bit is
-/// clear. Branch-free: every window value is written to the next slot and
-/// the slot index advances only for unlit pixels (`out` is sized to the
-/// window, then truncated) — a mostly-unlit annulus makes the branchy
-/// `if !lit { push }` form mispredict on every star pixel.
+/// Gather into the front of `out`, in raster order, the `gray` values of the
+/// window rows `r0..r1` × columns `c0..c1` whose detection-mask bit is clear,
+/// and return how many there are (`out[..n]`; anything beyond is scratch).
+/// Branch-free: every window value is written to the next slot and the slot
+/// index advances only for unlit pixels — a mostly-unlit annulus makes the
+/// branchy `if !lit { push }` form mispredict on every star pixel, and
+/// copying whole unlit runs is slower still, since lit and unlit pixels
+/// alternate every few columns in a filtered mask. `out` only ever grows
+/// (to the largest window seen), so it is not re-zeroed per region, and each
+/// mask word is loaded once and shifted rather than indexed per pixel.
 fn gather_unlit(
     gray: &[f32],
     (mask, words_per_row): (&[u64], usize),
@@ -721,21 +725,31 @@ fn gather_unlit(
     (r0, r1): (usize, usize),
     (c0, c1): (usize, usize),
     out: &mut Vec<f32>,
-) {
-    out.clear();
-    out.resize((r1 - r0) * (c1 - c0), 0.0);
+) -> usize {
+    let window = (r1 - r0) * (c1 - c0);
+    if out.len() < window {
+        out.resize(window, 0.0);
+    }
     let mut n = 0usize;
     for r in r0..r1 {
         let row = &gray[r * w + c0..r * w + c1];
         let bits = &mask[r * words_per_row..(r + 1) * words_per_row];
-        for (i, &v) in row.iter().enumerate() {
-            let c = c0 + i;
-            let lit = (bits[c / 64] >> (c % 64)) & 1;
-            out[n] = v;
-            n += (lit == 0) as usize;
+        // Walk the row in pieces that each lie within one mask word.
+        let mut c = c0;
+        let mut i = 0usize;
+        while c < c1 {
+            let take = (64 - c % 64).min(c1 - c);
+            let mut word = bits[c / 64] >> (c % 64);
+            for &v in &row[i..i + take] {
+                out[n] = v;
+                n += (word & 1 == 0) as usize;
+                word >>= 1;
+            }
+            i += take;
+            c += take;
         }
     }
-    out.truncate(n);
+    n
 }
 
 #[cfg(test)]
@@ -773,6 +787,7 @@ mod tests {
                 (5, 30, 63, 65),
                 (20, 40, 127, 150),
             ];
+            let mut got = vec![1.0; 7];
             for &(r0, r1, c0, c1) in &windows {
                 let mut expect = Vec::new();
                 for r in r0..r1 {
@@ -782,8 +797,9 @@ mod tests {
                         }
                     }
                 }
-                let mut got = vec![1.0; 7]; // stale contents are discarded
-                gather_unlit(
+                // Stale contents are ignored; the buffer is reused (and
+                // only grows) across the windows of one density.
+                let n = gather_unlit(
                     &gray,
                     (&mask, words_per_row),
                     w,
@@ -792,8 +808,8 @@ mod tests {
                     &mut got,
                 );
                 assert_eq!(
-                    got,
-                    expect,
+                    got[..n],
+                    expect[..],
                     "density {density} window {:?}",
                     (r0, r1, c0, c1)
                 );
