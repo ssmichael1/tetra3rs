@@ -427,6 +427,24 @@ class TestSolveResult:
         assert len(ras) == 3
         assert len(decs) == 3
 
+    def test_pixel_world_float32_arrays(self, orion_result):
+        """Both transforms accept float32 arrays and match the float64 result."""
+        r = orion_result
+        xs = np.array([0.0, 100.5, -100.25], dtype=np.float32)
+        ys = np.array([0.0, 50.5, -50.75], dtype=np.float32)
+        ras, decs = r.pixel_to_world(xs, ys)
+        ras64, decs64 = r.pixel_to_world(xs.astype(np.float64), ys.astype(np.float64))
+        assert ras.dtype == np.float64
+        np.testing.assert_array_equal(ras, ras64)
+        np.testing.assert_array_equal(decs, decs64)
+        px, py = r.world_to_pixel(ras.astype(np.float32), decs.astype(np.float32))
+        assert px.dtype == np.float64
+        assert np.max(np.abs(px - xs)) < 1.0 and np.max(np.abs(py - ys)) < 1.0
+
+    def test_pixel_to_world_mixed_scalar_array_raises(self, orion_result):
+        with pytest.raises(TypeError):
+            orion_result.pixel_to_world(1.0, np.array([1.0, 2.0]))
+
     def test_solve_result_pickle(self, orion_result):
         r2 = pickle.loads(pickle.dumps(orion_result))
         assert abs(r2.ra_deg - orion_result.ra_deg) < 1e-6
@@ -606,7 +624,10 @@ class TestTrackingMode:
         stars = skyview_db.cone_search(ra, dec, fov_deg)
         return project_stars_tan(stars[:50], ra, dec, f_px, image_size)
 
-    @pytest.mark.parametrize("hint_kind", ["quaternion", "rotation_matrix"])
+    @pytest.mark.parametrize(
+        "hint_kind",
+        ["quaternion", "rotation_matrix", "quaternion_f32", "rotation_matrix_f32"],
+    )
     def test_tracking_with_hint(self, skyview_db, hint_kind):
         """LIS solve → perturb attitude → re-solve with hint. Must agree with LIS."""
         ra, dec, fov_deg, image_size = 83.0, -1.0, 10.0, 2048
@@ -642,7 +663,7 @@ class TestTrackingMode:
         ])
 
         # Pass either the quaternion or the rotation matrix form.
-        if hint_kind == "quaternion":
+        if hint_kind.startswith("quaternion"):
             hint = hinted_quat
         else:
             # Build the rotation matrix from the perturbed quaternion.
@@ -652,6 +673,8 @@ class TestTrackingMode:
                 [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
             ])
+        if hint_kind.endswith("_f32"):
+            hint = hint.astype(np.float32)
 
         tracked = skyview_db.solve_from_centroids(
             centroids,

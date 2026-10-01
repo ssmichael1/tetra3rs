@@ -13,7 +13,10 @@ __git_hash__: str
 import datetime
 import numpy as np
 import numpy.typing as npt
-from typing import Optional, Union, final, overload
+from typing import Any, Optional, Union, final, overload
+
+# A numpy array of any real numeric dtype; the binding converts it to float64.
+_RealArray = npt.NDArray[Union[np.floating[Any], np.integer[Any]]]
 
 @final
 class CameraModel:
@@ -372,13 +375,14 @@ class SolveResult:
     def pixel_to_world(self, x: float, y: float) -> tuple[float, float]: ...
     @overload
     def pixel_to_world(
-        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
+        self, x: _RealArray, y: _RealArray
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """Convert centered pixel coordinates to world coordinates (RA, Dec in degrees).
 
         Pixel coordinates use the same convention as solver centroids:
         origin at the image center, +X right, +Y down. Scalars in, scalars out;
-        1D numpy arrays in, 1D numpy arrays out (NaN where undefined).
+        1D numpy arrays (any numeric dtype, e.g. float32) in, 1D float64
+        arrays out (NaN where undefined).
         """
         ...
 
@@ -386,14 +390,14 @@ class SolveResult:
     def world_to_pixel(self, ra_deg: float, dec_deg: float) -> Optional[tuple[float, float]]: ...
     @overload
     def world_to_pixel(
-        self, ra_deg: npt.NDArray[np.float64], dec_deg: npt.NDArray[np.float64]
+        self, ra_deg: _RealArray, dec_deg: _RealArray
     ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.
 
         Returns pixel coordinates in the same convention as solver centroids:
         origin at the image center, +X right, +Y down. Scalars in, scalars out
-        (None if the point is behind the camera); 1D numpy arrays in, arrays out
-        (NaN for points behind the camera).
+        (None if the point is behind the camera); 1D numpy arrays (any numeric
+        dtype) in, 1D float64 arrays out (NaN for points behind the camera).
         """
         ...
 
@@ -688,7 +692,7 @@ class SolverDatabase:
         camera_model: Optional[CameraModel] = None,
         observer_velocity_km_s: Optional[list[float]] = None,
         attitude_hint: Optional[
-            Union[list[float], npt.NDArray[np.float64]]
+            Union[list[float], _RealArray]
         ] = None,  # [w, x, y, z] quaternion or 3x3 rotation matrix
         hint_uncertainty_deg: Optional[float] = None,
         hint_uncertainty_rad: Optional[float] = None,
@@ -769,7 +773,7 @@ class SolverDatabase:
                   ``SolveResult.quaternion``. This matches
                   ``scipy.spatial.transform.Rotation.as_quat(scalar_first=True)``;
                   it does **not** match scipy's default (scalar-last) ordering.
-                * a 3×3 rotation matrix (2D ndarray) — same as
+                * a 3×3 rotation matrix (2D ndarray, any float dtype) — same as
                   ``SolveResult.rotation_matrix_icrs_to_camera``.
 
                 Either form must rotate a vector from the ICRS frame into the
