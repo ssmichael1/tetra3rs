@@ -20,6 +20,7 @@ Only recent releases are listed. Older entries are in this file's git history (`
 - Logging uses the `log` facade instead of `tracing`, so `env_logger`-style loggers see tetra3's messages; `tracing-subscriber` users still receive them through its default `tracing-log` bridge. Dev tests use `env_logger` (`RUST_LOG` now overrides each test's default level). ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
 - Dependencies: `numeris` 0.6, `pyo3` 0.29.3. ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
 - Python: `attitude_hint` matrices and `pixel_to_world` / `world_to_pixel` arrays accept any numeric dtype (e.g. float32), not just float64. ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
+- CCL centroider (`extract_centroids_from_raw` / `_from_image`, `CentroidExtractor`): with local background and the matched filter on (the default), blobs are measured on the filter's input, clamped at zero as it is read, instead of on a second stored residual image (one 16 MB write stream less per 2048² frame; extractor buffers ~48 → ~32 MB); the noise estimate blends each sampled row once, gathers its subsample in row bands under `parallel`, and clips in one sweep per pass; the annulus gather no longer zero-fills its buffer per region; the run sweep (both extractors) keeps no per-row copies of the runs. Bit-identical output; 2048² default config: 8.4 → 7.2 ms serial and 4.4 → 3.7 ms parallel on a tracker-like frame, 21.7 → 19.8 ms and 8.6 → 7.9 ms on a dense TESS field. ([#73](https://github.com/ssmichael1/tetra3rs/pull/73))
 
 ### Fixed
 
