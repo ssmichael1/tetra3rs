@@ -27,8 +27,8 @@ name = "tetra3"
 postcard = { version = "1.0", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2"
-tracing = { version = "0.1.40", features = ["std"] }
-numeris = { version = "0.5.19", features = ["std", "serde", "optim"] }
+log = "0.4"
+numeris = { version = "0.6", features = ["std", "serde", "optim"] }
 image = { version = "0.25", optional = true, default-features = false }
 rayon = { version = "1", optional = true }
 
@@ -64,7 +64,7 @@ codegen-units = 1
 [dev-dependencies]
 rand = "0.10.0"
 rand_distr = "0.6.0"
-tracing-subscriber = { version = "0.3.20", features = ["fmt", "env-filter"] }
+env_logger = "0.11"
 ureq = "3"
 
 # integration tests use centroid extraction which needs the "image" feature

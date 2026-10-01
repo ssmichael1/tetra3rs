@@ -1,11 +1,13 @@
 use numpy::ndarray;
-use numpy::{PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::ndarray::Ix1;
+use numpy::{PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use tetra3::solver::{Solution, SolveFailure, SolveStatus};
 
 use crate::camera_model::PyCameraModel;
+use crate::helpers::extract_f64_array;
 
 /// Result of a successful plate-solve.
 ///
@@ -353,7 +355,8 @@ impl PySolveResult {
     /// origin at the image center, +X right, +Y down.
     ///
     /// Args:
-    ///     x: X pixel coordinate(s). Scalar or 1D numpy array.
+    ///     x: X pixel coordinate(s). Scalar or 1D numpy array (any numeric
+    ///         dtype; computed in float64).
     ///     y: Y pixel coordinate(s). Scalar or 1D numpy array.
     ///
     /// Returns:
@@ -367,11 +370,10 @@ impl PySolveResult {
         x: &Bound<'py, PyAny>,
         y: &Bound<'py, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        // Try array path first
-        if let (Ok(x_arr), Ok(y_arr)) = (
-            x.extract::<PyReadonlyArray1<f64>>(),
-            y.extract::<PyReadonlyArray1<f64>>(),
-        ) {
+        // Array path first: 1-D arrays of any numeric dtype (e.g. float32)
+        if let (Some(x_arr), Some(y_arr)) =
+            (extract_f64_array::<Ix1>(x)?, extract_f64_array::<Ix1>(y)?)
+        {
             let xa = x_arr.as_array();
             let ya = y_arr.as_array();
             let n = xa.len();
@@ -396,7 +398,7 @@ impl PySolveResult {
             Ok((ra, dec).into_pyobject(py)?.into_any().unbind())
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
-                "x and y must be scalars or 1D numpy arrays of float64",
+                "x and y must both be scalars or both be 1D numeric numpy arrays",
             ))
         }
     }
@@ -407,7 +409,8 @@ impl PySolveResult {
     /// origin at the image center, +X right, +Y down.
     ///
     /// Args:
-    ///     ra_deg: Right ascension in degrees. Scalar or 1D numpy array.
+    ///     ra_deg: Right ascension in degrees. Scalar or 1D numpy array (any
+    ///         numeric dtype; computed in float64).
     ///     dec_deg: Declination in degrees. Scalar or 1D numpy array.
     ///
     /// Returns:
@@ -421,10 +424,10 @@ impl PySolveResult {
         ra_deg: &Bound<'py, PyAny>,
         dec_deg: &Bound<'py, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        // Try array path first
-        if let (Ok(ra_arr), Ok(dec_arr)) = (
-            ra_deg.extract::<PyReadonlyArray1<f64>>(),
-            dec_deg.extract::<PyReadonlyArray1<f64>>(),
+        // Array path first: 1-D arrays of any numeric dtype (e.g. float32)
+        if let (Some(ra_arr), Some(dec_arr)) = (
+            extract_f64_array::<Ix1>(ra_deg)?,
+            extract_f64_array::<Ix1>(dec_deg)?,
         ) {
             let ra_a = ra_arr.as_array();
             let dec_a = dec_arr.as_array();
@@ -459,7 +462,7 @@ impl PySolveResult {
             }
         } else {
             Err(pyo3::exceptions::PyTypeError::new_err(
-                "ra_deg and dec_deg must be scalars or 1D numpy arrays of float64",
+                "ra_deg and dec_deg must both be scalars or both be 1D numeric numpy arrays",
             ))
         }
     }

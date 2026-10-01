@@ -14,8 +14,8 @@
 
 use super::clock::Instant;
 
+use log::debug;
 use numeris::Matrix3;
-use tracing::debug;
 
 use crate::Centroid;
 

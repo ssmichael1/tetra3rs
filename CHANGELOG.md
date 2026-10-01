@@ -6,6 +6,10 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 **Upgrading from 0.13:** databases saved by this version (files and Python pickles) use format version 2, which 0.13 cannot read; 0.13 and earlier databases still load here.
 
+### Added
+
+- Python: Rust log records now reach Python's `logging` (via `pyo3-log`) under logger names that follow the module path (`tetra3.solver.solve`, …); levels are cached so disabled messages never take the GIL, and `tetra3rs.reset_log_cache()` re-reads them after a level change. ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
+
 ### Changed
 
 - Database format version 2: the pattern table is serialized as an occupancy bitmap plus the occupied entries packed little-endian (22 bytes each) instead of a postcard `Vec` of every slot (half of them empty), and loads by bulk scatter straight from the file buffer — a 2–10°, mag-12 database (127M slots) loads in ~0.6 s instead of 2.0 s (warm cache, M3) and its file shrinks from 1.95 GB to 1.55 GB. Version-1 files (0.13 and earlier, with or without the header) still load through the old, slower path; re-save them with `save_to_file` to upgrade. Closes #69. ([#70](https://github.com/ssmichael1/tetra3rs/pull/70))
@@ -13,6 +17,14 @@ Only recent releases are listed. Older entries are in this file's git history (`
 - `SolverDatabase::from_vec` keeps the file buffer as the pattern table's storage instead of copying the table out of it; `load_from_file` uses it — the same database loads in 0.25 s (from 0.55 s) at 1.74 GB peak RSS (from 4.75 GB). ([#74](https://github.com/ssmichael1/tetra3rs/pull/74))
 - Profiler knob `T3_DB=path` loads a saved database instead of generating one. ([#74](https://github.com/ssmichael1/tetra3rs/pull/74))
 - `SolverDatabase::validate` bounds-checks pattern star indices with a branchless max-reduce (0.37 → 0.09 s on the same table), threaded under the `parallel` feature (0.04 s), which now also parallelizes the format-2 table scatter. ([#70](https://github.com/ssmichael1/tetra3rs/pull/70))
+- Logging uses the `log` facade instead of `tracing`, so `env_logger`-style loggers see tetra3's messages; `tracing-subscriber` users still receive them through its default `tracing-log` bridge. Dev tests use `env_logger` (`RUST_LOG` now overrides each test's default level). ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
+- Dependencies: `numeris` 0.6, `pyo3` 0.29.3. ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
+- Python: `attitude_hint` matrices and `pixel_to_world` / `world_to_pixel` arrays accept any numeric dtype (e.g. float32), not just float64. ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
+
+### Fixed
+
+- Type stubs: `calibrate_camera` accepts `list[SolveResult]` and `list[list[Centroid]]` / `list[ndarray]` (list invariance) and is overloaded on single vs. list inputs; float vectors (`observer_velocity_km_s`, `attitude_hint`, `crpix`, polynomial coefficients) take tuples and ndarrays; centroid arrays take any numeric dtype. ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
+- Docs: `SolveResult.pixel_to_world` / `world_to_pixel` were missing from the API reference (griffe drops overload-only stub methods). ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
 
 ## 0.13.0 - 2026-09-04
 

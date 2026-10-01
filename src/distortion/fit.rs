@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 
+use log::debug;
 use numeris::optim::{least_squares_lm_dyn, LmSettings};
 use numeris::{DynMatrix, DynVector, Matrix3};
-use tracing::debug;
 
 use crate::centroid::Centroid;
 use crate::solver::solve::StarVectors;
