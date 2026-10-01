@@ -694,7 +694,8 @@ impl PySolverDatabase {
 /// Accepts either a 4-element quaternion `[w, x, y, z]` (list or 1D ndarray)
 /// or a 3×3 rotation matrix (2D ndarray).
 fn parse_attitude_hint(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<tetra3::Quaternion> {
-    use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
+    use numpy::ndarray::Ix2;
+    use numpy::PyUntypedArrayMethods;
     use pyo3::exceptions::PyValueError;
 
     // Build a unit quaternion from raw [w, x, y, z], rejecting a degenerate
@@ -726,8 +727,8 @@ fn parse_attitude_hint(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<tetra3::Quatern
         }
         return quat_from_wxyz(vec[0], vec[1], vec[2], vec[3]);
     }
-    // Try a 3×3 rotation matrix.
-    if let Ok(arr) = obj.extract::<PyReadonlyArray2<f64>>() {
+    // Try a 3×3 rotation matrix (any numeric dtype, e.g. float32).
+    if let Some(arr) = crate::helpers::extract_f64_array::<Ix2>(obj)? {
         let shape = arr.shape();
         if shape != [3, 3] {
             return Err(PyValueError::new_err(format!(
