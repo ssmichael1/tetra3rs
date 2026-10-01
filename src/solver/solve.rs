@@ -20,8 +20,8 @@
 
 use super::clock::Instant;
 
+use log::{debug, warn};
 use numeris::{Matrix3, Quaternion, Vector3};
-use tracing::{debug, warn};
 
 use crate::Centroid;
 

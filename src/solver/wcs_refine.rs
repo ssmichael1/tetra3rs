@@ -23,8 +23,8 @@
 //!    f. Re-associate: project catalog stars to pixel space, match to centroids.
 //!    g. Converge when updates vanish, no outliers rejected, and match set is stable.
 
+use log::debug;
 use numeris::{Matrix3, Vector3};
-use tracing::debug;
 
 use super::matching::{greedy_unique_matches, MatchScratch};
 use super::solve::StarVectors;
@@ -940,7 +940,7 @@ pub fn wcs_refine(
     // Derive CD matrix from (theta, pixel_scale, parity)
     let cd = cd_from_theta(theta, ps, parity_flip);
 
-    if tracing::enabled!(tracing::Level::DEBUG) {
+    if log::log_enabled!(log::Level::Debug) {
         final_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let p90e = if final_residuals.is_empty() {
             0.0

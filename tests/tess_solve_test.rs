@@ -335,8 +335,8 @@ fn build_tess_database() -> SolverDatabase {
 
 #[test]
 fn test_tess_fits_solve() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("debug")
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        .is_test(true)
         .try_init();
 
     // Ensure all test files are downloaded
@@ -715,8 +715,8 @@ fn bench_fast_vs_ccl_extraction() {
 ///    solution within 1 arcmin.
 #[test]
 fn test_tess_distortion_fit_and_center_accuracy() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("debug")
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        .is_test(true)
         .try_init();
 
     for tc in TESS_TEST_CASES {
@@ -918,7 +918,9 @@ fn test_tess_distortion_fit_and_center_accuracy() {
 ///    - Center pixel RA/Dec within 10" of FITS WCS solution.
 #[test]
 fn test_tess_multi_image_calibration() {
-    let _ = tracing_subscriber::fmt().with_env_filter("warn").try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
 
     // Same CCD (Camera 1, CCD 1) across 10 sectors — matching notebook sector list
     let same_ccd_images: &[(&str, &str)] = &[

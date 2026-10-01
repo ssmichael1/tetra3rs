@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
+use log::debug;
 use std::path::Path;
-use tracing::debug;
 
 pub struct GaiaStar {
     pub source_id: i64,
@@ -115,7 +115,7 @@ pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>> {
         });
     }
     if non_finite > 0 {
-        tracing::warn!("Gaia binary: skipped {non_finite} record(s) with non-finite ra/dec/mag");
+        log::warn!("Gaia binary: skipped {non_finite} record(s) with non-finite ra/dec/mag");
     }
 
     Ok(stars)

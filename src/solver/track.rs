@@ -17,8 +17,8 @@
 
 use super::clock::Instant;
 
+use log::debug;
 use numeris::Vector3;
-use tracing::debug;
 
 use crate::{Centroid, Quaternion};
 

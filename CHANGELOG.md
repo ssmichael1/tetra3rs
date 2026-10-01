@@ -2,6 +2,17 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
+## Unreleased
+
+### Added
+
+- Python: Rust log records now reach Python's `logging` (via `pyo3-log`) under logger names that follow the module path (`tetra3.solver.solve`, …); levels are cached so disabled messages never take the GIL, and `tetra3rs.reset_log_cache()` re-reads them after a level change.
+
+### Changed
+
+- Logging uses the `log` facade instead of `tracing`, so `env_logger`-style loggers see tetra3's messages; `tracing-subscriber` users still receive them through its default `tracing-log` bridge. Dev tests use `env_logger` (`RUST_LOG` now overrides each test's default level).
+- Dependencies: `numeris` 0.6, `pyo3` 0.29.3.
+
 ## 0.13.0 - 2026-09-04
 
 **Upgrading from 0.12:** `SolveConfig` gains `pattern_checking_stars` (Rust struct literals need the field or `..Default::default()`); pickled Python `SolveResult`s from earlier versions do not load; databases saved by 0.12 and earlier still load, but were built with cone queries that missed stars near the poles and on wide fields — regenerate them with `generate_from_gaia` to get full coverage; verification is now a likelihood ratio, so `prob` values differ from 0.12 while `match_threshold` keeps its meaning as a per-solve false-accept budget.
