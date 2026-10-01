@@ -451,6 +451,11 @@ pub(super) mod par {
     #[cfg(feature = "parallel")]
     use rayon::prelude::*;
 
+    /// Whether the helpers below fan out across threads. For choosing a
+    /// task granularity only (e.g. one task instead of many when nothing
+    /// runs concurrently) — never for changing what is computed.
+    pub const ENABLED: bool = cfg!(feature = "parallel");
+
     /// Map `f` over `0..n` into a `Vec`, preserving index order.
     #[cfg(feature = "parallel")]
     pub fn map_indices<T, F>(n: usize, f: F) -> Vec<T>
@@ -572,9 +577,10 @@ pub(super) struct BackgroundGrid {
 /// the same [`col_params`] arithmetic the per-pixel accessors use and grouped
 /// into segments of constant `(bx0, bx1)`, so blending a whole row is a
 /// straight multiply-add loop with no per-pixel divide / floor / clamp.
-/// See [`BackgroundGrid::blend_columns`]. The single-pixel accessor
-/// [`BackgroundGrid::value_at`] reads the same per-column entries, so every
-/// way of evaluating the surface shares one set of weights.
+/// See [`BackgroundGrid::blend_columns`]. The single-pixel accessors
+/// ([`BackgroundGrid::value_at`], [`BackgroundGrid::value_in_row`]) read the
+/// same per-column entries, so every way of evaluating the surface shares
+/// one set of weights.
 struct ColPlan {
     /// Column blend weight `fx` and its complement `1 - fx`.
     fx: Vec<f32>,
@@ -749,6 +755,16 @@ impl BackgroundGrid {
         let g0 = self.grid[by0 * self.nx + bx0] * (1.0 - fy) + self.grid[by1 * self.nx + bx0] * fy;
         let g1 = self.grid[by0 * self.nx + bx1] * (1.0 - fy) + self.grid[by1 * self.nx + bx1] * fy;
         g0 * self.cols.omfx[x] + g1 * self.cols.fx[x]
+    }
+
+    /// Background value at column `x` of the row blended into `row_blend`
+    /// by [`Self::blend_row`] — [`Self::value_at`] with the row half hoisted
+    /// (the same expression in the same order, so the same bits), for
+    /// callers that sample several columns of one row.
+    #[inline]
+    pub(super) fn value_in_row(&self, row_blend: &[f32], x: usize) -> f32 {
+        let (bx0, bx1) = (self.cols.bx0[x] as usize, self.cols.bx1[x] as usize);
+        row_blend[bx0] * self.cols.omfx[x] + row_blend[bx1] * self.cols.fx[x]
     }
 
     /// Blend one grid row for `row_params(row)` into `out` (length `nx`) —

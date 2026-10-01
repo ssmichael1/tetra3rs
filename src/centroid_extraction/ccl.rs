@@ -136,7 +136,7 @@ pub(super) fn extract_from_gray(
         let (bg, _) = BackgroundGrid::build(gray_input, w, h, bs, (bs / 16).max(1));
 
         let residuals = subsample_residuals(gray_input, w, h, &bg);
-        (bg_mean, bg_sigma) = estimate_background(&residuals, width, height, config);
+        (bg_mean, bg_sigma) = estimate_background_finite(residuals, config);
 
         // Fused residual pass (rows in parallel under the `parallel` feature;
         // each row writes disjoint output, results independent of threads).
@@ -299,31 +299,62 @@ fn threshold_to_mask(src: &[f32], w: usize, h: usize, thr: f32, mask: &mut Vec<u
     words_per_row
 }
 
-/// Background-subtracted residuals at the block subsample lattice (the same
-/// staggered lattice [`BackgroundGrid::build`] medians over), against the
-/// bilinear surface — the identical reference the full-image residual pass
-/// used, so feeding these to [`estimate_background`] preserves its semantics
-/// while touching ~stride² fewer samples.
+/// Finite background-subtracted residuals at the block subsample lattice
+/// (the same staggered lattice [`BackgroundGrid::build`] medians over),
+/// against the bilinear surface — the identical reference the full-image
+/// residual pass used, so feeding these to [`estimate_background_finite`]
+/// preserves its semantics while touching ~stride² fewer samples.
+///
+/// The surface is evaluated per sampled row as `blend_row` +
+/// `value_in_row` (bit-identical to `value_at`), and the sampled rows are
+/// gathered in bands — one task each under the `parallel` feature —
+/// concatenated in row order, so the result does not depend on the band
+/// size or thread count.
 fn subsample_residuals(pixels: &[f32], w: usize, h: usize, bg: &BackgroundGrid) -> Vec<f32> {
+    /// Sampled rows per task under `parallel` (512 sampled rows at 2048²
+    /// with the default block → 32 tasks).
+    const ROWS_PER_BAND: usize = 16;
     let stride = bg.stride();
-    let mut out: Vec<f32> = Vec::with_capacity((w / stride + 1) * (h / stride + 1));
-    let mut y = 0usize;
-    let mut phase = 0usize;
-    while y < h {
-        let rp = bg.row_params(y);
-        let row = y * w;
-        let mut x = phase;
-        while x < w {
-            let v = pixels[row + x];
-            if v.is_finite() {
-                out.push(v - bg.value_at(x, rp));
+    let nx = bg.grid_width();
+    // Sampled rows are `y = k * stride`, `k < n_rows`, at column phase
+    // `k % stride`.
+    let n_rows = h.div_ceil(stride);
+    // Without threads a single band skips the concatenation.
+    let rows_per_band = if par::ENABLED {
+        ROWS_PER_BAND
+    } else {
+        n_rows.max(1)
+    };
+    let mut bands: Vec<Vec<f32>> = par::map_indices(n_rows.div_ceil(rows_per_band), |b| {
+        let k0 = b * rows_per_band;
+        let k1 = (k0 + rows_per_band).min(n_rows);
+        let mut out: Vec<f32> = Vec::with_capacity((k1 - k0) * (w / stride + 1));
+        let mut row_blend = vec![0.0_f32; nx];
+        for k in k0..k1 {
+            let y = k * stride;
+            bg.blend_row(bg.row_params(y), &mut row_blend);
+            let row = &pixels[y * w..(y + 1) * w];
+            let mut x = k % stride;
+            while x < w {
+                // A non-finite pixel gives a non-finite residual, so this
+                // one test drops both those and any overflowed difference.
+                let r = row[x] - bg.value_in_row(&row_blend, x);
+                if r.is_finite() {
+                    out.push(r);
+                }
+                x += stride;
             }
-            x += stride;
         }
-        phase = (phase + 1) % stride;
-        y += stride;
+        out
+    });
+    if bands.len() == 1 {
+        return bands.pop().unwrap_or_default();
     }
-    out
+    let mut all = Vec::with_capacity(bands.iter().map(Vec::len).sum());
+    for band in &bands {
+        all.extend_from_slice(band);
+    }
+    all
 }
 
 /// White-noise standard-deviation suppression factor of the separable 2-D
@@ -362,7 +393,16 @@ pub(super) fn estimate_background(
     _height: u32,
     config: &CentroidExtractionConfig,
 ) -> (f32, f32) {
-    let mut values: Vec<f32> = gray.iter().copied().filter(|v| v.is_finite()).collect();
+    let values: Vec<f32> = gray.iter().copied().filter(|v| v.is_finite()).collect();
+    estimate_background_finite(values, config)
+}
+
+/// [`estimate_background`] on an owned buffer of **finite** values, which it
+/// reorders and shrinks in place instead of copying.
+fn estimate_background_finite(
+    mut values: Vec<f32>,
+    config: &CentroidExtractionConfig,
+) -> (f32, f32) {
     if values.is_empty() {
         return (0.0, 0.0);
     }
@@ -378,29 +418,41 @@ pub(super) fn estimate_background(
     // fast path's `coarse_background`. (Historically this computed the RMS
     // about the lower half's own mean, which for a half-normal is only
     // ≈0.60σ — silently turning a nominal 5σ threshold into a ~3σ one.)
-    let mut low_half: Vec<f32> = values.iter().copied().filter(|&v| v <= median).collect();
+    values.retain(|&v| v <= median);
+    let mut low_half = values;
+    let sq = |v: f32| ((v - median) as f64).powi(2);
 
     // Sigma-clip the lower tail to reject remaining outliers (dead or
-    // negative pixels), re-estimating about the median each pass.
+    // negative pixels), re-estimating about the median each pass. A pass
+    // needs Σ(v − median)² over the surviving values in element order; the
+    // clip that produces the survivors accumulates it as it goes (`retain`
+    // visits the elements once, in order), so each pass after the first is
+    // one sweep over the data instead of a sum and then a clip.
     let mut sigma = 0.0_f32;
+    let mut var_sum: Option<f64> = None;
     for _ in 0..config.sigma_clip_iterations {
         if low_half.is_empty() {
             break;
         }
-        let var_sum: f64 = low_half
-            .iter()
-            .map(|&v| ((v - median) as f64).powi(2))
-            .sum();
-        sigma = (var_sum / low_half.len() as f64).sqrt() as f32;
+        let sum = var_sum.unwrap_or_else(|| low_half.iter().map(|&v| sq(v)).sum());
+        sigma = (sum / low_half.len() as f64).sqrt() as f32;
         if sigma < 1e-10 {
             break;
         }
         let lo = median - config.sigma_clip_factor * sigma;
         let before = low_half.len();
-        low_half.retain(|&v| v >= lo);
+        let mut kept_sum = 0.0_f64;
+        low_half.retain(|&v| {
+            let keep = v >= lo;
+            if keep {
+                kept_sum += sq(v);
+            }
+            keep
+        });
         if low_half.len() == before {
             break; // converged
         }
+        var_sum = Some(kept_sum);
     }
 
     (median, sigma)
