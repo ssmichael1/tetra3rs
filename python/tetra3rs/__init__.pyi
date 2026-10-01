@@ -11,12 +11,29 @@ __version__: str
 __git_hash__: str
 
 import datetime
+from collections.abc import Sequence
 import numpy as np
 import numpy.typing as npt
 from typing import Any, Optional, Union, final, overload
 
 # A numpy array of any real numeric dtype; the binding converts it to float64.
 _RealArray = npt.NDArray[Union[np.floating[Any], np.integer[Any]]]
+# A float vector the binding reads as a sequence: list, tuple, or 1-D array.
+_FloatSeq = Union[Sequence[float], _RealArray]
+
+# `list` is invariant, so list-typed inputs spell out the homogeneous lists
+# (list[SolveResult], list[list[Centroid]], ...) next to the mixed one; the
+# binding needs a real list, so Sequence would overpromise. List elements use
+# NDArray[Any] since NDArray[float64] is not a list[NDArray[floating]] item.
+_SolveResults = Union[
+    list["SolveResult"], list["SolveFailure"], list[Union["SolveResult", "SolveFailure"]]
+]
+_Centroids = Union[list["Centroid"], _RealArray]
+_CentroidSets = Union[
+    list[list["Centroid"]],
+    list[npt.NDArray[Any]],
+    list[Union[list["Centroid"], npt.NDArray[Any]]],
+]
 
 @final
 class CameraModel:
@@ -40,7 +57,7 @@ class CameraModel:
         focal_length_px: float,
         image_width: int,
         image_height: int,
-        crpix: Optional[list[float]] = None,
+        crpix: Optional[_FloatSeq] = None,
         parity_flip: bool = False,
         distortion: Optional[Union["RadialDistortion", "PolynomialDistortion"]] = None,
     ) -> "CameraModel":
@@ -675,7 +692,7 @@ class SolverDatabase:
 
     def solve_from_centroids(
         self,
-        centroids: Union[list[Centroid], npt.NDArray[np.float64]],
+        centroids: _Centroids,
         fov_estimate_deg: Optional[float] = None,
         fov_estimate_rad: Optional[float] = None,
         image_width: Optional[int] = None,
@@ -690,10 +707,8 @@ class SolverDatabase:
         pattern_checking_stars: int = 24,
         match_max_error: Optional[float] = None,
         camera_model: Optional[CameraModel] = None,
-        observer_velocity_km_s: Optional[list[float]] = None,
-        attitude_hint: Optional[
-            Union[list[float], _RealArray]
-        ] = None,  # [w, x, y, z] quaternion or 3x3 rotation matrix
+        observer_velocity_km_s: Optional[_FloatSeq] = None,
+        attitude_hint: Optional[_FloatSeq] = None,  # [w, x, y, z] quaternion or 3x3 rotation matrix
         hint_uncertainty_deg: Optional[float] = None,
         hint_uncertainty_rad: Optional[float] = None,
         strict_hint: bool = False,
@@ -716,7 +731,8 @@ class SolverDatabase:
 
         Args:
             centroids: Either a list of Centroid objects (from extract_centroids),
-                or an Nx2/Nx3 numpy array of centroid positions in pixels.
+                or an Nx2/Nx3 numpy array (any numeric dtype) of centroid
+                positions in pixels.
                 Columns are (x, y) or (x, y, brightness).
                 Origin is at the image center, +X right, +Y down.
             fov_estimate_deg: Estimated horizontal field of view in degrees.
@@ -768,7 +784,7 @@ class SolverDatabase:
                 None = no correction (default).
             attitude_hint: Optional attitude hint. Accepts either:
 
-                * a 4-element ``[w, x, y, z]`` quaternion (list or 1D ndarray),
+                * a 4-element ``[w, x, y, z]`` quaternion (list, tuple, or 1D ndarray),
                   Hamilton / scalar-first convention — same as
                   ``SolveResult.quaternion``. This matches
                   ``scipy.spatial.transform.Rotation.as_quat(scalar_first=True)``;
@@ -888,14 +904,25 @@ class SolverDatabase:
         """
         ...
 
+    @overload
     def calibrate_camera(
         self,
-        solve_results: Union[SolveResult, list[Union[SolveResult, SolveFailure]]],
-        centroids: Union[
-            list[Centroid],
-            npt.NDArray[np.float64],
-            list[Union[list[Centroid], npt.NDArray[np.float64]]],
-        ],
+        solve_results: SolveResult,
+        centroids: _Centroids,
+        image_width: Optional[int] = None,
+        image_height: Optional[int] = None,
+        image_shape: Optional[tuple[int, int]] = None,
+        model: str = "polynomial",
+        order: int = 4,
+        max_iterations: int = 10,
+        sigma_clip: float = 3.0,
+        convergence_threshold_px: float = 0.01,
+    ) -> CalibrateResult: ...
+    @overload
+    def calibrate_camera(
+        self,
+        solve_results: _SolveResults,
+        centroids: _CentroidSets,
         image_width: Optional[int] = None,
         image_height: Optional[int] = None,
         image_shape: Optional[tuple[int, int]] = None,
@@ -925,7 +952,10 @@ class SolverDatabase:
             solve_results: A SolveResult, or a list that may mix SolveResult
                 and SolveFailure objects — failures are skipped, so solve
                 outputs can be passed straight through without filtering.
-            centroids: Matching centroids (list of Centroid lists, or single list).
+            centroids: The centroids each solve was made from. With a single
+                SolveResult, one centroid set (a list of Centroid or an
+                Nx2/Nx3 array); with a list of solves, a list of such sets of
+                the same length.
             image_width: Image width in pixels.
             image_height: Image height in pixels.
             image_shape: Image shape as (height, width) tuple (numpy convention).
@@ -1080,10 +1110,10 @@ class PolynomialDistortion:
         cls,
         order: int,
         scale: float,
-        a_coeffs: list[float],
-        b_coeffs: list[float],
-        ap_coeffs: Optional[list[float]] = None,
-        bp_coeffs: Optional[list[float]] = None,
+        a_coeffs: _FloatSeq,
+        b_coeffs: _FloatSeq,
+        ap_coeffs: Optional[_FloatSeq] = None,
+        bp_coeffs: Optional[_FloatSeq] = None,
     ) -> "PolynomialDistortion":
         """Create a polynomial distortion model from forward coefficient arrays.
 

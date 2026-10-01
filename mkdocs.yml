@@ -69,6 +69,10 @@ plugins:
           paths: [python]
           options:
             allow_inspection: false
+            # Stub methods defined only by @overload (pixel_to_world, ...)
+            extensions:
+              - tools/griffe_overloads.py:OverloadOnlyFunctions
+            overloads_only: true
             show_source: false
             show_bases: false
             members_order: source
