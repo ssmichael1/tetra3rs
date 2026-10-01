@@ -1095,13 +1095,13 @@ fn test_save_and_load_database() {
     );
 
     let mut tampered = db.clone();
-    let slot = tampered
-        .pattern_catalog
-        .entries
+    let mut dense = tampered.pattern_catalog.to_dense();
+    let slot = dense
         .iter()
         .position(|e| !e.is_empty())
         .expect("generated database has at least one pattern");
-    tampered.pattern_catalog.entries[slot].star_indices = [n_stars, 0, 0, 0];
+    dense[slot].star_indices = [n_stars, 0, 0, 0];
+    tampered.pattern_catalog = tetra3::solver::PatternCatalog::from_dense(&dense);
     assert!(
         tampered.validate().is_err(),
         "pattern entry indexing past the star table must fail validation"
