@@ -12,6 +12,12 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 - Logging uses the `log` facade instead of `tracing`, so `env_logger`-style loggers see tetra3's messages; `tracing-subscriber` users still receive them through its default `tracing-log` bridge. Dev tests use `env_logger` (`RUST_LOG` now overrides each test's default level). ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
 - Dependencies: `numeris` 0.6, `pyo3` 0.29.3. ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
+- Python: `attitude_hint` matrices and `pixel_to_world` / `world_to_pixel` arrays accept any numeric dtype (e.g. float32), not just float64. ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
+
+### Fixed
+
+- Type stubs: `calibrate_camera` accepts `list[SolveResult]` and `list[list[Centroid]]` / `list[ndarray]` (list invariance) and is overloaded on single vs. list inputs; float vectors (`observer_velocity_km_s`, `attitude_hint`, `crpix`, polynomial coefficients) take tuples and ndarrays; centroid arrays take any numeric dtype. ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
+- Docs: `SolveResult.pixel_to_world` / `world_to_pixel` were missing from the API reference (griffe drops overload-only stub methods). ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
 
 ## 0.13.0 - 2026-09-04
 
