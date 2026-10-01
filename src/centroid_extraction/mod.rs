@@ -572,11 +572,16 @@ pub(super) struct BackgroundGrid {
 /// the same [`col_params`] arithmetic the per-pixel accessors use and grouped
 /// into segments of constant `(bx0, bx1)`, so blending a whole row is a
 /// straight multiply-add loop with no per-pixel divide / floor / clamp.
-/// See [`BackgroundGrid::blend_columns`].
+/// See [`BackgroundGrid::blend_columns`]. The single-pixel accessor
+/// [`BackgroundGrid::value_at`] reads the same per-column entries, so every
+/// way of evaluating the surface shares one set of weights.
 struct ColPlan {
     /// Column blend weight `fx` and its complement `1 - fx`.
     fx: Vec<f32>,
     omfx: Vec<f32>,
+    /// The two grid columns each image column blends.
+    bx0: Vec<u32>,
+    bx1: Vec<u32>,
     /// `(c_start, c_end_exclusive, bx0, bx1)` — maximal column ranges that
     /// share the same pair of grid columns.
     segs: Vec<(usize, usize, usize, usize)>,
@@ -586,17 +591,27 @@ impl ColPlan {
     fn new(nx: usize, block: usize, w: usize) -> Self {
         let mut fx = Vec::with_capacity(w);
         let mut omfx = Vec::with_capacity(w);
+        let mut bx0s = Vec::with_capacity(w);
+        let mut bx1s = Vec::with_capacity(w);
         let mut segs: Vec<(usize, usize, usize, usize)> = Vec::new();
         for c in 0..w {
             let (bx0, bx1, f) = col_params(nx, block, c);
             fx.push(f);
             omfx.push(1.0 - f);
+            bx0s.push(bx0 as u32);
+            bx1s.push(bx1 as u32);
             match segs.last_mut() {
                 Some(seg) if seg.2 == bx0 && seg.3 == bx1 => seg.1 = c + 1,
                 _ => segs.push((c, c + 1, bx0, bx1)),
             }
         }
-        Self { fx, omfx, segs }
+        Self {
+            fx,
+            omfx,
+            bx0: bx0s,
+            bx1: bx1s,
+            segs,
+        }
     }
 }
 
@@ -724,13 +739,16 @@ impl BackgroundGrid {
         (by0, by0 + 1, bf - by0 as f32)
     }
 
-    /// Background value at `(x, row)` given `row_params(row)`.
+    /// Background value at `(x, row)` given `row_params(row)`. `x` must be
+    /// a column of the image the grid was built for. The column half of the
+    /// interpolation comes from the column plan, so a lookup costs two row
+    /// blends and one column blend with no divide / floor / clamp.
     #[inline]
     pub(super) fn value_at(&self, x: usize, (by0, by1, fy): (usize, usize, f32)) -> f32 {
-        let (bx0, bx1, fx) = self.col_params(x);
+        let (bx0, bx1) = (self.cols.bx0[x] as usize, self.cols.bx1[x] as usize);
         let g0 = self.grid[by0 * self.nx + bx0] * (1.0 - fy) + self.grid[by1 * self.nx + bx0] * fy;
         let g1 = self.grid[by0 * self.nx + bx1] * (1.0 - fy) + self.grid[by1 * self.nx + bx1] * fy;
-        g0 * (1.0 - fx) + g1 * fx
+        g0 * self.cols.omfx[x] + g1 * self.cols.fx[x]
     }
 
     /// Blend one grid row for `row_params(row)` into `out` (length `nx`) —
@@ -782,11 +800,6 @@ impl BackgroundGrid {
     #[inline]
     pub(super) fn threshold_row(&self, row_blend: &[f32], k_sigma: f32, out: &mut [f32]) {
         self.blend_columns(row_blend, out, |v| v + k_sigma);
-    }
-
-    #[inline]
-    fn col_params(&self, x: usize) -> (usize, usize, f32) {
-        col_params(self.nx, self.block, x)
     }
 }
 
