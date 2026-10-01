@@ -29,6 +29,7 @@ pub(crate) mod combinations;
 pub(crate) mod database;
 pub(crate) mod matching;
 pub(crate) mod pattern;
+pub(crate) mod pattern_catalog;
 pub(crate) mod pattern_search;
 pub(crate) mod pattern_wire;
 pub(crate) mod preprocess;
@@ -49,8 +50,9 @@ use crate::{Quaternion, StarCatalog};
 
 /// A single slot in the pattern hash table.
 ///
-/// Packing star indices, largest-edge angle, and key hash into one struct
-/// means a single cache-line fetch per quadratic-probe step instead of three.
+/// [`PatternCatalog`] stores occupied entries packed (22 bytes, see
+/// `pattern_catalog`) and hands them out by value; this struct is also the
+/// slot type of a dense table ([`PatternCatalog::from_dense`]).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct PatternEntry {
@@ -65,7 +67,7 @@ pub struct PatternEntry {
 }
 
 impl PatternEntry {
-    /// Sentinel value for an empty hash-table slot.
+    /// Sentinel value for an empty slot of a dense table.
     pub const EMPTY: Self = Self {
         star_indices: [0, 0, 0, 0],
         largest_edge: 0.0,
@@ -91,93 +93,7 @@ impl PatternEntry {
     }
 }
 
-// ── Pattern catalog (flat hash table) ───────────────────────────────────────
-
-/// Pattern hash table backed by a single flat `Vec<PatternEntry>`.
-///
-/// Open addressing with quadratic probing; empty slots have
-/// `star_indices == [0, 0, 0, 0]`.
-///
-/// Serialized as an occupancy bitmap plus the occupied entries packed
-/// little-endian (see `pattern_wire`), not as a plain `Vec` — half the slots
-/// are empty by construction, and the packed form loads by bulk scatter.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PatternCatalog {
-    pub entries: Vec<PatternEntry>,
-}
-
-impl PatternCatalog {
-    /// Allocate a catalog of `capacity` empty entries.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            entries: vec![PatternEntry::EMPTY; capacity],
-        }
-    }
-
-    /// Total number of slots.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Returns `true` if the catalog has no slots.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Immutable access to slot `idx`. Panics if `idx >= len()`.
-    #[inline]
-    pub fn get(&self, idx: usize) -> &PatternEntry {
-        &self.entries[idx]
-    }
-
-    /// Mutable access to slot `idx`. Panics if `idx >= len()`.
-    #[inline]
-    pub fn get_mut(&mut self, idx: usize) -> &mut PatternEntry {
-        &mut self.entries[idx]
-    }
-}
-
-#[cfg(test)]
-mod pattern_catalog_tests {
-    use super::*;
-
-    #[test]
-    fn small_catalog() {
-        let mut cat = PatternCatalog::with_capacity(100);
-        assert_eq!(cat.len(), 100);
-
-        *cat.get_mut(42) = PatternEntry::new([1, 2, 3, 4], 0.5, 0xabcd);
-        let e = cat.get(42);
-        assert_eq!(e.star_indices, [1, 2, 3, 4]);
-        assert!((e.largest_edge - 0.5).abs() < 1e-6);
-        assert_eq!(e.key_hash, 0xabcd);
-        assert!(cat.get(0).is_empty());
-    }
-
-    #[test]
-    fn empty_catalog() {
-        let cat = PatternCatalog::with_capacity(0);
-        assert_eq!(cat.len(), 0);
-        assert!(cat.is_empty());
-    }
-
-    #[test]
-    fn postcard_roundtrip_small() {
-        let mut cat = PatternCatalog::with_capacity(1024);
-        *cat.get_mut(0) = PatternEntry::new([10, 20, 30, 40], 0.1, 0x1111);
-        *cat.get_mut(1023) = PatternEntry::new([1, 2, 3, 4], 0.9, 0xffff);
-
-        let bytes = postcard::to_allocvec(&cat).expect("serialize");
-        let restored: PatternCatalog = postcard::from_bytes(&bytes).expect("deserialize");
-
-        assert_eq!(restored.len(), 1024);
-        assert_eq!(restored.get(0).star_indices, [10, 20, 30, 40]);
-        assert_eq!(restored.get(1023).key_hash, 0xffff);
-        assert!(restored.get(500).is_empty());
-    }
-}
+pub use pattern_catalog::PatternCatalog;
 
 // ── Status codes (matching tetra3) ──────────────────────────────────────────
 

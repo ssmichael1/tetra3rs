@@ -10,6 +10,8 @@ use std::collections::HashSet;
 
 use tracing::info;
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 #[cfg(test)]
 use serde::Serialize;
@@ -19,9 +21,11 @@ use crate::{Star, StarCatalog};
 use super::combinations::BreadthFirstCombinations;
 use super::pattern::{
     self, compute_edge_ratios, compute_pattern_key, compute_pattern_key_hash,
-    compute_sorted_edge_angles, hash_to_index, insert_pattern, next_prime,
-    sort_pattern_by_centroid_distance, PATTERN_SIZE,
+    compute_sorted_edge_angles, hash_to_index, next_prime, sort_pattern_by_centroid_distance,
+    PATTERN_SIZE,
 };
+use super::pattern_catalog::PackedStore;
+use super::pattern_wire;
 use super::{DatabaseProperties, GenerateDatabaseConfig, PatternEntry, SolverDatabase};
 
 // ── Sky geometry utilities ──────────────────────────────────────────────────
@@ -344,9 +348,7 @@ impl SolverDatabase {
             pattern_list.len() as f64 / catalog_length as f64
         );
 
-        let mut pattern_catalog = super::PatternCatalog::with_capacity(catalog_length);
-
-        for pat in &pattern_list {
+        let items = pattern_list.iter().map(|pat| {
             // Get the 4 star vectors
             let vectors: [[f32; 3]; 4] = [
                 star_vectors[pat[0] as usize],
@@ -367,10 +369,10 @@ impl SolverDatabase {
             let mut sorted_pat = *pat;
             sort_pattern_by_centroid_distance(&mut sorted_pat, |i| star_vectors[i as usize]);
 
-            // Insert into hash table
             let entry = PatternEntry::new(sorted_pat, largest_angle, (pkey_hash & 0xFFFF) as u16);
-            insert_pattern(entry, hidx, &mut pattern_catalog);
-        }
+            (hidx, entry)
+        });
+        let pattern_catalog = super::PatternCatalog::build(catalog_length, items);
 
         info!("Database generation complete.");
         info!(
@@ -381,7 +383,7 @@ impl SolverDatabase {
         info!(
             "Pattern catalog: {} slots ({} bytes)",
             catalog_length,
-            catalog_length * std::mem::size_of::<PatternEntry>()
+            pattern_catalog.heap_bytes()
         );
 
         let props = DatabaseProperties {
@@ -476,11 +478,54 @@ impl From<SolverDatabaseV1> for SolverDatabase {
             star_catalog: v1.star_catalog,
             star_vectors: v1.star_vectors,
             star_catalog_ids: v1.star_catalog_ids,
-            pattern_catalog: super::PatternCatalog {
-                entries: v1.pattern_catalog.entries,
-            },
+            pattern_catalog: super::PatternCatalog::from_dense(&v1.pattern_catalog.entries),
             props: v1.props,
         }
+    }
+}
+
+/// Format version 2 layout with the pattern table's sections borrowed from
+/// the input, so [`SolverDatabase::from_vec`] can keep the input buffer as
+/// the table's backing store instead of copying the packed section. Must
+/// match the derived `Serialize` of [`SolverDatabase`] field for field.
+#[derive(Deserialize)]
+struct SolverDatabaseV2<'a> {
+    star_catalog: StarCatalog,
+    star_vectors: Vec<[f32; 3]>,
+    star_catalog_ids: Vec<i64>,
+    #[serde(borrow)]
+    pattern_catalog: PatternCatalogV2<'a>,
+    props: DatabaseProperties,
+}
+
+/// `(n_slots, occupancy bitmap, packed entries)` — see `pattern_wire`.
+#[derive(Deserialize)]
+struct PatternCatalogV2<'a>(u64, &'a [u8], &'a [u8]);
+
+impl SolverDatabaseV2<'_> {
+    /// `owner`: the buffer the input was borrowed from, to share as the
+    /// packed section's storage; `None` copies the section.
+    fn into_db(self, owner: Option<&Arc<Vec<u8>>>) -> crate::Result<SolverDatabase> {
+        let PatternCatalogV2(n_slots, bitmap, packed) = self.pattern_catalog;
+        let store = || match owner {
+            Some(buf) => PackedStore::Shared {
+                buf: Arc::clone(buf),
+                // `packed` is a subslice of `buf` (both come from the same
+                // decode), so the offset is in range.
+                start: packed.as_ptr() as usize - buf.as_ptr() as usize,
+                len: packed.len(),
+            },
+            None => PackedStore::Owned(packed.to_vec()),
+        };
+        let pattern_catalog = pattern_wire::unpack(n_slots, bitmap, packed, store)
+            .map_err(crate::Error::InvalidInput)?;
+        Ok(SolverDatabase {
+            star_catalog: self.star_catalog,
+            star_vectors: self.star_vectors,
+            star_catalog_ids: self.star_catalog_ids,
+            pattern_catalog,
+            props: self.props,
+        })
     }
 }
 
@@ -502,6 +547,20 @@ impl SolverDatabase {
     /// Fails with [`crate::Error::InvalidInput`] on an unsupported format
     /// version, and with the decode error on a truncated or corrupt payload.
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        Self::decode(bytes, None)
+    }
+
+    /// [`Self::from_bytes`], taking ownership of the buffer: a current-format
+    /// database keeps it as the pattern table's storage rather than copying
+    /// the table out of it (the table is ~90% of a large file), halving peak
+    /// memory and skipping a multi-GB copy. The whole buffer stays alive with
+    /// the database.
+    pub fn from_vec(bytes: Vec<u8>) -> crate::Result<Self> {
+        let buf = Arc::new(bytes);
+        Self::decode(&buf, Some(&buf))
+    }
+
+    fn decode(bytes: &[u8], owner: Option<&Arc<Vec<u8>>>) -> crate::Result<Self> {
         let (version, payload) = match bytes.strip_prefix(DB_MAGIC) {
             Some(rest) => {
                 let (ver, payload) = rest.split_at_checked(2).ok_or_else(|| {
@@ -517,7 +576,7 @@ impl SolverDatabase {
         };
         let db = match version {
             1 => postcard::from_bytes::<SolverDatabaseV1>(payload)?.into(),
-            2 => postcard::from_bytes::<Self>(payload)?,
+            2 => postcard::from_bytes::<SolverDatabaseV2>(payload)?.into_db(owner)?,
             _ => {
                 return Err(crate::Error::InvalidInput(format!(
                     "unsupported database format version {version} \
@@ -544,8 +603,7 @@ impl SolverDatabase {
     /// truncated, or tampered file fails here with a descriptive
     /// [`crate::Error::InvalidInput`] instead of panicking mid-solve.
     pub fn load_from_file(path: &str) -> crate::Result<Self> {
-        let bytes = std::fs::read(path)?;
-        let db = Self::from_bytes(&bytes)?;
+        let db = Self::from_vec(std::fs::read(path)?)?;
         info!(
             "Loaded database: {} stars, {} patterns",
             db.star_catalog.len(),
@@ -624,16 +682,14 @@ impl SolverDatabase {
             )));
         }
 
-        // Every non-empty pattern entry is indexed straight into star_vectors
-        // during hash probing — before any filter can reject it. Empty slots
-        // are all-zero, so "every index of every occupied slot is in range"
-        // is "the largest index in the table is in range" — a branchless,
-        // memory-bound max-reduce (4× faster than the per-slot empty test and
-        // early-exit compare on a 127M-slot table; parallel on top of that).
-        // With an empty star table the only valid pattern table is one with
-        // no occupied slots, i.e. max index 0 — hence the `max(1)`.
-        let limit = u32::try_from(n_stars.max(1)).unwrap_or(u32::MAX);
-        if max_star_index(&self.pattern_catalog.entries) >= limit {
+        // Every occupied entry is indexed straight into star_vectors during
+        // hash probing — before any filter can reject it — so the largest
+        // index in the packed section must be in range.
+        if self
+            .pattern_catalog
+            .max_star_index()
+            .is_some_and(|max| max as usize >= n_stars)
+        {
             return Err(InvalidInput(format!(
                 "SolverDatabase: pattern entry references star index past the \
                  {n_stars}-star table"
@@ -641,23 +697,6 @@ impl SolverDatabase {
         }
         Ok(())
     }
-}
-
-#[inline]
-fn entry_max(e: &PatternEntry) -> u32 {
-    let [a, b, c, d] = e.star_indices;
-    a.max(b).max(c.max(d))
-}
-
-#[cfg(not(feature = "parallel"))]
-fn max_star_index(entries: &[PatternEntry]) -> u32 {
-    entries.iter().map(entry_max).fold(0, u32::max)
-}
-
-#[cfg(feature = "parallel")]
-fn max_star_index(entries: &[PatternEntry]) -> u32 {
-    use rayon::prelude::*;
-    entries.par_iter().map(entry_max).reduce(|| 0, u32::max)
 }
 
 #[cfg(test)]
@@ -684,9 +723,10 @@ mod header_tests {
             .collect();
         let star_catalog_ids = stars.iter().map(|s| s.id).collect();
         let star_catalog = StarCatalog::new(1, stars);
-        let mut pattern_catalog = PatternCatalog::with_capacity(101);
-        *pattern_catalog.get_mut(7) = PatternEntry::new([0, 1, 2, 3], 0.05, 0xabcd);
-        *pattern_catalog.get_mut(100) = PatternEntry::new([1, 2, 3, 4], 0.06, 0x1234);
+        let mut dense = vec![PatternEntry::EMPTY; 101];
+        dense[7] = PatternEntry::new([0, 1, 2, 3], 0.05, 0xabcd);
+        dense[100] = PatternEntry::new([1, 2, 3, 4], 0.06, 0x1234);
+        let pattern_catalog = PatternCatalog::from_dense(&dense);
         SolverDatabase {
             star_catalog,
             star_vectors,
@@ -726,6 +766,18 @@ mod header_tests {
     }
 
     #[test]
+    fn from_vec_shares_the_buffer() {
+        let db = tiny_db();
+        let bytes = db.to_bytes().unwrap();
+        let copied = SolverDatabase::from_bytes(&bytes).unwrap();
+        let shared = SolverDatabase::from_vec(bytes).unwrap();
+        assert!(!copied.pattern_catalog.shares_buffer());
+        assert!(shared.pattern_catalog.shares_buffer());
+        assert_same(&shared, &db);
+        assert_same(&copied, &db);
+    }
+
+    #[test]
     fn version_1_and_legacy_files_still_load() {
         let db = tiny_db();
         let v1 = SolverDatabaseV1 {
@@ -733,7 +785,7 @@ mod header_tests {
             star_vectors: db.star_vectors.clone(),
             star_catalog_ids: db.star_catalog_ids.clone(),
             pattern_catalog: PatternCatalogV1 {
-                entries: db.pattern_catalog.entries.clone(),
+                entries: db.pattern_catalog.to_dense(),
             },
             props: db.props.clone(),
         };
@@ -759,7 +811,9 @@ mod header_tests {
     fn validate_rejects_star_index_past_the_table() {
         let mut db = tiny_db();
         assert!(db.validate().is_ok());
-        *db.pattern_catalog.get_mut(50) = PatternEntry::new([0, 0, 0, 5], 0.05, 1);
+        let mut dense = db.pattern_catalog.to_dense();
+        dense[50] = PatternEntry::new([0, 0, 0, 5], 0.05, 1);
+        db.pattern_catalog = PatternCatalog::from_dense(&dense);
         let err = db.validate().unwrap_err().to_string();
         assert!(err.contains("past the 5-star table"), "{err}");
     }

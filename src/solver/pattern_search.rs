@@ -391,10 +391,9 @@ impl<'a> PatternSearch<'a> {
                 // corrupt/over-full table (which would otherwise loop forever).
                 for c in 0u64..table_len {
                     let tidx = ((hidx.wrapping_add(c.wrapping_mul(c))) % table_len) as usize;
-                    let entry = self.db.pattern_catalog.get(tidx);
-                    if entry.is_empty() {
+                    let Some(entry) = self.db.pattern_catalog.get(tidx) else {
                         break; // end of chain
-                    }
+                    };
                     if entry.key_hash != key_hash16 {
                         continue;
                     }

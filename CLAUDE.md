@@ -35,6 +35,7 @@ cargo run --release --features profile --example profile_solve            # 2000
 cargo run --release --features profile --example profile_solve -- 5000    # n trials
 # Scenario knobs (env): T3_SPURIOUS=K appends K false centroids per field;
 # T3_RANDOM=1 makes each field fully random (forces no-match enumeration).
+# T3_DB=path loads a saved database instead of generating one (large tables).
 ```
 
 `[profile.test]` uses `opt-level = 3`.
@@ -158,7 +159,10 @@ field whose value other code indexes by or divides by, extend the owning
 `SolverDatabase` bytes (files and pickles) carry a `T3DB` header + format
 version (`DB_FORMAT_VERSION` in `src/solver/database.rs`, currently 2). The
 pattern table's wire form is an occupancy bitmap + packed entries
-(`src/solver/pattern_wire.rs`, bulk scatter on load); version 1 (0.13 and
+(`src/solver/pattern_wire.rs`), which is also the in-memory layout of the
+succinct `PatternCatalog` (`src/solver/pattern_catalog.rs`: rank-directory
+blocks + packed entries; `load_from_file`/`from_vec` keep the file buffer as
+its storage, `from_bytes` copies the packed section); version 1 (0.13 and
 earlier, plus pre-header files) loads through the frozen `SolverDatabaseV1`
 mirror. Bump the version when the payload layout changes, and if a field of
 the mirror's *current* types changes, drop v1 support rather than adapt it.

@@ -48,7 +48,10 @@ fn main() {
         .unwrap_or(2000);
 
     let catalog_path = "data/gaia_merged.bin";
-    if !std::path::Path::new(catalog_path).exists() {
+    // T3_DB=path loads a saved database instead of generating one — e.g. a
+    // large multi-FOV table, to profile hash probes that miss cache.
+    let db_path = std::env::var("T3_DB").ok();
+    if db_path.is_none() && !std::path::Path::new(catalog_path).exists() {
         eprintln!("missing {catalog_path} — run from the crate root with the catalog present");
         std::process::exit(1);
     }
@@ -65,9 +68,17 @@ fn main() {
         ..common::profiler_db_config()
     };
 
-    eprintln!("Building database from {catalog_path} …");
     let t_build = Instant::now();
-    let db = SolverDatabase::generate_from_gaia(catalog_path, &config).expect("db generation");
+    let db = match &db_path {
+        Some(path) => {
+            eprintln!("Loading database {path} …");
+            SolverDatabase::load_from_file(path).expect("db load")
+        }
+        None => {
+            eprintln!("Building database from {catalog_path} …");
+            SolverDatabase::generate_from_gaia(catalog_path, &config).expect("db generation")
+        }
+    };
     eprintln!(
         "  {} stars, {} patterns, table {} ({:.1}s)",
         db.star_catalog.len(),
