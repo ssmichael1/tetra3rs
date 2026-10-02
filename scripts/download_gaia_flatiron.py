@@ -29,9 +29,11 @@ Requirements:
     (e.g. clone the repo and `pip install ./py`, or
     `pip install "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py"`).
 
-    The flathub client currently calls ``numpy.DataSource`` directly, which
-    NumPy 2.0 removed; this script shims that attribute back at import time
-    so no patch to flathub itself is needed.
+    The flathub client's ``Catalog.numpy()`` calls ``numpy.DataSource``
+    (removed in NumPy 2.0) and fetches over ``urllib`` (which fails SSL
+    verification on some Python installs and reports it as "not found").
+    This script builds the same ``data/npy`` request itself and fetches it
+    with ``requests``, so no patch to flathub is needed.
 
 Usage:
     python download_gaia_flatiron.py                                 # mag 10, binary
@@ -40,11 +42,14 @@ Usage:
 """
 
 import argparse
+import io
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 import numpy as np
+import requests
 
 # Reuse Hipparcos loader, merge, and writers from the sibling script.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -78,21 +83,28 @@ GAIA_FIELDS = [
 
 def query_gaia_flathub(mag_limit: float) -> np.ndarray:
     """Pull Gaia DR3 stars with G < mag_limit from flathub as a structured array."""
-    # flathub's client calls numpy.DataSource, which was removed in NumPy 2.0
-    # and is still reachable at numpy.lib.npyio.DataSource. Patch it back on
-    # before the import so the client can run unmodified.
-    if not hasattr(np, "DataSource"):
-        np.DataSource = np.lib.npyio.DataSource  # type: ignore[attr-defined]
+    # Equivalent to flathub.Catalog.numpy(), minus numpy.DataSource: the
+    # client builds a `data/npy` URL and hands it to DataSource.open(), which
+    # NumPy 2.0 removed and which (via urllib) swallows SSL errors as
+    # FileNotFoundError. Build the same URL and fetch it with requests.
     import flathub
 
     print(f"Querying flathub Gaia DR3 for stars with G < {mag_limit}...")
     gaiadr3 = flathub.Catalog(
         "gaiadr3", endpoint="https://flathub.flatironinstitute.org/api"
     )
-    arr = gaiadr3.numpy(
-        fields=GAIA_FIELDS,
-        phot_g_mean_mag=(GAIA_G_MIN, mag_limit),
-    )
+    query = flathub.Filters(phot_g_mean_mag=(GAIA_G_MIN, mag_limit)).query()
+    query["fields"] = ",".join(GAIA_FIELDS)
+    query["sort"] = ""
+    url = f"{gaiadr3.endpoint}/data/npy?{urlencode(query)}"
+
+    with requests.get(url, stream=True, timeout=(30, 3600)) as resp:
+        resp.raise_for_status()
+        buf = io.BytesIO()
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            buf.write(chunk)
+    buf.seek(0)
+    arr = np.load(buf)
     print(f"  Retrieved {len(arr)} Gaia stars")
     return arr
 

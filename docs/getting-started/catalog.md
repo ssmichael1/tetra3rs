@@ -70,7 +70,7 @@ python scripts/download_gaia_flatiron.py --mag-limit 14.0 --output data/gaia_mer
 ```
 
 !!! note "NumPy 2.0 shim"
-    The flathub client currently calls `numpy.DataSource`, which NumPy 2.0 removed. The script shims that symbol back at import time, so no patch to flathub itself is needed.
+    The flathub client's `Catalog.numpy()` calls `numpy.DataSource`, which NumPy 2.0 removed, and fetches over `urllib`, which fails SSL verification on some Python installs. The script builds the same `data/npy` request itself and fetches it with `requests`, so no patch to flathub itself is needed.
 
 !!! warning "Large downloads"
     A G < 14 catalog is ~17M stars, ~1 GB on disk; the response is served as a single streaming `.npy`. A corporate / filtering proxy may drop or truncate the connection — run the script on a direct connection if possible.
