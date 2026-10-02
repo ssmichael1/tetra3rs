@@ -2,7 +2,7 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
-## Unreleased
+## 0.14.0 - 2026-10-01
 
 **Upgrading from 0.13:** databases saved by this version (files and Python pickles) use format version 2, which 0.13 cannot read; 0.13 and earlier databases still load here, with a deprecation warning — re-save them with `save_to_file` to upgrade (format 1 stops loading at the next format change).
 
