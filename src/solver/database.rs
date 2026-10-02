@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use log::info;
+use log::{info, warn};
 
 use std::sync::Arc;
 
@@ -447,13 +447,15 @@ const DB_MAGIC: &[u8; 4] = b"T3DB";
 ///
 /// - 1: every field derived; the pattern table a postcard `Vec<PatternEntry>`.
 ///   Written by 0.13 and earlier (pre-0.13 files carry no header at all).
+///   Deprecated in 0.14: loads with a warning.
 /// - 2: the pattern table as an occupancy bitmap + packed entries
 ///   (`pattern_wire`); the other fields unchanged.
 const DB_FORMAT_VERSION: u16 = 2;
 
-/// Format version 1 layout, frozen. Its pattern table decodes through
-/// serde's per-element path, so a v1 load is slower than v2 — regenerate or
-/// re-save large databases to upgrade them. The other fields are the current
+/// Format version 1 layout, frozen. **Deprecated** (loading one logs a
+/// warning): remove it at the next format change. Its pattern table decodes
+/// through serde's per-element path, so a v1 load is slower than v2 —
+/// regenerate or re-save large databases to upgrade them. The other fields are the current
 /// types: if any of those change, bump the version again and drop this
 /// rather than adapt it.
 #[derive(Deserialize)]
@@ -542,7 +544,8 @@ impl SolverDatabase {
     /// Decode a database produced by [`Self::to_bytes`] — the current format
     /// or version 1 (0.13 and earlier; also the bare pre-header payload,
     /// detected by the missing magic) — and check its invariants with
-    /// [`Self::validate`].
+    /// [`Self::validate`]. Version 1 is deprecated: it still loads, with a
+    /// logged warning, until the next format change; re-save to upgrade.
     ///
     /// Fails with [`crate::Error::InvalidInput`] on an unsupported format
     /// version, and with the decode error on a truncated or corrupt payload.
@@ -585,6 +588,13 @@ impl SolverDatabase {
             }
         };
         db.validate()?;
+        if version == 1 {
+            warn!(
+                "Loaded a format-1 solver database (written by tetra3 0.13 or earlier). \
+                 Format 1 is deprecated and stops loading at the next format change; \
+                 re-save it with save_to_file to upgrade (format 2 also loads ~4x faster)."
+            );
+        }
         Ok(db)
     }
 
@@ -775,6 +785,56 @@ mod header_tests {
         assert!(shared.pattern_catalog.shares_buffer());
         assert_same(&shared, &db);
         assert_same(&copied, &db);
+    }
+
+    /// Records warnings with the thread that logged them (tests run in
+    /// parallel; each checks only its own thread's records).
+    struct WarnCapture(std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>);
+
+    impl log::Log for WarnCapture {
+        fn enabled(&self, m: &log::Metadata) -> bool {
+            m.level() <= log::Level::Warn
+        }
+        fn log(&self, r: &log::Record) {
+            if self.enabled(r.metadata()) {
+                let rec = (std::thread::current().id(), r.args().to_string());
+                self.0.lock().unwrap().push(rec);
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    static WARNINGS: WarnCapture = WarnCapture(std::sync::Mutex::new(Vec::new()));
+
+    fn format_1_warnings() -> usize {
+        let me = std::thread::current().id();
+        let recs = WARNINGS.0.lock().unwrap();
+        recs.iter()
+            .filter(|(t, m)| *t == me && m.contains("format-1"))
+            .count()
+    }
+
+    #[test]
+    fn version_1_load_warns_and_version_2_does_not() {
+        // The only logger set in this test binary.
+        log::set_logger(&WARNINGS).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+
+        let db = tiny_db();
+        SolverDatabase::from_bytes(&db.to_bytes().unwrap()).unwrap();
+        assert_eq!(format_1_warnings(), 0);
+
+        let v1 = SolverDatabaseV1 {
+            star_catalog: db.star_catalog.clone(),
+            star_vectors: db.star_vectors.clone(),
+            star_catalog_ids: db.star_catalog_ids.clone(),
+            pattern_catalog: PatternCatalogV1 {
+                entries: db.pattern_catalog.to_dense(),
+            },
+            props: db.props.clone(),
+        };
+        SolverDatabase::from_bytes(&postcard::to_allocvec(&v1).unwrap()).unwrap();
+        assert_eq!(format_1_warnings(), 1);
     }
 
     #[test]

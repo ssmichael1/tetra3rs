@@ -29,9 +29,15 @@ Requirements:
     (e.g. clone the repo and `pip install ./py`, or
     `pip install "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py"`).
 
-    The flathub client currently calls ``numpy.DataSource`` directly, which
-    NumPy 2.0 removed; this script shims that attribute back at import time
-    so no patch to flathub itself is needed.
+    The flathub client's ``Catalog.numpy()`` does not work as published: it
+    joins ``data/npy`` onto the catalog endpoint with ``urljoin``, which
+    drops the catalog name (``.../api/data/npy``, a 404 — the API path is
+    ``.../api/gaiadr3/data/npy``); it opens the URL through
+    ``numpy.DataSource`` (removed in NumPy 2.0), which reports any fetch
+    failure as FileNotFoundError; and it fetches over ``urllib``, which fails
+    SSL verification on some Python installs. This script builds the correct
+    ``data/npy`` request itself and fetches it with ``requests``, so no patch
+    to flathub is needed.
 
 Usage:
     python download_gaia_flatiron.py                                 # mag 10, binary
@@ -40,11 +46,14 @@ Usage:
 """
 
 import argparse
+import io
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 import numpy as np
+import requests
 
 # Reuse Hipparcos loader, merge, and writers from the sibling script.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -78,21 +87,29 @@ GAIA_FIELDS = [
 
 def query_gaia_flathub(mag_limit: float) -> np.ndarray:
     """Pull Gaia DR3 stars with G < mag_limit from flathub as a structured array."""
-    # flathub's client calls numpy.DataSource, which was removed in NumPy 2.0
-    # and is still reachable at numpy.lib.npyio.DataSource. Patch it back on
-    # before the import so the client can run unmodified.
-    if not hasattr(np, "DataSource"):
-        np.DataSource = np.lib.npyio.DataSource  # type: ignore[attr-defined]
+    # flathub.Catalog.numpy() done by hand: same filter / fields / sort
+    # query, but the URL keeps the catalog name (the client's urljoin drops
+    # it, giving a 404) and the fetch uses requests instead of
+    # numpy.DataSource (removed in NumPy 2.0; reports failures as
+    # FileNotFoundError) over urllib (SSL failures on some installs).
     import flathub
 
     print(f"Querying flathub Gaia DR3 for stars with G < {mag_limit}...")
     gaiadr3 = flathub.Catalog(
         "gaiadr3", endpoint="https://flathub.flatironinstitute.org/api"
     )
-    arr = gaiadr3.numpy(
-        fields=GAIA_FIELDS,
-        phot_g_mean_mag=(GAIA_G_MIN, mag_limit),
-    )
+    query = flathub.Filters(phot_g_mean_mag=(GAIA_G_MIN, mag_limit)).query()
+    query["fields"] = ",".join(GAIA_FIELDS)
+    query["sort"] = ""
+    url = f"{gaiadr3.endpoint}/data/npy?{urlencode(query)}"
+
+    with requests.get(url, stream=True, timeout=(30, 3600)) as resp:
+        resp.raise_for_status()
+        buf = io.BytesIO()
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            buf.write(chunk)
+    buf.seek(0)
+    arr = np.load(buf)
     print(f"  Retrieved {len(arr)} Gaia stars")
     return arr
 
