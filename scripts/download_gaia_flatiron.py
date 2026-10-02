@@ -29,11 +29,15 @@ Requirements:
     (e.g. clone the repo and `pip install ./py`, or
     `pip install "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py"`).
 
-    The flathub client's ``Catalog.numpy()`` calls ``numpy.DataSource``
-    (removed in NumPy 2.0) and fetches over ``urllib`` (which fails SSL
-    verification on some Python installs and reports it as "not found").
-    This script builds the same ``data/npy`` request itself and fetches it
-    with ``requests``, so no patch to flathub is needed.
+    The flathub client's ``Catalog.numpy()`` does not work as published: it
+    joins ``data/npy`` onto the catalog endpoint with ``urljoin``, which
+    drops the catalog name (``.../api/data/npy``, a 404 — the API path is
+    ``.../api/gaiadr3/data/npy``); it opens the URL through
+    ``numpy.DataSource`` (removed in NumPy 2.0), which reports any fetch
+    failure as FileNotFoundError; and it fetches over ``urllib``, which fails
+    SSL verification on some Python installs. This script builds the correct
+    ``data/npy`` request itself and fetches it with ``requests``, so no patch
+    to flathub is needed.
 
 Usage:
     python download_gaia_flatiron.py                                 # mag 10, binary
@@ -83,10 +87,11 @@ GAIA_FIELDS = [
 
 def query_gaia_flathub(mag_limit: float) -> np.ndarray:
     """Pull Gaia DR3 stars with G < mag_limit from flathub as a structured array."""
-    # Equivalent to flathub.Catalog.numpy(), minus numpy.DataSource: the
-    # client builds a `data/npy` URL and hands it to DataSource.open(), which
-    # NumPy 2.0 removed and which (via urllib) swallows SSL errors as
-    # FileNotFoundError. Build the same URL and fetch it with requests.
+    # flathub.Catalog.numpy() done by hand: same filter / fields / sort
+    # query, but the URL keeps the catalog name (the client's urljoin drops
+    # it, giving a 404) and the fetch uses requests instead of
+    # numpy.DataSource (removed in NumPy 2.0; reports failures as
+    # FileNotFoundError) over urllib (SSL failures on some installs).
     import flathub
 
     print(f"Querying flathub Gaia DR3 for stars with G < {mag_limit}...")
