@@ -94,7 +94,8 @@ Public re-exports in `src/lib.rs` — `CameraModel`, `SolveConfig`, `SolveResult
 ## Python bindings (`python/`)
 
 - PyO3 0.28, setuptools-rust build backend
-- `crate-type = cdylib`, depends on root crate with `image` feature
+- `crate-type = cdylib`, depends on root crate with the `image` and `parallel` features
+- Extraction functions take keyword-only `threads` (None = all cores) and run on pools owned by `python/src/threads.rs` — never rayon's global pool, whose workers do not survive `fork()`. Route any new rayon-parallel call reachable from Python through `threads::run` (the fork tests in `python/tests/test_threads.py` hang-check this)
 - All public types pickle via postcard: `SolverDatabase`, `CameraModel`, `SolveResult`, `CalibrateResult`, `ExtractionResult`, `Centroid`, `RadialDistortion`, `PolynomialDistortion` (`CentroidExtractor` pickles as a fresh instance — its buffers are scratch)
 - Gaia catalog bundled via the `gaia-catalog` PyPI package — no manual download needed
 - Wheels: cibuildwheel, cp310–cp314, skips i686/musllinux

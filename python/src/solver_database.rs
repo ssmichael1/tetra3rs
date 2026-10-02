@@ -97,10 +97,13 @@ impl PySolverDatabase {
             catalog_nside,
         };
         // Generation runs for seconds to minutes on pure-Rust data; release
-        // the GIL so other Python threads keep running.
-        let db = py
-            .detach(|| SolverDatabase::generate_from_gaia(&resolved_path, &config))
-            .map_err(crate::helpers::map_tetra3_err)?;
+        // the GIL so other Python threads keep running. On the module's own
+        // pool: any rayon-parallel step must not use the global one (see
+        // `crate::threads`).
+        let db = crate::threads::run_default(py, || {
+            SolverDatabase::generate_from_gaia(&resolved_path, &config)
+        })?
+        .map_err(crate::helpers::map_tetra3_err)?;
         Ok(PySolverDatabase { inner: db })
     }
 
@@ -118,9 +121,10 @@ impl PySolverDatabase {
     /// that would otherwise crash mid-solve).
     #[staticmethod]
     fn load_from_file(py: Python<'_>, path: &str) -> PyResult<Self> {
-        let path = path.to_string();
-        let db = py
-            .detach(move || SolverDatabase::load_from_file(&path))
+        // GIL released; the pattern-table decode and validation are
+        // multi-threaded and run on the module's own pool (fork-safe, see
+        // `crate::threads`).
+        let db = crate::threads::run_default(py, || SolverDatabase::load_from_file(path))?
             .map_err(crate::helpers::map_tetra3_err)?;
         Ok(PySolverDatabase { inner: db })
     }
@@ -478,11 +482,15 @@ impl PySolverDatabase {
     }
 
     #[staticmethod]
-    fn _from_pickle_bytes(data: &[u8]) -> PyResult<Self> {
+    fn _from_pickle_bytes(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
         // Header-aware decode + the same invariant checks as load_from_file
         // (corrupt pickle bytes must raise, never panic mid-solve). Pickles
         // from before the file header existed still load (legacy path).
-        let inner = SolverDatabase::from_bytes(data).map_err(crate::helpers::map_tetra3_err)?;
+        // Multi-threaded like load_from_file, on the module's own pool: a
+        // database unpickled in a forked `multiprocessing` worker is the
+        // common way to meet a pool inherited across fork().
+        let inner = crate::threads::run_default(py, || SolverDatabase::from_bytes(data))?
+            .map_err(crate::helpers::map_tetra3_err)?;
         Ok(Self { inner })
     }
 

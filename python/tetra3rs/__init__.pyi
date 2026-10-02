@@ -1179,9 +1179,9 @@ class CentroidExtractor:
     """The :func:`extract_centroids` pipeline with its working buffers kept
     between calls.
 
-    :func:`extract_centroids` allocates its full-image buffers (~48 MB at
+    :func:`extract_centroids` allocates its full-image buffers (~32 MB at
     2048²) fresh on every call, and the first touch of each page costs more
-    than the allocation (~0.3–0.5 ms per 2048² frame). An extractor reuses
+    than the allocation (~0.4 ms per 2048² frame). An extractor reuses
     them, resizing only when the frame size changes, so a frame loop pays
     that once. Results are bit-identical to :func:`extract_centroids`.
 
@@ -1211,6 +1211,8 @@ class CentroidExtractor:
         saturation_level: Optional[float] = None,
         deblend: str = "off",
         border_margin: int = 0,
+        *,
+        threads: Optional[int] = None,
     ) -> ExtractionResult:
         """Extract star centroids from a 2D image array, reusing this
         extractor's buffers.
@@ -1252,6 +1254,12 @@ class CentroidExtractor:
             border_margin: Drop blobs whose bounding box comes within this many
                 pixels of an image edge (truncated PSFs bias the center-of-mass
                 inward).
+            threads: Worker threads for this call. None (default) uses every
+                available core — or ``RAYON_NUM_THREADS`` if set — except for
+                frames under ~512×512, which run on one thread because waking
+                the workers costs more than it saves. An integer uses exactly
+                that many; 1 is single-threaded. The result is the same for
+                every setting. Safe to use in forked child processes.
 
         Returns:
             ExtractionResult with centroids and image statistics.
@@ -1271,6 +1279,8 @@ def extract_centroids(
     saturation_level: Optional[float] = None,
     deblend: str = "off",
     border_margin: int = 0,
+    *,
+    threads: Optional[int] = None,
 ) -> ExtractionResult:
     """Extract star centroids from a 2D image array.
 
@@ -1308,6 +1318,12 @@ def extract_centroids(
         border_margin: Drop blobs whose bounding box comes within this many
             pixels of an image edge (truncated PSFs bias the center-of-mass
             inward).
+        threads: Worker threads for this call. None (default) uses every
+            available core — or ``RAYON_NUM_THREADS`` if set — except for
+            frames under ~512×512, which run on one thread because waking
+            the workers costs more than it saves. An integer uses exactly
+            that many; 1 is single-threaded. The result is the same for
+            every setting. Safe to use in forked child processes.
 
     Returns:
         ExtractionResult with centroids and image statistics.
@@ -1325,6 +1341,8 @@ def extract_centroids_fast(
     max_pixels: int = 10000,
     max_elongation: Optional[float] = None,
     border_margin: int = 0,
+    *,
+    threads: Optional[int] = None,
 ) -> ExtractionResult:
     """Fast single-pass centroid extraction — the "adequate star tracker" path.
 
@@ -1363,6 +1381,12 @@ def extract_centroids_fast(
         border_margin: Drop regions whose bounding box comes within this
             many pixels of an image edge (truncated PSFs bias the
             center-of-mass inward).
+        threads: Worker threads for this call. None (default) uses every
+            available core — or ``RAYON_NUM_THREADS`` if set — except for
+            frames under ~512×512, which run on one thread because waking
+            the workers costs more than it saves. An integer uses exactly
+            that many; 1 is single-threaded. The result is the same for
+            every setting. Safe to use in forked child processes.
 
     Returns:
         ExtractionResult with centroids and image statistics.

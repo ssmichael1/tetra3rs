@@ -179,32 +179,65 @@ medians are computed from a stride subsample of each tile, and background
 subtraction, noise statistics, and the filter input are produced by one fused
 pass over the image — there is no materialized full-image background buffer.
 
-### Multi-threading (`parallel` feature)
+### Multi-threading
 
-The Rust crate's `parallel` feature multi-threads the extraction hot paths via
-[rayon](https://docs.rs/rayon). It parallelizes the local-background stage
-(step 1) — independent block medians and the fused per-row residual pass — and
-enables numeris's parallel `imageproc` routines, so the matched-filter Gaussian
-blur (step 3) runs threaded too. Results are bit-identical to the
-single-threaded build.
+The extraction hot paths are multi-threaded with [rayon](https://docs.rs/rayon):
+the background grid, the noise subsample, the per-row residual pass, the
+matched-filter blur, the detection bit mask and — on this path — the run sweep
+(in bands of rows) and the per-blob annulus / moment / refinement stage (one
+task per blob). `extract_centroids_fast` threads its background grid and bit
+mask. Results are bit-identical for every thread count, including one.
 
-Measured on an 8-core machine: **~1.9×** on a sparse 2-megapixel field and
-**~1.45×** on a dense TESS frame (~37k blobs). The dense case scales less
-because the per-blob centroid loop (step 6) — a small fraction of total time on
-typical fields — is left sequential, as is the run-merging detection sweep
-(step 5), which is inherently sequential.
+**Python.** The wheels are built with threading on, and the extraction
+functions (`extract_centroids`, `extract_centroids_fast`,
+`CentroidExtractor.extract`) take a keyword-only `threads` argument:
 
-Build with `cargo build --release --features image,parallel`.
+| `threads` | Behavior |
+|---|---|
+| `None` (default) | Every available core, or `RAYON_NUM_THREADS` if that is set. Frames under about 512×512 run on one thread, because waking the workers costs more than it saves. |
+| `1` | Single-threaded. |
+| `n` | Exactly `n` threads. |
+
+```python
+result = tetra3rs.extract_centroids(image)             # all cores
+result = tetra3rs.extract_centroids(image, threads=1)  # one core
+```
+
+Measured from Python on an 8-core Apple M3 (float32 input, default settings):
+
+| Frame | `threads=1` | default |
+|---|---|---|
+| 2048², tracker-like (400 stars) | 8.5 ms | 4.4 ms |
+| 2048², dense TESS field | 20.8 ms | 8.4 ms |
+| 1920×1080 | 4.0 ms | 2.2 ms |
+| 640×480 | 0.63 ms | 0.43 ms |
+
+Set `threads=1` when you already run one process or thread per core (a
+`multiprocessing` pool, a frame loop per camera), or to leave cores free for
+other work.
+
+The worker threads live in pools owned by the extension, never in a
+process-global pool, which makes extraction **safe after `fork()`**: threads do
+not survive a fork, and a child that inherited a pool would wait on it forever.
+A forked child (`multiprocessing`'s `fork` start method, `os.fork`) notices the
+pools belong to its parent and starts its own. Database loading and unpickling,
+which decode and validate the pattern table on all cores, use the same pools
+and are fork-safe the same way.
+
+**Rust.** Threading is the crate's `parallel` feature
+(`cargo build --release --features image,parallel`); without it the same code
+runs sequentially. Parallel regions use the rayon pool they are called in — the
+global one by default, sized by `RAYON_NUM_THREADS` — so to choose a thread
+count for a call, run it inside your own pool with `ThreadPool::install`.
 
 ## Reusing buffers across frames (`CentroidExtractor`)
 
 `extract_centroids` allocates its full-image working buffers — the residual
-images, the matched filter's output and the detection bit mask, about 48 MB
+image, the matched filter's output and the detection bit mask, about 32 MB
 at 2048² — fresh on every call. The allocation itself is cheap, but the first
-touch of each page is not: roughly 0.3 ms per 2048² frame serially, 0.5 ms
-with the `parallel` feature. In a frame loop, `CentroidExtractor` keeps those
-buffers between calls (resizing only when the frame size changes) and gives
-bit-identical results:
+touch of each page is not: roughly 0.4 ms per 2048² frame. In a frame loop,
+`CentroidExtractor` keeps those buffers between calls (resizing only when the
+frame size changes) and gives bit-identical results:
 
 ```python
 extractor = tetra3rs.CentroidExtractor()

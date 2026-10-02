@@ -283,11 +283,11 @@ pub fn extract_centroids_from_raw(
 /// calls.
 ///
 /// [`extract_centroids_from_image`] and [`extract_centroids_from_raw`]
-/// allocate their full-image buffers — the grayscale conversion, the clamped
-/// and unclamped residual images, the matched filter's output and the
-/// detection bit mask, ~48 MB at 2048² — fresh on every call, and the first
-/// touch of each page costs more than the allocation itself (~0.3 ms serial,
-/// ~0.5 ms with the `parallel` feature at 2048²). An extractor reuses them,
+/// allocate their full-image buffers — the grayscale conversion, the
+/// residual image, the matched filter's output and the detection bit mask,
+/// ~32 MB at 2048² for raw input with the default configuration — fresh on
+/// every call, and the first touch of each page costs more than the
+/// allocation itself (~0.4 ms at 2048²). An extractor reuses them,
 /// resizing only when the frame size changes, so a frame loop pays that once.
 /// Results are bit-identical to the free functions, which are exactly
 /// `CentroidExtractor::new().extract_*(…)`.
@@ -443,13 +443,19 @@ fn check_pixel_len(len: usize, width: u32, height: u32) -> Result<()> {
 ///
 /// Both paths parallelize their background grid (one task per block row)
 /// and their detection bit mask (16-row chunks). The CCL path additionally
-/// runs its residual pass by rows, its run sweep in 64-row bands, and its
+/// gathers its noise subsample in bands of sampled rows, runs its residual
+/// pass by rows, its run sweep in 64-row bands, and its
 /// per-region annulus / moment / deblend stage as one task per region
 /// (`map_indices_init`, order preserved by index); the fast path's run
 /// sweep stays sequential.
 pub(super) mod par {
     #[cfg(feature = "parallel")]
     use rayon::prelude::*;
+
+    /// Whether the helpers below fan out across threads. For choosing a
+    /// task granularity only (e.g. one task instead of many when nothing
+    /// runs concurrently) — never for changing what is computed.
+    pub const ENABLED: bool = cfg!(feature = "parallel");
 
     /// Map `f` over `0..n` into a `Vec`, preserving index order.
     #[cfg(feature = "parallel")]
@@ -513,34 +519,6 @@ pub(super) mod par {
             f(i, c);
         }
     }
-
-    /// Apply `f(i, chunk_a, chunk_b)` to corresponding disjoint
-    /// `chunk_len`-sized chunks of two buffers (one image row each).
-    #[cfg(feature = "parallel")]
-    pub fn for_each_chunk_pair_mut<T, U, F>(a: &mut [T], b: &mut [U], chunk_len: usize, f: F)
-    where
-        T: Send,
-        U: Send,
-        F: Fn(usize, &mut [T], &mut [U]) + Sync + Send,
-    {
-        a.par_chunks_mut(chunk_len)
-            .zip(b.par_chunks_mut(chunk_len))
-            .enumerate()
-            .for_each(|(i, (ca, cb))| f(i, ca, cb));
-    }
-    #[cfg(not(feature = "parallel"))]
-    pub fn for_each_chunk_pair_mut<T, U, F>(a: &mut [T], b: &mut [U], chunk_len: usize, mut f: F)
-    where
-        F: FnMut(usize, &mut [T], &mut [U]),
-    {
-        for (i, (ca, cb)) in a
-            .chunks_mut(chunk_len)
-            .zip(b.chunks_mut(chunk_len))
-            .enumerate()
-        {
-            f(i, ca, cb);
-        }
-    }
 }
 
 /// Coarse block-median background grid shared by both extraction paths.
@@ -572,11 +550,17 @@ pub(super) struct BackgroundGrid {
 /// the same [`col_params`] arithmetic the per-pixel accessors use and grouped
 /// into segments of constant `(bx0, bx1)`, so blending a whole row is a
 /// straight multiply-add loop with no per-pixel divide / floor / clamp.
-/// See [`BackgroundGrid::blend_columns`].
+/// See [`BackgroundGrid::blend_columns`]. The single-pixel accessors
+/// ([`BackgroundGrid::value_at`], [`BackgroundGrid::value_in_row`]) read the
+/// same per-column entries, so every way of evaluating the surface shares
+/// one set of weights.
 struct ColPlan {
     /// Column blend weight `fx` and its complement `1 - fx`.
     fx: Vec<f32>,
     omfx: Vec<f32>,
+    /// The two grid columns each image column blends.
+    bx0: Vec<u32>,
+    bx1: Vec<u32>,
     /// `(c_start, c_end_exclusive, bx0, bx1)` — maximal column ranges that
     /// share the same pair of grid columns.
     segs: Vec<(usize, usize, usize, usize)>,
@@ -586,17 +570,27 @@ impl ColPlan {
     fn new(nx: usize, block: usize, w: usize) -> Self {
         let mut fx = Vec::with_capacity(w);
         let mut omfx = Vec::with_capacity(w);
+        let mut bx0s = Vec::with_capacity(w);
+        let mut bx1s = Vec::with_capacity(w);
         let mut segs: Vec<(usize, usize, usize, usize)> = Vec::new();
         for c in 0..w {
             let (bx0, bx1, f) = col_params(nx, block, c);
             fx.push(f);
             omfx.push(1.0 - f);
+            bx0s.push(bx0 as u32);
+            bx1s.push(bx1 as u32);
             match segs.last_mut() {
                 Some(seg) if seg.2 == bx0 && seg.3 == bx1 => seg.1 = c + 1,
                 _ => segs.push((c, c + 1, bx0, bx1)),
             }
         }
-        Self { fx, omfx, segs }
+        Self {
+            fx,
+            omfx,
+            bx0: bx0s,
+            bx1: bx1s,
+            segs,
+        }
     }
 }
 
@@ -724,13 +718,26 @@ impl BackgroundGrid {
         (by0, by0 + 1, bf - by0 as f32)
     }
 
-    /// Background value at `(x, row)` given `row_params(row)`.
+    /// Background value at `(x, row)` given `row_params(row)`. `x` must be
+    /// a column of the image the grid was built for. The column half of the
+    /// interpolation comes from the column plan, so a lookup costs two row
+    /// blends and one column blend with no divide / floor / clamp.
     #[inline]
     pub(super) fn value_at(&self, x: usize, (by0, by1, fy): (usize, usize, f32)) -> f32 {
-        let (bx0, bx1, fx) = self.col_params(x);
+        let (bx0, bx1) = (self.cols.bx0[x] as usize, self.cols.bx1[x] as usize);
         let g0 = self.grid[by0 * self.nx + bx0] * (1.0 - fy) + self.grid[by1 * self.nx + bx0] * fy;
         let g1 = self.grid[by0 * self.nx + bx1] * (1.0 - fy) + self.grid[by1 * self.nx + bx1] * fy;
-        g0 * (1.0 - fx) + g1 * fx
+        g0 * self.cols.omfx[x] + g1 * self.cols.fx[x]
+    }
+
+    /// Background value at column `x` of the row blended into `row_blend`
+    /// by [`Self::blend_row`] — [`Self::value_at`] with the row half hoisted
+    /// (the same expression in the same order, so the same bits), for
+    /// callers that sample several columns of one row.
+    #[inline]
+    pub(super) fn value_in_row(&self, row_blend: &[f32], x: usize) -> f32 {
+        let (bx0, bx1) = (self.cols.bx0[x] as usize, self.cols.bx1[x] as usize);
+        row_blend[bx0] * self.cols.omfx[x] + row_blend[bx1] * self.cols.fx[x]
     }
 
     /// Blend one grid row for `row_params(row)` into `out` (length `nx`) —
@@ -782,11 +789,6 @@ impl BackgroundGrid {
     #[inline]
     pub(super) fn threshold_row(&self, row_blend: &[f32], k_sigma: f32, out: &mut [f32]) {
         self.blend_columns(row_blend, out, |v| v + k_sigma);
-    }
-
-    #[inline]
-    fn col_params(&self, x: usize) -> (usize, usize, f32) {
-        col_params(self.nx, self.block, x)
     }
 }
 

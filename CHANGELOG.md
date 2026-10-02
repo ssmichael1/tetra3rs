@@ -9,6 +9,7 @@ Only recent releases are listed. Older entries are in this file's git history (`
 ### Added
 
 - Python: Rust log records now reach Python's `logging` (via `pyo3-log`) under logger names that follow the module path (`tetra3.solver.solve`, …); levels are cached so disabled messages never take the GIL, and `tetra3rs.reset_log_cache()` re-reads them after a level change. ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
+- Python: `extract_centroids`, `extract_centroids_fast` and `CentroidExtractor.extract` take a keyword-only `threads` argument — `None` (default) uses every core (or `RAYON_NUM_THREADS`), with frames under ~512×512 kept on one thread; an integer uses exactly that many. Results are bit-identical for every setting. The thread pools are owned by the extension and rebuilt in forked children, so extraction and database loading / unpickling are safe under `multiprocessing`'s `fork` start method (rayon's global pool hangs there). ([#73](https://github.com/ssmichael1/tetra3rs/pull/73))
 
 ### Changed
 
@@ -19,7 +20,9 @@ Only recent releases are listed. Older entries are in this file's git history (`
 - `SolverDatabase::validate` bounds-checks pattern star indices with a branchless max-reduce (0.37 → 0.09 s on the same table), threaded under the `parallel` feature (0.04 s), which now also parallelizes the format-2 table scatter. ([#70](https://github.com/ssmichael1/tetra3rs/pull/70))
 - Logging uses the `log` facade instead of `tracing`, so `env_logger`-style loggers see tetra3's messages; `tracing-subscriber` users still receive them through its default `tracing-log` bridge. Dev tests use `env_logger` (`RUST_LOG` now overrides each test's default level). ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
 - Dependencies: `numeris` 0.6, `pyo3` 0.29.3. ([#71](https://github.com/ssmichael1/tetra3rs/pull/71))
+- Python wheels are built with the `parallel` feature, so extraction is **multi-threaded by default** (pass `threads=1` for the previous single-threaded behavior, e.g. when running one process per core) and database loading / unpickling uses the threaded decode and validation; `RAYON_NUM_THREADS` caps both. From Python on 8 cores, 2048² default config 8.5 → 4.4 ms on a tracker-like frame and 20.8 → 8.4 ms on a dense TESS field, 1920×1080 4.0 → 2.2 ms. ([#73](https://github.com/ssmichael1/tetra3rs/pull/73))
 - Python: `attitude_hint` matrices and `pixel_to_world` / `world_to_pixel` arrays accept any numeric dtype (e.g. float32), not just float64. ([#72](https://github.com/ssmichael1/tetra3rs/pull/72))
+- CCL centroider (`extract_centroids_from_raw` / `_from_image`, `CentroidExtractor`): with local background and the matched filter on (the default), blobs are measured on the filter's input, clamped at zero as it is read, instead of on a second stored residual image (one 16 MB write stream less per 2048² frame; extractor buffers ~48 → ~32 MB); the noise estimate blends each sampled row once, gathers its subsample in row bands under `parallel`, and clips in one sweep per pass; the annulus gather no longer zero-fills its buffer per region; the run sweep (both extractors) keeps no per-row copies of the runs. Bit-identical output; 2048² default config: 8.4 → 7.2 ms serial and 4.4 → 3.7 ms parallel on a tracker-like frame, 21.7 → 19.8 ms and 8.6 → 7.9 ms on a dense TESS field. ([#73](https://github.com/ssmichael1/tetra3rs/pull/73))
 
 ### Fixed
 
