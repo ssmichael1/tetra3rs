@@ -5,9 +5,16 @@
 //! level are cached on first use, so a disabled record is rejected by a map
 //! lookup without attaching to the interpreter — solves run detached and log
 //! from rayon workers. `reset()` drops the cache after a level change.
+//!
+//! The cache is an `ArcSwap`, not a lock: readers include detached rayon
+//! workers, which `fork()` does not pause, and a child that inherited a lock
+//! mid-read would block its first cache update forever. Loads and swaps never
+//! wait, so an interrupted reader costs the child nothing.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use pyo3::intern;
@@ -19,8 +26,10 @@ struct CacheEntry {
     filter: LevelFilter,
 }
 
+type Cache = HashMap<String, Arc<CacheEntry>>;
+
 pub(crate) struct PyLogger {
-    cache: RwLock<HashMap<String, CacheEntry>>,
+    cache: ArcSwap<Cache>,
 }
 
 impl PyLogger {
@@ -28,7 +37,7 @@ impl PyLogger {
     /// set (e.g. another extension in the process installed one first).
     pub(crate) fn install() -> Result<&'static Self, log::SetLoggerError> {
         let logger: &'static Self = Box::leak(Box::new(Self {
-            cache: RwLock::new(HashMap::new()),
+            cache: ArcSwap::from_pointee(Cache::new()),
         }));
         log::set_logger(logger)?;
         log::set_max_level(LevelFilter::Debug);
@@ -37,21 +46,15 @@ impl PyLogger {
 
     /// Forget cached loggers and levels so the next record re-reads them.
     pub(crate) fn reset(&self) {
-        self.cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.cache.store(Arc::default());
     }
 
     /// The cached Python logger for `target`, looking it up (and caching it
-    /// with its effective level) on a miss. The lock is never held across a
-    /// Python call.
+    /// with its effective level) on a miss.
     fn logger_for<'py>(&self, py: Python<'py>, target: &str) -> PyResult<Bound<'py, PyAny>> {
-        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = cache.get(target) {
+        if let Some(entry) = self.cache.load().get(target) {
             return Ok(entry.logger.bind(py).clone());
         }
-        drop(cache);
 
         let logger = py
             .import(intern!(py, "logging"))?
@@ -59,14 +62,16 @@ impl PyLogger {
         let level: u32 = logger
             .call_method0(intern!(py, "getEffectiveLevel"))?
             .extract()?;
-        let entry = CacheEntry {
+        let entry = Arc::new(CacheEntry {
             logger: logger.clone().unbind(),
             filter: level_filter(level),
-        };
-        self.cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(target.to_owned(), entry);
+        });
+        // Copy-on-write; `rcu` retries if another thread swapped in between.
+        self.cache.rcu(|cache| {
+            let mut cache = Cache::clone(cache);
+            cache.insert(target.to_owned(), Arc::clone(&entry));
+            cache
+        });
         Ok(logger)
     }
 
@@ -99,8 +104,8 @@ impl PyLogger {
 impl Log for PyLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         // Uncached targets pass; `emit` checks them against Python.
-        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
-        cache
+        self.cache
+            .load()
             .get(metadata.target())
             .is_none_or(|entry| metadata.level() <= entry.filter)
     }

@@ -24,7 +24,10 @@ static LOGGER: OnceLock<&'static logging::PyLogger> = OnceLock::new();
 ///
 /// A Rust implementation of the tetra3 star plate solving algorithm,
 /// exposed to Python via PyO3.
-#[pymodule]
+// `gil_used = true`: not audited or tested under free-threaded Python (no
+// cp3xxt wheels are built), so importing it there re-enables the GIL rather
+// than claiming support. pyo3 ≥ 0.28 otherwise defaults to `false`.
+#[pymodule(gil_used = true)]
 fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Route the crate's `log` records into Python's `logging` (logger names
     // follow the Rust module path, e.g. `tetra3.solver.solve`). Levels are
