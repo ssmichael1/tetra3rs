@@ -56,3 +56,19 @@ def test_level_cache_and_reset(skyview_db, caplog):
     finally:
         logger.setLevel(old_level)
         tetra3rs.reset_log_cache()
+
+
+def test_concurrent_logging_and_reset(skyview_db, caplog):
+    # Solves log from detached threads; resets swap the cache underneath
+    # them. Every warning must arrive exactly once.
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = 64
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_invalid_solve, skyview_db) for _ in range(n)]
+            for _ in range(n):
+                tetra3rs.reset_log_cache()
+            for f in futures:
+                f.result()
+    assert len(_records(caplog)) == n

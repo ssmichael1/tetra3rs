@@ -49,6 +49,8 @@ Binary wheels are available on [PyPI](https://pypi.org/project/tetra3rs/) for Li
 pip install tetra3rs
 ```
 
+Wheels cover CPython 3.11–3.15. Free-threaded builds (3.14t, 3.15t) have no wheels and build from source; importing the module there re-enables the GIL.
+
 To build from source (requires a Rust toolchain):
 
 ```sh
