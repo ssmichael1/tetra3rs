@@ -54,7 +54,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       # Same data as docs.yml (the notebooks solve and calibrate real images).
       - name: Cache test data
