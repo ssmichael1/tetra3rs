@@ -2,6 +2,18 @@
 
 Only recent releases are listed. Older entries are in this file's git history (`git show vX.Y.Z:CHANGELOG.md`). Full detail for each change lives in the linked PR.
 
+## Unreleased
+
+### Added
+
+- Python 3.15 wheels (cp315). ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
+
+### Changed
+
+- **Breaking:** Python 3.10 support dropped (end-of-life October 2026); wheels are built for 3.11–3.15 and `requires-python` is `>=3.11`. ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
+- Dependencies: `pyo3` 0.30.1, `numpy` (Rust) 0.30.0; `pyo3-log` replaced by a small in-tree `log` → Python `logging` bridge with the same logger names, level caching and `reset_log_cache()` behavior. ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
+- CI: `cibuildwheel` 4.3.1 and current majors of all GitHub Actions (`checkout` v7, `setup-python` v7, `cache` v6, `upload-artifact` v7, `download-artifact` v8, `upload-pages-artifact` v5, `deploy-pages` v5). ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
+
 ## 0.14.0 - 2026-10-01
 
 **Upgrading from 0.13:** databases saved by this version (files and Python pickles) use format version 2, which 0.13 cannot read; 0.13 and earlier databases still load here, with a deprecation warning — re-save them with `save_to_file` to upgrade (format 1 stops loading at the next format change).

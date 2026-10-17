@@ -16,19 +16,19 @@ jobs:
     name: Python tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       - name: Cache test data
         id: cache-test-data
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data
           key: test-data-v6
@@ -72,19 +72,19 @@ jobs:
       # pyproject.toml.
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
-        python: [cp310, cp311, cp312, cp313, cp314]
+        python: [cp311, cp312, cp313, cp314, cp315]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - uses: pypa/cibuildwheel@v3.3
+      - uses: pypa/cibuildwheel@v4.3.1
         env:
           # Build only this job's Python version (overrides pyproject `build`).
           CIBW_BUILD: ${{ matrix.python }}-*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           # Per-(os, python) artifact name — must be unique or the parallel
           # uploads collide. `publish` re-merges via merge-multiple.
@@ -96,7 +96,7 @@ jobs:
     needs: [test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -104,7 +104,7 @@ jobs:
       - name: Build sdist
         run: pipx run build --sdist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: ./dist/*.tar.gz
@@ -118,7 +118,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

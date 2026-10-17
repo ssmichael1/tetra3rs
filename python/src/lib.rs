@@ -9,6 +9,7 @@ mod centroid;
 mod distortion;
 mod extraction;
 mod helpers;
+mod logging;
 mod solve_result;
 mod solver_database;
 mod threads;
@@ -17,7 +18,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDateTime;
 use std::sync::OnceLock;
 
-static LOG_RESET: OnceLock<pyo3_log::ResetHandle> = OnceLock::new();
+static LOGGER: OnceLock<&'static logging::PyLogger> = OnceLock::new();
 
 /// tetra3rs: Fast star plate solver
 ///
@@ -30,11 +31,8 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // cached per logger so disabled messages never take the GIL — solves run
     // detached. `reset_log_cache()` re-reads them after a level change.
     // `install` fails only if a logger is already set; keep that one.
-    if let Ok(handle) = pyo3_log::Logger::new(m.py(), pyo3_log::Caching::LoggersAndLevels)?
-        .filter(log::LevelFilter::Debug)
-        .install()
-    {
-        let _ = LOG_RESET.set(handle);
+    if let Ok(logger) = logging::PyLogger::install() {
+        let _ = LOGGER.set(logger);
     }
     m.add_class::<centroid::PyCentroid>()?;
     m.add_class::<catalog_star::PyCatalogStar>()?;
@@ -65,8 +63,8 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// takes effect.
 #[pyfunction]
 fn reset_log_cache() {
-    if let Some(handle) = LOG_RESET.get() {
-        handle.reset();
+    if let Some(logger) = LOGGER.get() {
+        logger.reset();
     }
 }
 

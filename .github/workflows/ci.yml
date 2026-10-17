@@ -16,7 +16,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -24,7 +24,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -59,13 +59,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -77,7 +77,7 @@ jobs:
 
       - name: Cache test data
         id: cache-test-data
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data
           key: test-data-v6
@@ -117,9 +117,9 @@ jobs:
         run: cargo test --test tess_solve_test --features image -- --nocapture
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       - name: Install Python package
         run: pip install -e .[test]
@@ -135,7 +135,7 @@ jobs:
   semver:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check semver (tetra3 crate)
         uses: obi1kenobi/cargo-semver-checks-action@v2
@@ -148,7 +148,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -164,13 +164,13 @@ jobs:
   stubtest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry and build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -182,9 +182,9 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       - name: Install package + pinned mypy
         run: |
