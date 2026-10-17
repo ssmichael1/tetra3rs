@@ -13,11 +13,11 @@ Only recent releases are listed. Older entries are in this file's git history (`
 - **Breaking:** Python 3.10 support dropped (end-of-life October 2026); wheels are built for 3.11–3.15 and `requires-python` is `>=3.11`. ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
 - Dependencies: `pyo3` 0.30.1, `numpy` (Rust) 0.30.0; `pyo3-log` replaced by a small in-tree `log` → Python `logging` bridge with the same logger names, level caching and `reset_log_cache()` behavior. ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
 - CI: `cibuildwheel` 4.3.1 and current majors of all GitHub Actions (`checkout` v7, `setup-python` v7, `cache` v6, `upload-artifact` v7, `download-artifact` v8, `upload-pages-artifact` v5, `deploy-pages` v5). ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
-- Python: the extension declares `gil_used = true`, so a source build on free-threaded Python (3.14t/3.15t) re-enables the GIL instead of running untested without it; no free-threaded wheels are published. (PR_LINK)
+- Python: the extension declares `gil_used = true`, so a source build on free-threaded Python (3.14t/3.15t) re-enables the GIL instead of running untested without it; no free-threaded wheels are published. ([#78](https://github.com/ssmichael1/tetra3rs/pull/78))
 
 ### Fixed
 
-- Python: the log-level cache is lock-free (`arc-swap`), so a `fork()` that lands while another thread is logging can no longer leave the child's cache permanently locked. (PR_LINK)
+- Python: the log-level cache is lock-free (`arc-swap`), so a `fork()` that lands while another thread is logging can no longer leave the child's cache permanently locked. ([#78](https://github.com/ssmichael1/tetra3rs/pull/78))
 
 ## 0.14.0 - 2026-10-01
 
