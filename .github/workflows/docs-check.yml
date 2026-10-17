@@ -34,14 +34,14 @@ jobs:
     name: docs build (notebooks executed)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       # Restore-only: docs.yml saves this cache on main.
       - name: Restore Cargo registry and build
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -52,14 +52,14 @@ jobs:
             ${{ runner.os }}-cargo-docs-
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       # Same data as docs.yml (the notebooks solve and calibrate real images).
       - name: Cache test data
         id: cache-test-data
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data
           key: test-data-v6
