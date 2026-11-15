@@ -20,6 +20,39 @@ impl Star {
     }
 }
 
+/// Position (radians) after `dt_years` of linear proper motion; `None`
+/// leaves the catalog position as is.
+///
+/// `pm_ra_mas` is `μα·cos δ` and `pm_dec_mas` is `μδ`, both in
+/// milliarcseconds per year (the Hipparcos and Gaia convention).
+fn propagate_proper_motion(
+    ra_rad: f64,
+    dec_rad: f64,
+    pm_ra_mas: f64,
+    pm_dec_mas: f64,
+    dt_years: Option<f64>,
+) -> (f32, f32) {
+    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * core::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
+    let Some(dt_years) = dt_years else {
+        return (ra_rad as f32, dec_rad as f32);
+    };
+    let cos_dec = dec_rad.cos();
+    // Near the poles, cos(dec) -> 0 makes the RA correction blow up.
+    // Following tetra3: skip proper motion for |dec| > ~87 degrees.
+    let (mu_ra, mu_dec) = if cos_dec.abs() > 0.05 {
+        (
+            pm_ra_mas * MAS_PER_YR_TO_RAD_PER_YR / cos_dec,
+            pm_dec_mas * MAS_PER_YR_TO_RAD_PER_YR,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    (
+        (ra_rad + mu_ra * dt_years) as f32,
+        (dec_rad + mu_dec * dt_years) as f32,
+    )
+}
+
 /// Convert a Hipparcos star to a generic Star, optionally propagating proper motion.
 ///
 /// `epoch_year`: Target year for proper motion propagation (e.g. 2025.0).
@@ -35,30 +68,13 @@ pub(crate) fn star_from_hipparcos(
 ) -> Star {
     // Hipparcos reference epoch is J1991.25
     const HIPPARCOS_EPOCH_YEAR: f64 = 1991.25;
-    // Convert milliarcseconds/year to radians/year
-    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * core::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
-
-    let (ra, dec) = if let Some(target_year) = epoch_year {
-        let dt_years = target_year - HIPPARCOS_EPOCH_YEAR;
-        let cos_dec = star.dec_rad.cos();
-
-        // Near the poles, cos(dec) -> 0 makes the RA correction blow up.
-        // Following tetra3: skip proper motion for |dec| > ~87 degrees.
-        let (mu_ra, mu_dec) = if cos_dec.abs() > 0.05 {
-            let mu_alpha_cos_delta = star.pm_ra * MAS_PER_YR_TO_RAD_PER_YR;
-            let mu_delta = star.pm_dec * MAS_PER_YR_TO_RAD_PER_YR;
-            // pm_ra from Hipparcos is mu_alpha*cos(delta), so divide by cos(dec)
-            (mu_alpha_cos_delta / cos_dec, mu_delta)
-        } else {
-            (0.0, 0.0)
-        };
-
-        let ra = star.ra_rad + mu_ra * dt_years;
-        let dec = star.dec_rad + mu_dec * dt_years;
-        (ra as f32, dec as f32)
-    } else {
-        (star.ra_rad as f32, star.dec_rad as f32)
-    };
+    let (ra, dec) = propagate_proper_motion(
+        star.ra_rad,
+        star.dec_rad,
+        star.pm_ra,
+        star.pm_dec,
+        epoch_year.map(|year| year - HIPPARCOS_EPOCH_YEAR),
+    );
 
     Star {
         id: star.hip as i64,
@@ -81,31 +97,13 @@ pub(crate) fn star_from_gaia(
 ) -> Star {
     // Gaia DR3 reference epoch is J2016.0
     const GAIA_EPOCH_YEAR: f64 = 2016.0;
-    // Gaia proper motions are in mas/yr, same conversion factor
-    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * core::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
-
-    let ra_rad = (star.ra_deg as f64).to_radians();
-    let dec_rad = (star.dec_deg as f64).to_radians();
-
-    let (ra, dec) = if let Some(target_year) = epoch_year {
-        let dt_years = target_year - GAIA_EPOCH_YEAR;
-        let cos_dec = dec_rad.cos();
-
-        let (mu_ra, mu_dec) = if cos_dec.abs() > 0.05 {
-            // Gaia pmra is mu_alpha*cos(delta), same convention as Hipparcos
-            let mu_alpha_cos_delta = star.pmra as f64 * MAS_PER_YR_TO_RAD_PER_YR;
-            let mu_delta = star.pmdec as f64 * MAS_PER_YR_TO_RAD_PER_YR;
-            (mu_alpha_cos_delta / cos_dec, mu_delta)
-        } else {
-            (0.0, 0.0)
-        };
-
-        let ra = ra_rad + mu_ra * dt_years;
-        let dec = dec_rad + mu_dec * dt_years;
-        (ra as f32, dec as f32)
-    } else {
-        (ra_rad as f32, dec_rad as f32)
-    };
+    let (ra, dec) = propagate_proper_motion(
+        (star.ra_deg as f64).to_radians(),
+        (star.dec_deg as f64).to_radians(),
+        star.pmra as f64,
+        star.pmdec as f64,
+        epoch_year.map(|year| year - GAIA_EPOCH_YEAR),
+    );
 
     Star {
         id: star.source_id,

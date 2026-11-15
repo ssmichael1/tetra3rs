@@ -132,9 +132,11 @@ pub struct CalibrateResult {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`](crate::Error::InvalidInput) when the input
-/// carries no successful solves, when no solves agree on parity, or when too
-/// few matched points remain for any distortion fit to complete — cases that
-/// would otherwise yield a fabricated (identity / infinite-RMSE) camera model.
+/// carries no successful solves, when `image_width` / `image_height` differ
+/// from the size the images were solved at, when no solves agree on parity,
+/// or when too few matched points remain for any distortion fit to complete
+/// (or the radial fit never converges) — cases that would otherwise yield a
+/// fabricated (identity / infinite-RMSE) camera model.
 pub fn calibrate_camera(
     solve_results: &[&SolveResult],
     centroids: &[&[Centroid]],
@@ -154,6 +156,25 @@ pub fn calibrate_camera(
         if !(2..=6).contains(&order) {
             return Err(crate::Error::InvalidInput(format!(
                 "calibrate_camera: polynomial order must be in [2, 6], got {order}"
+            )));
+        }
+    }
+
+    if config.max_iterations == 0 {
+        return Err(crate::Error::InvalidInput(
+            "calibrate_camera: max_iterations must be >= 1".into(),
+        ));
+    }
+    // The ideal star positions are projected with `image_width`; if it is
+    // not the width the images were solved at, every point is rescaled and
+    // the fit absorbs the error as a bogus focal length / distortion.
+    for sol in solve_results.iter().filter_map(|sr| sr.as_ref().ok()) {
+        let cam = &sol.camera_model;
+        if (cam.image_width, cam.image_height) != (image_width, image_height) {
+            return Err(crate::Error::InvalidInput(format!(
+                "calibrate_camera: image size {image_width}x{image_height} does not match \
+                 the {}x{} the images were solved at",
+                cam.image_width, cam.image_height
             )));
         }
     }
@@ -227,8 +248,7 @@ fn extract_crpix(distortion: Distortion) -> ([f64; 2], Distortion) {
             ([crpix_x, crpix_y], Distortion::Polynomial(new_poly))
         }
         // Matched explicitly (no catch-all) so a future variant carrying its
-        // own optical-center offset is caught by the compiler here, like the
-        // multi-image path's match does.
+        // own optical-center offset is caught by the compiler here.
         Distortion::None => ([0.0, 0.0], Distortion::None),
         Distortion::Radial(r) => ([0.0, 0.0], Distortion::Radial(r)),
     }
@@ -277,9 +297,11 @@ fn single_image_calibrate(
     let fit_config = DistortionFitConfig::from(config);
     let fit = fit_pooled(&points, config.model, scale, &fit_config).ok_or_else(|| {
         crate::Error::InvalidInput(format!(
-            "calibrate_camera: too few matched points ({}) for a {:?} distortion fit",
+            "calibrate_camera: a {:?} distortion fit needs at least {} matched points \
+             and a convergent fit; got {} points",
+            config.model,
+            min_points(config.model),
             points.len(),
-            config.model
         ))
     })?;
 
@@ -325,7 +347,7 @@ fn single_image_calibrate(
 
 /// Multi-image calibration: alternating per-image attitude refinement + global fit.
 ///
-/// Dispatches on `config.model` for the global-fit step (Phase 3).
+/// Dispatches on `config.model` for the global-fit step (Phase 2).
 fn multi_image_calibrate(
     solve_results: &[&SolveResult],
     centroids: &[&[Centroid]],
@@ -447,17 +469,10 @@ fn multi_image_calibrate(
     // ── Outer alternation loop ──
     for outer in 0..3 {
         // ── Phase 1: Per-image attitude refinement ──
-        // For each image, undistort centroids with current model, then refine attitude.
-        struct RefinedImage<'a> {
-            centroids: &'a [Centroid],
-            matches: Vec<(usize, usize)>, // (centroid_idx_in_full_array, catalog_star_idx)
-            crval_ra: f64,
-            crval_dec: f64,
-            cd_matrix: [[f64; 2]; 2],
-            stars: StarVectors<'a>,
-        }
-
-        let mut refined_images: Vec<RefinedImage> = Vec::new();
+        // For each image, undistort centroids with the current model, refine
+        // the attitude, and gather the refined matched points.
+        let mut all_points: Vec<MatchedPoint> = Vec::new();
+        let mut n_refined = 0usize;
 
         for img in &image_data {
             let cents = img.centroids;
@@ -531,56 +546,39 @@ fn multi_image_calibrate(
                 wcs_result.rmse_rad.to_degrees() * 3600.0,
             );
 
-            refined_images.push(RefinedImage {
-                centroids: cents,
-                matches: wcs_result.matches,
-                crval_ra: wcs_result.crval_rad[0],
-                crval_dec: wcs_result.crval_rad[1],
-                cd_matrix: wcs_result.cd_matrix,
-                stars: img.stars,
-            });
-        }
-
-        if refined_images.is_empty() {
-            debug!("  multi-cal outer {}: no refined images, aborting", outer);
-            break;
-        }
-
-        // ── Phase 2: Gather refined matched points ──
-        let mut all_points: Vec<MatchedPoint> = Vec::new();
-
-        for ref_img in &refined_images {
-            let cents = ref_img.centroids;
-
-            // Derive rotation matrix from refined WCS
-            let (rot, _fov, _parity) = wcs_refine::wcs_to_rotation(
-                &ref_img.cd_matrix,
-                ref_img.crval_ra,
-                ref_img.crval_dec,
-                image_width,
-            );
-
-            // Observed position: raw centroid (no undistortion applied).
-            // Ideal position uses the global pixel scale (consistent across images).
+            // Gather this image's refined matched points. Observed position:
+            // raw centroid (no undistortion applied). Ideal position uses the
+            // refined attitude and the global pixel scale (consistent across
+            // images).
             project_matches(
-                rot,
-                ref_img.matches.iter().copied(),
+                wcs_refine::rotation_from_theta_crval(
+                    wcs_result.theta_rad,
+                    wcs_result.crval_rad[0],
+                    wcs_result.crval_rad[1],
+                ),
+                wcs_result.matches.iter().copied(),
                 cents,
-                ref_img.stars,
+                img.stars,
                 parity_sign,
                 global_pixel_scale,
                 &mut all_points,
             );
+            n_refined += 1;
+        }
+
+        if n_refined == 0 {
+            debug!("  multi-cal outer {}: no refined images, aborting", outer);
+            break;
         }
 
         debug!(
             "  multi-cal outer {}: {} total matched points from {} images",
             outer,
             all_points.len(),
-            refined_images.len(),
+            n_refined,
         );
 
-        // ── Phase 3: Global model fit ──
+        // ── Phase 2: Global model fit ──
         // Polynomial: fit absorbs optical-center offset into the order-0
         // (constant) terms; current_crpix stays [0, 0] until extract_crpix
         // pulls it out at the end.
@@ -589,7 +587,7 @@ fn multi_image_calibrate(
         // γ is folded into the global focal length.
         let Some(fit) = fit_pooled(&all_points, config.model, scale, &fit_config) else {
             debug!(
-                "  multi-cal outer {}: too few points ({} < {}) for {:?} fit",
+                "  multi-cal outer {}: too few points ({}, need {}) or no convergence for {:?} fit",
                 outer,
                 all_points.len(),
                 min_points(config.model),
@@ -654,17 +652,10 @@ fn multi_image_calibrate(
         }
     }
 
-    // Build final CameraModel.
-    // Polynomial: extract crpix from order-0 terms via extract_crpix.
-    // Radial: crpix stays [0, 0] (the optical-axis position lives inside the
-    //         model) — no extraction needed.
-    // Match every variant explicitly (no `_ =>`) so a future variant carrying
-    // its own optical-center offset is caught by the compiler rather than
-    // silently defaulting crpix to [0, 0].
-    let (crpix, distortion) = match current_distortion {
-        Distortion::Polynomial(_) => extract_crpix(current_distortion),
-        Distortion::None | Distortion::Radial(_) => ([0.0, 0.0], current_distortion),
-    };
+    // Build final CameraModel. Polynomial: crpix comes out of the order-0
+    // terms. Radial: crpix stays [0, 0] (the optical-axis position lives
+    // inside the model).
+    let (crpix, distortion) = extract_crpix(current_distortion);
 
     // Tan-consistent with the ideal-point projection above, including any
     // linear scale corrections folded in by radial fits.

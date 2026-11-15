@@ -412,6 +412,39 @@ fn sort_and_truncate_by_mass(centroids: &mut Vec<Centroid>, max_centroids: Optio
         .collect();
 }
 
+/// Both extraction paths require a finite, positive `sigma_threshold`: zero
+/// or a negative value puts the detection threshold at or below the
+/// background, which lights noise rather than stars.
+fn check_sigma_threshold(sigma_threshold: f32) -> Result<()> {
+    if sigma_threshold.is_finite() && sigma_threshold > 0.0 {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(format!(
+            "sigma_threshold must be finite and positive, got {sigma_threshold}"
+        )))
+    }
+}
+
+/// Lower bound on a noise σ estimated from samples at or below `median`,
+/// given the largest sample strictly below it (`−∞` if there is none).
+///
+/// The gap between the two is the local quantization step of the data, and
+/// a signal quantized in steps of `q` carries at least `q/√12` of noise. On
+/// continuous data the gap is a tiny fraction of σ and the bound is inert;
+/// it only takes over when the samples tie heavily at the median (integer
+/// frames whose noise is well under one count), where the half-sample RMS
+/// underestimates σ or collapses to zero and the detection threshold would
+/// otherwise sit on the background itself.
+fn quantization_sigma_floor(median: f32, max_below: f32) -> f32 {
+    const INV_SQRT_12: f32 = 0.288_675_13;
+    let gap = median - max_below;
+    if gap.is_finite() {
+        gap * INV_SQRT_12
+    } else {
+        0.0
+    }
+}
+
 /// Validate that a raw pixel buffer matches the claimed dimensions.
 fn check_pixel_len(len: usize, width: u32, height: u32) -> Result<()> {
     // Checked multiply: on a 32-bit target `width * height` can wrap in
@@ -607,6 +640,45 @@ fn col_params(nx: usize, block: usize, x: usize) -> (usize, usize, f32) {
     (bx0, bx0 + 1, bf - bx0 as f32)
 }
 
+/// Give every block without data the mean of its already-filled 8-neighbours,
+/// growing outward from the blocks that have data until the grid is full
+/// (each pass reads only the previous pass's state, so the result does not
+/// depend on visiting order). A grid with no data at all is left as it is.
+fn fill_empty_blocks(grid: &mut [f32], mut has_data: Vec<bool>, nx: usize, ny: usize) {
+    if has_data.iter().all(|&d| d) || !has_data.iter().any(|&d| d) {
+        return;
+    }
+    loop {
+        let mut filled: Vec<(usize, f32)> = Vec::new();
+        for by in 0..ny {
+            for bx in 0..nx {
+                if has_data[by * nx + bx] {
+                    continue;
+                }
+                let (mut sum, mut n) = (0.0_f64, 0u32);
+                for y in by.saturating_sub(1)..(by + 2).min(ny) {
+                    for x in bx.saturating_sub(1)..(bx + 2).min(nx) {
+                        if has_data[y * nx + x] {
+                            sum += grid[y * nx + x] as f64;
+                            n += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    filled.push((by * nx + bx, (sum / n as f64) as f32));
+                }
+            }
+        }
+        if filled.is_empty() {
+            return;
+        }
+        for (i, v) in filled {
+            grid[i] = v;
+            has_data[i] = true;
+        }
+    }
+}
+
 impl BackgroundGrid {
     /// Build the grid. Also returns the global noise σ estimated during the
     /// same pass as the RMS of below-median subsample residuals about their
@@ -624,12 +696,13 @@ impl BackgroundGrid {
         let nx = w.div_ceil(block);
         let ny = h.div_ceil(block);
 
-        // (median, Σresidual², n_below) per block, one task per block row.
+        // (median, Σresidual², n_below, largest sample below the median) per
+        // block, one task per block row.
         // Each block row walks its sampled image rows once, left to right
         // across all its blocks (forward streaming rather than a strided
         // gather per block); each block still receives its samples in the
         // same y-then-x order, so medians and residual sums are unchanged.
-        let per_block_row: Vec<Vec<(f32, f64, usize)>> = par::map_indices(ny, |by| {
+        let per_block_row: Vec<Vec<(f32, f64, usize, f32)>> = par::map_indices(ny, |by| {
             let y0 = by * block;
             let y1 = (y0 + block).min(h);
             let cap = (block / stride + 1).pow(2);
@@ -658,27 +731,51 @@ impl BackgroundGrid {
                     let median = midpoint_f32(block_vals);
                     let mut sq = 0.0_f64;
                     let mut n = 0usize;
+                    let mut max_below = f32::NEG_INFINITY;
                     for &v in block_vals.iter() {
                         if v <= median {
                             let d = (v - median) as f64;
                             sq += d * d;
                             n += 1;
+                            if v < median {
+                                max_below = max_below.max(v);
+                            }
                         }
                     }
-                    (median, sq, n)
+                    (median, sq, n, max_below)
                 })
                 .collect()
         });
 
         let per_block = per_block_row.iter().flatten();
-        let grid: Vec<f32> = per_block.clone().map(|&(m, _, _)| m).collect();
-        let (sq_sum, n_sum) =
-            per_block.fold((0.0_f64, 0usize), |(s, n), &(_, sq, k)| (s + sq, n + k));
+        let mut grid: Vec<f32> = per_block.clone().map(|&(m, ..)| m).collect();
+        let (sq_sum, n_sum) = per_block
+            .clone()
+            .fold((0.0_f64, 0usize), |(s, n), &(_, sq, k, _)| (s + sq, n + k));
+        // Quantization floor (see `quantization_sigma_floor`): the smallest
+        // per-block bound is the data's step size, and 0 on continuous data.
+        let floor = per_block
+            .clone()
+            .map(|&(m, _, _, below)| quantization_sigma_floor(m, below))
+            .filter(|&f| f > 0.0)
+            .fold(f32::INFINITY, f32::min);
         let sigma = if n_sum > 0 {
-            (sq_sum / n_sum as f64).sqrt() as f32
+            let rms = (sq_sum / n_sum as f64).sqrt() as f32;
+            if floor.is_finite() {
+                rms.max(floor)
+            } else {
+                rms
+            }
         } else {
             0.0
         };
+
+        // A block with no finite sample has no median (its count is 0, since
+        // a block's own median always counts). Left at the 0.0 placeholder it
+        // would be blended into its neighbours as a real level and drag the
+        // surface down across the half-block band around it.
+        let has_data: Vec<bool> = per_block.map(|&(_, _, n, _)| n > 0).collect();
+        fill_empty_blocks(&mut grid, has_data, nx, ny);
 
         (
             Self {
@@ -691,6 +788,13 @@ impl BackgroundGrid {
             },
             sigma,
         )
+    }
+
+    /// Bound on the rounding error of an interpolated surface value: a few
+    /// ulps of the largest block level.
+    pub(super) fn rounding_margin(&self) -> f32 {
+        let max_abs = self.grid.iter().fold(0.0_f32, |m, g| m.max(g.abs()));
+        8.0 * f32::EPSILON * max_abs
     }
 
     pub(super) fn stride(&self) -> usize {
@@ -1161,6 +1265,15 @@ mod tests {
             ..Default::default()
         };
         assert!(extract_centroids_from_raw(&pixels, 16, 16, &nan_thresh).is_err());
+        // Zero / negative thresholds sit on or below the background (the
+        // fast path has always rejected them).
+        for sigma_threshold in [0.0, -3.0] {
+            let bad = CentroidExtractionConfig {
+                sigma_threshold,
+                ..Default::default()
+            };
+            assert!(extract_centroids_from_raw(&pixels, 16, 16, &bad).is_err());
+        }
     }
 
     #[test]
@@ -2083,5 +2196,166 @@ mod tests {
             err_y < 0.3,
             "Y error too large on gradient bg: centroid={abs_y:.4}, true={true_y}, err={err_y:.4}"
         );
+    }
+
+    /// Three well-separated stars used by the degenerate-frame regressions.
+    const TRIO: [(f32, f32, f32); 3] = [
+        (200.3, 60.7, 400.0),
+        (60.4, 200.2, 300.0),
+        (210.6, 205.5, 250.0),
+    ];
+
+    #[test]
+    fn test_noise_floor_on_quantized_frame() {
+        // Integer frame whose noise is well under one count: ~93% of pixels
+        // sit exactly on the background level 10, the rest split between 9
+        // and 11. The half-sample RMS underestimates σ on such heavily tied
+        // data (and the sigma-clip then removed the 9s, taking it to zero),
+        // which put the threshold on the background and lit the 11s.
+        let (width, height) = (256u32, 256u32);
+        let mut pixels = render_stars(width, height, 10.0, 0.0, 1.08, 1.5, &TRIO);
+        for p in pixels.iter_mut() {
+            *p = p.round();
+        }
+        let floor = 1.0 / 12.0_f32.sqrt();
+
+        let fast =
+            extract_centroids_fast(&pixels, width, height, &FastCentroidConfig::default()).unwrap();
+        assert!(
+            fast.background_sigma >= floor * 0.999,
+            "fast σ {}",
+            fast.background_sigma
+        );
+        assert_eq!(fast.centroids.len(), 3, "fast path");
+
+        for matched_filter_sigma in [Some(1.5), None] {
+            for local_bg_block_size in [Some(64), None] {
+                let config = CentroidExtractionConfig {
+                    matched_filter_sigma,
+                    local_bg_block_size,
+                    ..Default::default()
+                };
+                let r = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
+                assert!(
+                    r.background_sigma >= floor * 0.999,
+                    "σ {}",
+                    r.background_sigma
+                );
+                assert_eq!(
+                    r.centroids.len(),
+                    3,
+                    "filter {matched_filter_sigma:?}, block {local_bg_block_size:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_noise_floor_is_inert_on_continuous_data() {
+        // On unquantized data the floor must not move the estimate at all.
+        let pixels = render_stars(128, 128, 100.0, 0.0, 6.0, 1.5, &[]);
+        let config = CentroidExtractionConfig::default();
+        let (median, sigma) = estimate_background(&pixels, 128, 128, &config);
+        let mut low: Vec<f32> = pixels.iter().copied().filter(|&v| v <= median).collect();
+        let below = low.iter().copied().filter(|&v| v < median);
+        let floor = quantization_sigma_floor(median, below.fold(f32::NEG_INFINITY, f32::max));
+        assert!(floor < 1e-3 * sigma, "floor {floor} vs σ {sigma}");
+        // Uniform noise of amplitude 6 → σ = 6/√12; nothing to clip.
+        low.clear();
+        assert!((sigma - 6.0 / 12.0_f32.sqrt()).abs() < 0.05, "σ {sigma}");
+    }
+
+    #[test]
+    fn test_zero_clip_iterations_still_estimates_sigma() {
+        let pixels = render_stars(128, 128, 100.0, 0.0, 6.0, 1.5, &[]);
+        let clipped = CentroidExtractionConfig::default();
+        let unclipped = CentroidExtractionConfig {
+            sigma_clip_iterations: 0,
+            ..Default::default()
+        };
+        let (_, s_clip) = estimate_background(&pixels, 128, 128, &clipped);
+        let (_, s_none) = estimate_background(&pixels, 128, 128, &unclipped);
+        assert!(s_none > 0.0, "zero iterations must not mean zero sigma");
+        assert!(
+            (s_none - s_clip).abs() < 0.05 * s_clip,
+            "{s_none} vs {s_clip}"
+        );
+    }
+
+    #[test]
+    fn test_fast_path_constant_frame_has_no_centroids() {
+        // σ = 0 on a flat frame; the interpolated background can round an
+        // ulp below the pixel value, which used to light arbitrary patches.
+        for level in [0.1_f32, 1000.3, 65535.0] {
+            let pixels = vec![level; 512 * 512];
+            let config = FastCentroidConfig {
+                min_pixels: 1,
+                ..Default::default()
+            };
+            let r = extract_centroids_fast(&pixels, 512, 512, &config).unwrap();
+            assert_eq!(r.num_blobs_raw, 0, "level {level}");
+        }
+    }
+
+    #[test]
+    fn test_non_finite_block_does_not_poison_background() {
+        // A NaN patch covering whole background blocks (masked sensor area,
+        // padding). Its blocks have no median; treated as level 0 they pulled
+        // the interpolated background down around the patch, lighting a band
+        // of junk brighter than any star.
+        let (width, height) = (256u32, 256u32);
+        let mut pixels = render_stars(width, height, 100.0, 0.0, 6.0, 1.5, &TRIO);
+        for row in 0..128 {
+            for col in 0..128 {
+                pixels[row * 256 + col] = f32::NAN;
+            }
+        }
+
+        let fast =
+            extract_centroids_fast(&pixels, width, height, &FastCentroidConfig::default()).unwrap();
+        assert_eq!(fast.centroids.len(), 3, "fast path");
+        assert!((fast.background_mean - 100.0).abs() < 2.0);
+
+        for matched_filter_sigma in [Some(1.5), None] {
+            let config = CentroidExtractionConfig {
+                matched_filter_sigma,
+                ..Default::default()
+            };
+            let r = extract_centroids_from_raw(&pixels, width, height, &config).unwrap();
+            assert_eq!(r.centroids.len(), 3, "filter {matched_filter_sigma:?}");
+        }
+    }
+
+    #[test]
+    fn test_fill_empty_blocks() {
+        // 3×3 grid, only the centre has data: everything takes its level.
+        let mut grid = vec![0.0_f32; 9];
+        grid[4] = 7.0;
+        let mut has = vec![false; 9];
+        has[4] = true;
+        fill_empty_blocks(&mut grid, has, 3, 3);
+        assert_eq!(grid, vec![7.0; 9]);
+
+        // 1×4 row with data at the ends: the gap is filled from each side.
+        let mut grid = vec![2.0_f32, 0.0, 0.0, 6.0];
+        fill_empty_blocks(&mut grid, vec![true, false, false, true], 4, 1);
+        assert_eq!(grid, vec![2.0, 2.0, 6.0, 6.0]);
+
+        // No data anywhere: left untouched.
+        let mut grid = vec![0.0_f32; 4];
+        fill_empty_blocks(&mut grid, vec![false; 4], 2, 2);
+        assert_eq!(grid, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn test_fast_path_keeps_star_next_to_non_finite_pixel() {
+        // A −∞ pixel beside the peak made the sharpness +∞ and rejected the
+        // star; the CCL path reads such neighbours as background.
+        let (width, height) = (64u32, 64u32);
+        let mut pixels = render_stars(width, height, 10.0, 0.0, 2.0, 1.5, &[(20.0, 20.0, 800.0)]);
+        pixels[20 * 64 + 21] = f32::NEG_INFINITY;
+        let r =
+            extract_centroids_fast(&pixels, width, height, &FastCentroidConfig::default()).unwrap();
+        assert_eq!(r.centroids.len(), 1);
     }
 }

@@ -56,12 +56,8 @@ impl SolverDatabase {
         let parity_sign: f32 = if parity_flip { -1.0 } else { 1.0 };
 
         // True pinhole pixel scale (1/f) from the camera model — the single
-        // source of camera geometry. Zero means the model is the unconfigured
-        // placeholder, so a hinted solve is impossible.
-        let pixel_scale: f32 = config.pixel_scale();
-        if pixel_scale <= 0.0 {
-            return failure(SolveStatus::NoMatch, t0);
-        }
+        // source of camera geometry (validated by `SolveConfig::validate`).
+        let pixel_scale = cam.pixel_scale() as f32;
         let fov_rad = config.fov_estimate_rad();
 
         if preprocessed.len() < MIN_HINT_MATCHES {

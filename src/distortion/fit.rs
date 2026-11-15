@@ -101,10 +101,16 @@ impl PooledFit {
     }
 }
 
-/// Minimum matched points for `model` to be determined at all.
+/// Minimum matched points for a `model` fit to mean anything.
+///
+/// Each point contributes one equation per axis. The polynomial fits
+/// `num_coeffs(order)` coefficients per axis, so that many points is an
+/// *exactly* determined system: it interpolates the noise and reports an
+/// RMSE of ~0. Twice that gives the same 2:1 equations-to-unknowns margin
+/// the radial fit has at its minimum (16 equations for 8 parameters).
 pub(super) fn min_points(model: DistortionModelType) -> usize {
     match model {
-        DistortionModelType::Polynomial { order } => num_coeffs(order),
+        DistortionModelType::Polynomial { order } => 2 * num_coeffs(order),
         DistortionModelType::Radial => MIN_RADIAL_POINTS,
     }
 }
@@ -113,10 +119,11 @@ pub(super) fn min_points(model: DistortionModelType) -> usize {
 /// reporting before/after RMSE on the same final inlier set. `scale` is the
 /// polynomial normalization (typically `image_width / 2`); ignored for radial.
 ///
-/// Returns `None` when there are fewer points than [`min_points`] — below
-/// that the fit is under-determined and the LM/LS would hand back its
-/// (identity) warm start masquerading as a real fit. Shared by the
-/// single-image and multi-image calibration paths.
+/// Returns `None` when there are fewer points than [`min_points`], or when
+/// the radial Levenberg-Marquardt never converges — in both cases the
+/// fitter would otherwise hand back its (identity) warm start masquerading
+/// as a real fit. Shared by the single-image and multi-image calibration
+/// paths.
 pub(super) fn fit_pooled(
     points: &[MatchedPoint],
     model: DistortionModelType,
@@ -146,7 +153,7 @@ pub(super) fn fit_pooled(
             }
         }
         DistortionModelType::Radial => {
-            let fit = fit_radial_centered_sigma_clip(points, config);
+            let fit = fit_radial_centered_sigma_clip(points, config)?;
             // Residuals under the raw fit (including γ) — identical to the
             // rescaled model evaluated in the corrected frame.
             let residuals = intrinsics_residuals(
@@ -268,10 +275,14 @@ impl CenteredRadialFitResult {
 ///
 /// Warm-starts `(k1, k2, k3)` from a non-centered linear fit
 /// ([`fit_radial_ls`]); `γ` starts at 1 and `(cx, cy, p1, p2)` at 0.
+///
+/// Returns `None` when no LM run succeeded (too few points, a hard LM
+/// failure on the first pass, or `max_iterations == 0`): the parameters are
+/// then still the warm start, which is not a fit.
 pub(super) fn fit_radial_centered_sigma_clip(
     points: &[MatchedPoint],
     config: &DistortionFitConfig,
-) -> CenteredRadialFitResult {
+) -> Option<CenteredRadialFitResult> {
     // Normalize coordinates so the field radius is ~1. Without this the
     // Jacobian columns span ~20 orders of magnitude (the γ column is O(r),
     // the k3 column O(r⁷)) and LM hard-fails or converges to wrong local
@@ -307,6 +318,7 @@ pub(super) fn fit_radial_centered_sigma_clip(
     ]);
     let mut mask = initial_mask;
     let mut total_lm_iters = 0u32;
+    let mut lm_converged = false;
     let mut scratch: Vec<f64> = Vec::with_capacity(npoints.len());
 
     // Outer sigma-clip iterations
@@ -320,7 +332,9 @@ pub(super) fn fit_radial_centered_sigma_clip(
             Ok((new_x, iters)) => {
                 x = new_x;
                 total_lm_iters += iters;
+                lm_converged = true;
             }
+            // A later pass failing keeps the last converged parameters.
             Err(()) => break,
         }
 
@@ -350,9 +364,13 @@ pub(super) fn fit_radial_centered_sigma_clip(
         }
     }
 
+    if !lm_converged {
+        return None;
+    }
+
     // Denormalize back to pixel units.
     let n2 = norm * norm;
-    CenteredRadialFitResult {
+    Some(CenteredRadialFitResult {
         cx: x[0] * norm,
         cy: x[1] * norm,
         gamma: x[2],
@@ -363,7 +381,7 @@ pub(super) fn fit_radial_centered_sigma_clip(
         p2: x[7] / norm,
         mask,
         iterations: total_lm_iters,
-    }
+    })
 }
 
 /// Predicted observed position under the intrinsics model, for one point.
@@ -940,7 +958,7 @@ mod tests {
         let points = noisy_points(true_k1, 0.3, 11);
         let n = points.len();
         let config = DistortionFitConfig::default();
-        let fit = fit_radial_centered_sigma_clip(&points, &config);
+        let fit = fit_radial_centered_sigma_clip(&points, &config).unwrap();
         let kept = fit.mask.iter().filter(|&&m| m).count();
         assert!(
             kept as f64 >= 0.95 * n as f64,
@@ -1021,7 +1039,7 @@ mod tests {
         }
 
         let config = DistortionFitConfig::default();
-        let fit = fit_radial_centered_sigma_clip(&points, &config);
+        let fit = fit_radial_centered_sigma_clip(&points, &config).unwrap();
 
         assert!(
             (fit.gamma - true_gamma).abs() < 1e-6,
@@ -1063,7 +1081,7 @@ mod tests {
         }
 
         let config = DistortionFitConfig::default();
-        let fit = fit_radial_centered_sigma_clip(&points, &config);
+        let fit = fit_radial_centered_sigma_clip(&points, &config).unwrap();
 
         assert!(
             (fit.gamma - true_gamma).abs() < 1e-5,
@@ -1107,7 +1125,7 @@ mod tests {
         }
 
         let config = DistortionFitConfig::default();
-        let fit = fit_radial_centered_sigma_clip(&points, &config);
+        let fit = fit_radial_centered_sigma_clip(&points, &config).unwrap();
 
         let resid = intrinsics_residuals(
             &points,
@@ -1129,5 +1147,32 @@ mod tests {
             fit.cx,
             fit.cy,
         );
+    }
+
+    #[test]
+    fn test_radial_fit_without_a_converged_lm_is_none() {
+        // Zero clip iterations never runs the LM: the parameters are still
+        // the warm start (γ = 1, center 0, LS-only k), which is not a fit.
+        let points = noisy_points(-7e-9, 0.3, 7);
+        let config = DistortionFitConfig {
+            max_iterations: 0,
+            ..Default::default()
+        };
+        assert!(fit_radial_centered_sigma_clip(&points, &config).is_none());
+        assert!(fit_pooled(&points, DistortionModelType::Radial, 1000.0, &config).is_none());
+    }
+
+    #[test]
+    fn test_polynomial_fit_needs_redundant_points() {
+        // num_coeffs(order) points determine the polynomial exactly: the fit
+        // interpolates the noise and reports RMSE ≈ 0.
+        let points = noisy_points(-7e-9, 0.3, 7);
+        let model = DistortionModelType::Polynomial { order: 3 };
+        let config = DistortionFitConfig::default();
+        let n = num_coeffs(3);
+        assert!(points.len() >= 2 * n);
+        assert!(fit_pooled(&points[..n], model, 1000.0, &config).is_none());
+        assert!(fit_pooled(&points[..2 * n - 1], model, 1000.0, &config).is_none());
+        assert!(fit_pooled(&points[..2 * n], model, 1000.0, &config).is_some());
     }
 }

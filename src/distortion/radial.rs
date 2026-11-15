@@ -153,41 +153,48 @@ impl RadialDistortion {
     ///
     /// Given observed (distorted) pixel coordinates, returns the ideal
     /// (pinhole) coordinates. Uses 2D Newton iteration on the forward model.
+    ///
+    /// Returns `(NaN, NaN)` when the iteration does not converge — the point
+    /// lies outside the region where the model is invertible (e.g. beyond the
+    /// radius at which strong barrel distortion folds back on itself), so no
+    /// ideal position maps to it. The solver drops non-finite centroids.
     pub fn undistort(&self, x_d: f64, y_d: f64) -> (f64, f64) {
         let (x_d, y_d) = (x_d - self.center[0], y_d - self.center[1]);
         // Initial guess: assume no distortion.
         let mut x = x_d;
         let mut y = y_d;
-        for _ in 0..20 {
+        // One more evaluation than Newton steps, so the last step's result
+        // is checked too.
+        for _ in 0..=20 {
             // Forward distort the current ideal estimate (with Jacobian).
             let e = brown_conrady_forward(self.k1, self.k2, self.k3, self.p1, self.p2, x, y);
 
             // Residual (forward(x, y) − x_d).
             let rx = e.fx - x_d;
             let ry = e.fy - y_d;
-            if rx * rx + ry * ry < 1e-20 {
-                break;
+            if rx * rx + ry * ry < UNDISTORT_TOL_PX * UNDISTORT_TOL_PX {
+                return (x + self.center[0], y + self.center[1]);
             }
 
             let (j11, j12, j21, j22) = (e.j11, e.j12, e.j12, e.j22);
             let det = j11 * j22 - j12 * j21;
-            if det.abs() < 1e-15 {
+            if !det.is_finite() || det.abs() < 1e-15 {
                 break;
             }
             let inv_det = 1.0 / det;
             // Newton step: (x, y) -= J⁻¹ · r
-            let dx_step = inv_det * (j22 * rx - j12 * ry);
-            let dy_step = inv_det * (-j21 * rx + j11 * ry);
-            x -= dx_step;
-            y -= dy_step;
-
-            if dx_step.abs() + dy_step.abs() < 1e-12 {
-                break;
-            }
+            x -= inv_det * (j22 * rx - j12 * ry);
+            y -= inv_det * (-j21 * rx + j11 * ry);
         }
-        (x + self.center[0], y + self.center[1])
+        (f64::NAN, f64::NAN)
     }
 }
+
+/// Residual (pixels) at which the inverse-distortion Newton iteration stops.
+/// Far below any centroiding error, and far above the f64 rounding of the
+/// forward model at sensor-scale coordinates, so a convergent iteration
+/// always reaches it.
+const UNDISTORT_TOL_PX: f64 = 1e-10;
 
 /// One evaluation of the Brown-Conrady forward model at optical-axis-centered
 /// coordinates: the distorted position, the 2×2 Jacobian of the forward map
@@ -315,6 +322,28 @@ mod tests {
                 yu
             );
         }
+    }
+
+    #[test]
+    fn test_undistort_outside_invertible_region_is_nan() {
+        // Strong barrel distortion folds over at ideal r ≈ 1291 px, where the
+        // distorted radius peaks at ≈ 861 px: no ideal point maps beyond it.
+        // Newton used to return whatever iterate it ended on (the wrong
+        // quadrant for this corner).
+        let d = RadialDistortion::new(-2e-7, 0.0, 0.0);
+        for &(xd, yd) in &[(1024.0, 1024.0), (900.0, 0.0)] {
+            let (xu, yu) = d.undistort(xd, yd);
+            assert!(xu.is_nan() && yu.is_nan(), "({xd}, {yd}) → ({xu}, {yu})");
+        }
+        // Inside the fold the inverse is still exact.
+        for &(x, y) in &[(100.0, 200.0), (600.0, -300.0), (850.0, 850.0)] {
+            let (xd, yd) = d.distort(x, y);
+            let (xu, yu) = d.undistort(xd, yd);
+            assert!((xu - x).abs() < 1e-6 && (yu - y).abs() < 1e-6);
+        }
+        // Non-finite input stays non-finite rather than panicking.
+        let (xu, yu) = d.undistort(f64::NAN, 0.0);
+        assert!(xu.is_nan() && yu.is_nan());
     }
 
     #[test]

@@ -178,11 +178,9 @@ impl<'a> PatternSearch<'a> {
         // True pinhole pixel scale (rad/px): ps = 1/f where f = (W/2) / tan(fov/2).
         // Derived from the sweep's FOV value, not the camera model's focal
         // length — each sweep iteration tries a different scale.
-        let pixel_scale = if config.image_width() > 0 && fov_estimate > 0.0 {
-            pixel_scale_from_fov(config.image_width(), fov_estimate as f64) as f32
-        } else {
-            0.0
-        };
+        // (`SolveConfig::validate` guarantees a non-zero width, and every
+        // sweep value is positive.)
+        let pixel_scale = pixel_scale_from_fov(config.image_width(), fov_estimate as f64) as f32;
 
         let num_centroids = sorted_indices.len();
 
@@ -526,7 +524,7 @@ impl<'a> PatternSearch<'a> {
                         // Derive the parity-flipped rotation WITHOUT a second SVD.
                         //
                         // Flipping the x-component of every image vector is
-                        // img' = D·img with D = diag(-1, 1, 1). `find_rotation_matrix`
+                        // img' = D·img with D = diag(-1, 1, 1). `wahba_rotation`
                         // builds H = Σ imgᵢ · catᵢᵀ, decomposes H = U·S·Vᵀ, and
                         // returns R = U·Vᵀ. With flipped image vectors
                         //   H' = Σ (D·imgᵢ)·catᵢᵀ = D·H = (D·U)·S·Vᵀ,
