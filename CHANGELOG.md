@@ -19,6 +19,14 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 - Python: the log-level cache is lock-free (`arc-swap`), so a `fork()` that lands while another thread is logging can no longer leave the child's cache permanently locked. ([#78](https://github.com/ssmichael1/tetra3rs/pull/78))
 
+## 0.14.1 - 2026-11-15
+
+**Upgrading:** regenerate any database built from the bundled catalog (`gaia-catalog` ≤ 0.1.2) — its star positions lack proper motion; upgrading the package does not fix databases already saved.
+
+### Fixed
+
+- Python: require `gaia-catalog>=0.1.3`. Earlier releases of the bundled catalog carried BP/RP magnitudes in the proper-motion fields, so stars stayed at their J2016.0 positions (3% of stars off by more than 1″ at epoch 2025, up to 93″); 0.1.3 has the real Gaia DR3 / Hipparcos proper motions. The test-data catalog is corrected too, with a regression test. Closes #80. ([#82](https://github.com/ssmichael1/tetra3rs/pull/82))
+
 ## 0.14.0 - 2026-10-01
 
 **Upgrading from 0.13:** databases saved by this version (files and Python pickles) use format version 2, which 0.13 cannot read; 0.13 and earlier databases still load here, with a deprecation warning — re-save them with `save_to_file` to upgrade (format 1 stops loading at the next format change).
