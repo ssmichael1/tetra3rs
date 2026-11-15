@@ -71,7 +71,7 @@ jobs:
       # unwanted auto extras (win32, i686, musllinux) are skipped in
       # pyproject.toml.
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest]
         python: [cp311, cp312, cp313, cp314, cp315]
     steps:
       - uses: actions/checkout@v7
