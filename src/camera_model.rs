@@ -401,7 +401,9 @@ mod tests {
             image_height: 1536,
             crpix: [1.5, -2.3],
             parity_flip: true,
-            distortion: Distortion::Radial(RadialDistortion::new(-0.1, 0.05, 0.0)),
+            // Pixel-unit coefficients (k1 in px⁻²): a model that is actually
+            // invertible at the probe point below.
+            distortion: Distortion::Radial(RadialDistortion::new(-7e-9, 2e-15, 0.0)),
         };
 
         let tmp = std::env::temp_dir().join("test_camera_model.bin");
@@ -417,6 +419,7 @@ mod tests {
         // Verify distortion roundtrip by checking pixel_to_tanplane
         let (xi1, eta1) = cam.pixel_to_tanplane(100.0, 200.0);
         let (xi2, eta2) = loaded.pixel_to_tanplane(100.0, 200.0);
+        assert!(xi1.is_finite() && eta1.is_finite());
         assert!((xi1 - xi2).abs() < 1e-15);
         assert!((eta1 - eta2).abs() < 1e-15);
 

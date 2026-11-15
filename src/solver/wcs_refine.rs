@@ -1050,6 +1050,10 @@ fn camera_rows_f64(theta: f64, crval_ra: f64, crval_dec: f64) -> [[f64; 3]; 3] {
 ///
 /// # Returns
 /// `(rotation_matrix_f32, fov_rad_f32, parity_flip)`
+///
+/// Retained for tests (it cross-checks the parity conventions); production
+/// code builds the rotation with [`rotation_from_theta_crval`].
+#[cfg(test)]
 pub fn wcs_to_rotation(
     cd: &[[f64; 2]; 2],
     crval_ra: f64,

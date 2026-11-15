@@ -177,12 +177,27 @@ impl SolverDatabase {
         let epoch_pm_year = config.epoch_proper_motion_year;
         info!("Proper motion epoch: {:?}", epoch_pm_year);
 
-        // Sort by brightness (ascending magnitude = brightest first)
-        stars.sort_by(|a, b| {
-            a.mag
-                .partial_cmp(&b.mag)
-                .unwrap_or(core::cmp::Ordering::Equal)
+        // Drop stars the database cannot represent: a non-finite position
+        // has no unit vector or spatial-index cell, and a non-finite
+        // magnitude has no place in the brightness order (index order *is*
+        // brightness order). The bundled loaders already filter these; this
+        // is the gate for caller-built lists.
+        let num_input = stars.len();
+        stars.retain(|s| {
+            s.ra_rad.is_finite()
+                && s.dec_rad.is_finite()
+                && s.dec_rad.abs() <= core::f32::consts::FRAC_PI_2 + 1e-4
+                && s.mag.is_finite()
         });
+        if stars.len() < num_input {
+            warn!(
+                "Dropped {} star(s) with a non-finite or out-of-range position or magnitude",
+                num_input - stars.len()
+            );
+        }
+
+        // Sort by brightness (ascending magnitude = brightest first)
+        stars.sort_by(|a, b| a.mag.total_cmp(&b.mag));
 
         // Determine magnitude cutoff
         let star_max_magnitude = config.star_max_magnitude.unwrap_or_else(|| {
@@ -931,5 +946,41 @@ mod header_tests {
         // Legacy path (no magic): also an error, never a panic.
         assert!(SolverDatabase::from_bytes(&[0xFF; 40]).is_err());
         assert!(SolverDatabase::from_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn generation_drops_unrepresentable_stars() {
+        // Caller-built star list with NaN magnitudes / positions mixed in:
+        // the brightness sort used a non-total comparator on them, and the
+        // survivors carried NaN unit vectors into the database.
+        let mut stars = Vec::new();
+        for i in 0..300u32 {
+            let t = i as f32;
+            let mut star = Star {
+                id: i as i64,
+                ra_rad: (t * 0.618).rem_euclid(core::f32::consts::TAU),
+                dec_rad: ((t * 0.37).sin()) * 1.4,
+                mag: 2.0 + (t * 0.11).rem_euclid(4.0),
+            };
+            match i % 10 {
+                3 => star.mag = f32::NAN,
+                6 => star.ra_rad = f32::INFINITY,
+                9 => star.dec_rad = 10.0,
+                _ => {}
+            }
+            stars.push(star);
+        }
+        let config = GenerateDatabaseConfig {
+            star_max_magnitude: Some(10.0),
+            lattice_field_oversampling: 2,
+            patterns_per_lattice_field: 5,
+            ..Default::default()
+        };
+        let db = SolverDatabase::generate_from_star_list(stars, &config, 2000.0).unwrap();
+        assert_eq!(db.star_catalog.len(), 300 - 3 * 30);
+        assert!(db.star_vectors.iter().flatten().all(|c| c.is_finite()));
+        let mags: Vec<f32> = db.star_catalog.stars().iter().map(|s| s.mag).collect();
+        assert!(mags.windows(2).all(|w| w[0] <= w[1]), "brightness order");
+        db.validate().unwrap();
     }
 }

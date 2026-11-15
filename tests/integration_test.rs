@@ -445,6 +445,18 @@ fn test_calibrate_tolerates_nan_centroid() {
     let clean = tetra3::calibrate_camera(&[&sr], &[&centroids], &db, w, h, &cal_config)
         .expect("clean calibration");
 
+    // An image size other than the one the image was solved at rescales
+    // every ideal point; it must be an error, not a silently wrong model.
+    assert!(
+        tetra3::calibrate_camera(&[&sr], &[&centroids], &db, w / 2, h, &cal_config).is_err(),
+        "mismatched image size must be rejected"
+    );
+    let no_iters = tetra3::CalibrateConfig {
+        max_iterations: 0,
+        ..cal_config.clone()
+    };
+    assert!(tetra3::calibrate_camera(&[&sr], &[&centroids], &db, w, h, &no_iters).is_err());
+
     let mut poisoned = centroids.clone();
     poisoned[solution.matched_centroid_indices[0]].x = f32::NAN;
     let dirty = tetra3::calibrate_camera(&[&sr], &[&poisoned], &db, w, h, &cal_config)

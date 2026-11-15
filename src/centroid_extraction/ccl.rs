@@ -11,8 +11,9 @@ use numeris::imageproc::{gaussian_blur_into, BorderMode};
 use numeris::DynMatrix;
 
 use super::{
-    elongation_from_cov, finish_region, median_f32, par, runs, sort_and_truncate_by_mass,
-    BackgroundGrid, CentroidExtractionConfig, CentroidExtractionResult, DeblendMode,
+    check_sigma_threshold, elongation_from_cov, finish_region, median_f32, par,
+    quantization_sigma_floor, runs, sort_and_truncate_by_mass, BackgroundGrid,
+    CentroidExtractionConfig, CentroidExtractionResult, DeblendMode,
 };
 use crate::centroid::Centroid;
 use crate::error::{Error, Result};
@@ -89,12 +90,7 @@ pub(super) fn extract_from_gray(
             "local_bg_block_size must be >= 1 (or None)".into(),
         ));
     }
-    if !config.sigma_threshold.is_finite() {
-        return Err(Error::InvalidInput(format!(
-            "sigma_threshold must be finite, got {}",
-            config.sigma_threshold
-        )));
-    }
+    check_sigma_threshold(config.sigma_threshold)?;
 
     // The Gaussian kernel spans 2·⌈3σ⌉+1 taps, so an absurd σ is a
     // multi-gigabyte allocation / effective hang, not a blur. 64 px covers
@@ -451,14 +447,24 @@ fn estimate_background_finite(
     // clip that produces the survivors accumulates it as it goes (`retain`
     // visits the elements once, in order), so each pass after the first is
     // one sweep over the data instead of a sum and then a clip.
-    let mut sigma = 0.0_f32;
-    let mut var_sum: Option<f64> = None;
-    for _ in 0..config.sigma_clip_iterations {
-        if low_half.is_empty() {
-            break;
-        }
-        let sum = var_sum.unwrap_or_else(|| low_half.iter().map(|&v| sq(v)).sum());
-        sigma = (sum / low_half.len() as f64).sqrt() as f32;
+    //
+    // The unclipped estimate is taken first, so `sigma_clip_iterations: 0`
+    // means "no clipping" rather than "no estimate" (σ = 0 puts the
+    // detection threshold on the background itself). Each further iteration
+    // is one clip + re-estimate.
+    if low_half.is_empty() {
+        return (median, 0.0);
+    }
+    // Quantization floor, from the samples before any clipping (see
+    // `quantization_sigma_floor`): on coarsely quantized data most of the
+    // lower half *ties* at the median, the RMS collapses toward zero, and the
+    // first clip then removes the few one-step-down samples that carried all
+    // of the variance.
+    let below = low_half.iter().copied().filter(|&v| v < median);
+    let floor = quantization_sigma_floor(median, below.fold(f32::NEG_INFINITY, f32::max));
+    let rms = |sum: f64, n: usize| (sum / n as f64).sqrt() as f32;
+    let mut sigma = rms(low_half.iter().map(|&v| sq(v)).sum(), low_half.len());
+    for _ in 1..config.sigma_clip_iterations {
         if sigma < 1e-10 {
             break;
         }
@@ -472,13 +478,13 @@ fn estimate_background_finite(
             }
             keep
         });
-        if low_half.len() == before {
-            break; // converged
+        if low_half.len() == before || low_half.is_empty() {
+            break; // converged (or a degenerate clip factor removed everything)
         }
-        var_sum = Some(kept_sum);
+        sigma = rms(kept_sum, low_half.len());
     }
 
-    (median, sigma)
+    (median, sigma.max(floor))
 }
 
 /// Compute intensity-weighted centroids for each connected region.

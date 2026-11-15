@@ -93,8 +93,10 @@ pub fn parse_gaia_binary(bytes: &[u8]) -> Result<Vec<GaiaStar>> {
         // spatial-index bin (or drop it from every magnitude cut), and a
         // non-finite proper motion poisons epoch propagation — all with no
         // diagnostic. Skip such records and report the count instead.
-        if !(ra.is_finite()
-            && dec.is_finite()
+        // The range check also keeps a finite-but-absurd f64 from
+        // overflowing to infinity in the f32 conversion below.
+        if !((0.0..=360.0).contains(&ra)
+            && (-90.0..=90.0).contains(&dec)
             && mag.is_finite()
             && pmra.is_finite()
             && pmdec.is_finite())
@@ -113,8 +115,47 @@ pub fn parse_gaia_binary(bytes: &[u8]) -> Result<Vec<GaiaStar>> {
         });
     }
     if non_finite > 0 {
-        log::warn!("Gaia binary: skipped {non_finite} record(s) with non-finite ra/dec/mag");
+        log::warn!("Gaia binary: skipped {non_finite} record(s) with non-finite or out-of-range ra/dec/mag");
     }
 
     Ok(stars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog(records: &[(f64, f64, f32)]) -> Vec<u8> {
+        let mut bytes = b"GDR3".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
+        for (i, &(ra, dec, mag)) in records.iter().enumerate() {
+            bytes.extend_from_slice(&(i as i64).to_le_bytes());
+            bytes.extend_from_slice(&ra.to_le_bytes());
+            bytes.extend_from_slice(&dec.to_le_bytes());
+            bytes.extend_from_slice(&mag.to_le_bytes());
+            bytes.extend_from_slice(&0.0f32.to_le_bytes());
+            bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn non_finite_and_out_of_range_records_are_skipped() {
+        let stars = parse_gaia_binary(&catalog(&[
+            (10.0, 20.0, 5.0),
+            (f64::NAN, 20.0, 5.0),
+            // Finite in f64, infinite once narrowed to f32.
+            (1e300, 20.0, 5.0),
+            (10.0, 1000.0, 5.0),
+            (10.0, 20.0, f32::INFINITY),
+            (359.5, -89.5, 6.0),
+        ]))
+        .unwrap();
+        let ids: Vec<i64> = stars.iter().map(|s| s.source_id).collect();
+        assert_eq!(ids, vec![0, 5]);
+        assert!(stars
+            .iter()
+            .all(|s| s.ra_deg.is_finite() && s.dec_deg.is_finite()));
+    }
 }
