@@ -4,7 +4,8 @@
 //! distance, then assign greedily so each point and each prediction is used
 //! at most once.
 
-use std::ops::{Add, Mul, Sub};
+use crate::prelude::*;
+use core::ops::{Add, Mul, Sub};
 
 /// Coordinate scalar for the matcher — implemented for `f32` and `f64` so each
 /// caller keeps its native precision (and bit-identical results).
@@ -41,7 +42,7 @@ impl<F> MatchScratch<F> {
     /// avoid the copy `.to_vec()` on the returned slice would incur, while
     /// still reusing the (larger) candidate/flag buffers across calls.
     pub(super) fn take_matches(&mut self) -> Vec<(usize, usize)> {
-        std::mem::take(&mut self.matches)
+        core::mem::take(&mut self.matches)
     }
 
     /// Squared distances of the last computed match set, aligned with the
@@ -84,7 +85,7 @@ pub(super) fn greedy_unique_matches<'a, F: MatchCoord>(
     }
 
     // Sort by distance (closest first)
-    candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
 
     // Greedy unique 1-to-1 assignment
     let used_point = &mut scratch.used_point;

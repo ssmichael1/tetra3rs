@@ -9,8 +9,10 @@
 //! Uses fixed-size `[u32; K]` arrays instead of `Vec<u32>` to avoid heap
 //! allocations in the hot inner loop.
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use crate::collections::HashSet;
+use crate::prelude::*;
+use alloc::collections::BinaryHeap;
+use core::cmp::Reverse;
 
 /// Iterator that yields k-combinations from `items` in order of increasing
 /// sum of positional indices (i.e. brightest-first when items are brightness-sorted).
@@ -36,7 +38,7 @@ impl<const K: usize> BreadthFirstCombinations<K> {
         };
         if n >= K && K > 0 {
             // Seed with the first K indices: [0, 1, ..., K-1]
-            let initial: [u32; K] = std::array::from_fn(|i| i as u32);
+            let initial: [u32; K] = core::array::from_fn(|i| i as u32);
             let sum: usize = initial.iter().map(|&x| x as usize).sum();
             bfc.seen.insert(initial);
             bfc.heap.push(Reverse((sum, initial)));
@@ -75,7 +77,7 @@ impl<const K: usize> Iterator for BreadthFirstCombinations<K> {
         }
 
         // Map positional indices to actual items.
-        Some(std::array::from_fn(|j| self.items[combo[j] as usize]))
+        Some(core::array::from_fn(|j| self.items[combo[j] as usize]))
     }
 }
 

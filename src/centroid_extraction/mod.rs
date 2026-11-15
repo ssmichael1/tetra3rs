@@ -46,6 +46,7 @@
 
 use crate::centroid::Centroid;
 use crate::error::{Error, Result};
+use crate::prelude::*;
 use image::GenericImageView;
 
 mod ccl;

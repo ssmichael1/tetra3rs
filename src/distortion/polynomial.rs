@@ -43,6 +43,7 @@
 //! single fit can absorb optical-center offset and residual scale/rotation
 //! from the matched-points data.
 
+use crate::prelude::*;
 /// SIP-like polynomial distortion model.
 ///
 /// Forward distortion (ideal → distorted) is the explicit polynomial.

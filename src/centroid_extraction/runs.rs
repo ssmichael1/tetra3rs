@@ -17,7 +17,8 @@
 //! The row packers ([`pack_lit_row`], [`pack_above_row`]) build that bit mask
 //! one image row at a time with a vectorizable compare and a byte→bit fold.
 
-use std::ops::Range;
+use crate::prelude::*;
+use core::ops::Range;
 
 use super::par;
 

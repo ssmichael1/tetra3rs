@@ -15,8 +15,9 @@
 //!
 //! Slot `i`'s entry is packed entry `rank(i)`.
 
-use std::ops::Deref;
-use std::sync::Arc;
+use crate::prelude::*;
+use alloc::sync::Arc;
+use core::ops::Deref;
 
 use super::PatternEntry;
 
@@ -66,8 +67,8 @@ impl PartialEq for PackedStore {
     }
 }
 
-impl std::fmt::Debug for PackedStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for PackedStore {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let kind = match self {
             Self::Owned(_) => "owned",
             Self::Shared { .. } => "shared",
@@ -241,7 +242,7 @@ impl PatternCatalog {
         words
             .enumerate()
             .flat_map(|(w, mut m)| {
-                std::iter::from_fn(move || {
+                core::iter::from_fn(move || {
                     (m != 0).then(|| {
                         let i = w * 64 + m.trailing_zeros() as usize;
                         m &= m - 1;

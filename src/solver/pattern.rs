@@ -8,6 +8,8 @@
 //! The pattern key is hashed into a compact table using open addressing with
 //! quadratic probing (following tetra3's default for in-memory databases).
 
+#[cfg(not(feature = "std"))]
+use crate::prelude::*;
 /// Number of stars in each pattern.
 pub const PATTERN_SIZE: usize = 4;
 /// Number of pairwise edges: C(4,2) = 6.
@@ -48,7 +50,7 @@ pub fn compute_sorted_edge_angles(vectors: &[[f32; 3]; PATTERN_SIZE]) -> [f32; N
         }
     }
     // Sort ascending (smallest edge first, largest last).
-    edges.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    edges.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
     edges
 }
 
@@ -126,7 +128,7 @@ pub fn sort_pattern_by_centroid_distance<T: Copy>(
         let vb = vec_of(b);
         let da = (va[0] - cx).powi(2) + (va[1] - cy).powi(2) + (va[2] - cz).powi(2);
         let db = (vb[0] - cx).powi(2) + (vb[1] - cy).powi(2) + (vb[2] - cz).powi(2);
-        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal)
     });
 }
 

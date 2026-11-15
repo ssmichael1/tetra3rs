@@ -24,11 +24,16 @@ exclude = ["data/", "download_hip2.sh"]
 name = "tetra3"
 
 [dependencies]
-postcard = { version = "1.0", features = ["alloc"] }
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "2"
-log = "0.4"
-numeris = { version = "0.6", features = ["std", "serde", "optim"] }
+# Every dependency is pulled in with `default-features = false`; the `std`
+# feature below re-enables their std support. `alloc` is always required.
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+thiserror = { version = "2", default-features = false }
+log = { version = "0.4", default-features = false }
+numeris = { version = "0.6", default-features = false, features = ["alloc", "serde", "optim"] }
+# `core` has no `sin`/`sqrt`/…; on `no_std` builds the `Float` trait (backed by
+# `libm`) supplies them. See `crate::prelude`.
+num-traits = { version = "0.2", default-features = false }
 image = { version = "0.25", optional = true, default-features = false }
 rayon = { version = "1", optional = true }
 
@@ -36,22 +41,41 @@ rayon = { version = "1", optional = true }
 # web-time provides a drop-in `Instant` backed by `performance.now()`. Only
 # pulled in on that target — see src/solver/clock.rs.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-web-time = "1"
+web-time = { version = "1", optional = true }
 
 [features]
-default = []
-hipparcos = []
+default = ["std"]
+# Standard library: file I/O (`load_from_file` / `save_to_file` /
+# `generate_from_gaia`), the monotonic clock behind `solve_timeout_ms` and
+# `solve_time_ms`, and `std::io::Error` in `Error::Io`. Disable for `no_std`
+# targets (`default-features = false, features = ["libm"]`); `alloc` is still
+# required. See the "no_std" section of the crate docs.
+std = [
+    "numeris/std",
+    "num-traits/std",
+    "serde/std",
+    "thiserror/std",
+    "log/std",
+    "postcard/use-std",
+    "dep:web-time",
+]
+# Software float math for `no_std` builds (`core` lacks `sin`, `sqrt`, …).
+# Required when `std` is off; harmless (unused) when `std` is on.
+libm = ["num-traits/libm", "numeris/libm"]
+# Hipparcos text-catalog support (file-based; implies `std`).
+hipparcos = ["std"]
 # Leaf-level solver timing instrumentation (thread-local accumulators).
 # Compiles to nothing when disabled. See src/solver/profiling.rs.
-profile = []
+profile = ["std"]
 # Centroid extraction also pulls in numeris's imageproc (used for CCL).
-image = ["dep:image", "numeris/imageproc"]
+# The `image` crate needs `std`.
+image = ["std", "dep:image", "numeris/imageproc"]
 # Multi-threaded centroid extraction via rayon. Parallelizes the dominant
 # local-background stage (independent block medians + interpolation rows) and
 # the full-image element-wise maps; also enables numeris's rayon imageproc
 # paths (e.g. the matched-filter Gaussian blur). Bit-identical results to the
 # sequential build. Combine with `image`: `--features image,parallel`.
-parallel = ["dep:rayon", "numeris/rayon"]
+parallel = ["std", "dep:rayon", "numeris/rayon"]
 
 [profile.test]
 opt-level = 3

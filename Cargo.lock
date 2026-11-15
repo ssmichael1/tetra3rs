@@ -1105,6 +1105,7 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "num-traits",
  "numeris",
  "postcard",
  "rand",

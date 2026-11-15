@@ -27,6 +27,16 @@ cargo test --test tess_solve_test --features image -- --nocapture
 # ~1.45x dense on 8 cores. Combine with `image`.
 cargo build --release --features image,parallel
 
+# no_std: the lib must keep building without `std` (bare-metal star trackers).
+# Lint on a bare-metal target — on the host, std leaks in transitively through
+# dev-deps and makes `f32::sin` etc. resolve anyway, hiding mistakes.
+rustup target add thumbv7em-none-eabi   # once
+cargo clippy --lib --no-default-features --features libm --target thumbv7em-none-eabi -- -D warnings
+# Integration tests with the lib's `std` feature off: covers the no_std code
+# paths (clock stub, byte loaders, B-tree collections) but NOT libm numerics
+# (see above — float calls still hit std on the host).
+cargo test --no-default-features --features libm --test integration_test
+
 # Python (maturin via setuptools-rust)
 pip install -e .
 
@@ -83,6 +93,7 @@ Public re-exports in `src/lib.rs` — `CameraModel`, `SolveConfig`, `SolveResult
 
 ## Conventions
 
+- **`no_std`**: `std` is a default feature. Write `core::` / `alloc::` paths, not `std::`; `use crate::prelude::*;` supplies `Vec` / `String` / `format!` / `vec!` and (no_std only) `num_traits::Float` for `sin` / `sqrt` / …; `crate::collections::{HashMap, HashSet}` are B-trees without `std`; `Instant` comes from `solver::clock`; anything touching files, paths or `std::io` goes behind `#[cfg(feature = "std")]`, and a feature that needs it lists `"std"`
 - **Camera frame**: +X right, +Y down, +Z boresight (right-handed)
 - **Centroids**: pixel coordinates, **origin at image center** (not top-left)
 - **Float precision**: f32 throughout; f64 only in final SVD step (insufficient accuracy at f32)

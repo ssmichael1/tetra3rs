@@ -7,7 +7,8 @@
 //!
 //! The fitting is iterative with sigma-clipping to reject mismatched stars.
 
-use std::collections::HashMap;
+use crate::collections::HashMap;
+use crate::prelude::*;
 
 use log::debug;
 use numeris::optim::{least_squares_lm_dyn, LmSettings};

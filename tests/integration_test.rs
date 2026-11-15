@@ -14,6 +14,21 @@ fn gaia_catalog_path() -> String {
     test_data::ensure_test_file("data/gaia_merged.bin")
 }
 
+/// Build the test database. With the lib's `std` feature off (the `libm`
+/// configuration, run on the host to exercise the no_std code paths) the file
+/// loader is absent, so read the catalog here.
+fn generate_db(path: &str, config: &GenerateDatabaseConfig) -> tetra3::Result<SolverDatabase> {
+    #[cfg(feature = "std")]
+    {
+        SolverDatabase::generate_from_gaia(path, config)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let bytes = std::fs::read(path).expect("read gaia catalog");
+        SolverDatabase::generate_from_gaia_bytes(&bytes, config)
+    }
+}
+
 /// Build a small test database (wide FOV for speed) and solve a synthetic image.
 #[test]
 fn test_generate_and_solve() {
@@ -37,8 +52,7 @@ fn test_generate_and_solve() {
     };
 
     let catalog_path = gaia_catalog_path();
-    let db = SolverDatabase::generate_from_gaia(&catalog_path, &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&catalog_path, &config).expect("Failed to generate database");
 
     println!(
         "Database: {} stars, {} patterns, table size {}",
@@ -225,8 +239,7 @@ fn test_matched_indices_survive_dropped_centroid() {
         epoch_proper_motion_year: Some(2025.0),
         catalog_nside: 8,
     };
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     // Same Orion's-belt pointing as `test_generate_and_solve`.
     let target_ra = 83.0_f32.to_radians();
@@ -354,8 +367,7 @@ fn small_test_db() -> SolverDatabase {
         epoch_proper_motion_year: Some(2025.0),
         catalog_nside: 8,
     };
-    SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database")
+    generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database")
 }
 
 /// Noiseless synthetic centroids for the Orion's-belt pointing used by
@@ -536,8 +548,7 @@ fn test_parity_flipped_solve() {
         epoch_proper_motion_year: Some(2025.0),
         catalog_nside: 8,
     };
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     // A non-trivial roll matters: the broken branch also depended on θ.
     let ra = 83.0_f32.to_radians();
@@ -769,8 +780,7 @@ fn test_statistical_1000_random_orientations() {
         catalog_nside: 8,
     };
 
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     println!("\n══════════════════════════════════════════════════════════════");
     println!(
@@ -1019,6 +1029,8 @@ fn test_statistical_1000_random_orientations() {
     );
 }
 
+// File API (`save_to_file` / `load_from_file`) exists only with `std`.
+#[cfg(feature = "std")]
 #[test]
 fn test_save_and_load_database() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -1038,8 +1050,7 @@ fn test_save_and_load_database() {
         catalog_nside: 16,
     };
 
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     // Save to a temporary file
     let tmp_path = "temp_db.bin";
@@ -1171,8 +1182,7 @@ fn test_statistical_1000_noisy_centroids() {
         catalog_nside: 16,
     };
 
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     println!("\n══════════════════════════════════════════════════════════════");
     println!(
@@ -1490,8 +1500,7 @@ fn test_tracking_with_attitude_hint() {
         catalog_nside: 8,
     };
 
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     let fov_rad = 15.0_f32.to_radians();
     let half_fov = fov_rad / 2.0;
@@ -1656,6 +1665,7 @@ fn test_tracking_with_attitude_hint() {
 /// ```sh
 /// cargo test --release --test integration_test test_multiscale_database -- --ignored --nocapture
 /// ```
+#[cfg(feature = "std")] // uses save_to_file / load_from_file
 #[test]
 #[ignore = "slow: generates a multi-GB pattern catalog; run with --ignored"]
 fn test_multiscale_database() {
@@ -1678,8 +1688,7 @@ fn test_multiscale_database() {
 
     let catalog_path = test_data::ensure_test_file("data/gaia_merged.bin");
     println!("Generating multiscale database 0.5°–5°…");
-    let db = SolverDatabase::generate_from_gaia(&catalog_path, &config)
-        .expect("multiscale database generation");
+    let db = generate_db(&catalog_path, &config).expect("multiscale database generation");
 
     let total_slots = db.pattern_catalog.len();
     println!(
@@ -1728,8 +1737,7 @@ fn test_pattern_budget_reports_timeout() {
         epoch_proper_motion_year: Some(2025.0),
         catalog_nside: 8,
     };
-    let db = SolverDatabase::generate_from_gaia(&gaia_catalog_path(), &config)
-        .expect("Failed to generate database");
+    let db = generate_db(&gaia_catalog_path(), &config).expect("Failed to generate database");
 
     let mut rng = StdRng::seed_from_u64(42);
     let image_width = 1024u32;

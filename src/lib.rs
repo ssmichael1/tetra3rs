@@ -47,6 +47,33 @@
 //!   Images (~12° FOV, significant optical distortion). Multi-image calibration across
 //!   10 TESS sectors achieves sub-arcsec agreement with FITS WCS solutions
 //!
+//! ## `no_std`
+//!
+//! Everything except file I/O, the solve clock, and centroid extraction builds
+//! without the standard library (an allocator is still required):
+//!
+//! ```toml
+//! [dependencies]
+//! tetra3 = { version = "0.14", default-features = false, features = ["libm"] }
+//! ```
+//!
+//! - **Float math** (`sin`, `sqrt`, `ln`, …) comes from the `libm` crate via
+//!   `num-traits`: pure-Rust implementations, accurate to about 1 ulp. A
+//!   database generated on a `std` host solves fine on such a build — pattern
+//!   lookup already probes neighbouring hash bins by
+//!   [`SolveConfig::match_max_error`], so last-bit differences in the edge
+//!   ratios do not matter.
+//! - **No clock:** [`SolveConfig::solve_timeout_ms`] never fires and
+//!   [`Solution::solve_time_ms`] reads 0. Bound the search with
+//!   [`SolveConfig::max_patterns_checked`] instead.
+//! - **No file I/O:** `load_from_file` / `save_to_file` / `generate_from_gaia`
+//!   are absent. Use [`SolverDatabase::from_bytes`] / [`SolverDatabase::to_bytes`],
+//!   [`SolverDatabase::generate_from_gaia_bytes`] and [`CameraModel::from_bytes`] /
+//!   [`CameraModel::to_bytes`]; [`Error`] has no `Io` variant.
+//! - The `image`, `parallel`, `profile` and `hipparcos` features imply `std`.
+//! - `alloc::sync::Arc` is used, so the target needs pointer-width atomics
+//!   (Cortex-M3 and up; not Cortex-M0).
+//!
 //! ## Star catalog
 //!
 //! Solving requires a merged Gaia DR3 + Hipparcos catalog (`gaia_merged.bin`).
@@ -185,6 +212,60 @@
 //! This Rust implementation was developed by Steven Michael with assistance from
 //! [Claude Code](https://claude.ai/claude-code) (Anthropic).
 //!
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(any(feature = "std", feature = "libm")))]
+compile_error!(
+    "tetra3 needs float math from somewhere: enable the `std` feature (default) \
+     or the `libm` feature for `no_std` builds."
+);
+
+extern crate alloc;
+
+/// Crate-internal prelude.
+///
+/// `alloc` items that `std` builds get from the standard prelude, plus — on
+/// `no_std` builds only — the [`num_traits::Float`] trait, which supplies
+/// `sin` / `sqrt` / `ln` / … via `libm` (`core` has none of them). Inherent
+/// methods win over trait methods, so importing it changes nothing on `std`.
+pub(crate) mod prelude {
+    // A prelude is used piecemeal; which items a given build needs varies
+    // with target and features.
+    #![allow(unused_imports)]
+    pub use alloc::borrow::ToOwned;
+    pub use alloc::string::{String, ToString};
+    pub use alloc::vec::Vec;
+    pub use alloc::{format, vec};
+    #[cfg(not(feature = "std"))]
+    pub use num_traits::Float;
+
+    /// Float `rem_euclid` for a positive modulus `m` — the inherent method is
+    /// `std`-only. Same formula as std's, so results are bit-identical.
+    #[inline]
+    pub fn rem_euclid<T>(x: T, m: T) -> T
+    where
+        T: Copy + PartialOrd + Default + core::ops::Rem<Output = T> + core::ops::Add<Output = T>,
+    {
+        let r = x % m;
+        if r < T::default() {
+            r + m
+        } else {
+            r
+        }
+    }
+}
+
+/// Hash collections on `std`; the `alloc` B-tree collections under the same
+/// names on `no_std`. Only the shared API subset (`new`, `insert`, `get`,
+/// `contains`, `len`) is used in this crate, and nothing relies on iteration
+/// order (which differs between the two).
+pub(crate) mod collections {
+    #[cfg(not(feature = "std"))]
+    pub use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
+    #[cfg(feature = "std")]
+    pub use std::collections::{HashMap, HashSet};
+}
 
 pub mod aberration;
 pub mod camera_model;

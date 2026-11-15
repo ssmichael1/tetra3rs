@@ -1,14 +1,17 @@
 //! Error type for tetra3.
 
+use crate::prelude::*;
 use thiserror::Error;
 
 /// Convenience alias used throughout the crate.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// All errors tetra3 can produce on its public API surface.
 #[derive(Debug, Error)]
 pub enum Error {
     /// File I/O failure (opening or reading a database/catalog file).
+    /// Only present with the `std` feature.
+    #[cfg(feature = "std")]
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -46,6 +46,7 @@
 //! its RMSE) with the centroid's own covariance when the extractor supplies
 //! one.
 
+use crate::prelude::*;
 use numeris::{Matrix3, Vector3};
 
 use super::matching;
@@ -221,7 +222,7 @@ impl SolverDatabase {
         let sigma2_stage = (sigma_rad as f64) * (sigma_rad as f64);
         let ln_sigma2_stage = sigma2_stage.ln();
         // ln(A / (n · 2π)); per-star ln G = this − ln σᵢ².
-        let ln_a_over_n2pi = (region_area / (n_in as f64 * 2.0 * std::f64::consts::PI)).ln();
+        let ln_a_over_n2pi = (region_area / (n_in as f64 * 2.0 * core::f64::consts::PI)).ln();
 
         // Brightness classes: rank < n_in ("bright" — as many detections as
         // catalog stars predicted, so these should nearly all be stars) and
@@ -239,7 +240,7 @@ impl SolverDatabase {
                 m_class[c] += 1;
             }
         }
-        let q_class: [f64; 2] = std::array::from_fn(|c| {
+        let q_class: [f64; 2] = core::array::from_fn(|c| {
             if n_class[c] == 0 {
                 0.0
             } else {
@@ -247,8 +248,8 @@ impl SolverDatabase {
             }
         });
 
-        let ln_q: [f64; 2] = std::array::from_fn(|c| q_class[c].ln());
-        let ln_1mq: [f64; 2] = std::array::from_fn(|c| (1.0 - q_class[c]).ln());
+        let ln_q: [f64; 2] = core::array::from_fn(|c| q_class[c].ln());
+        let ln_1mq: [f64; 2] = core::array::from_fn(|c| (1.0 - q_class[c]).ln());
         let mut log_lambda = 0.0f64;
         for (i, &r2) in r2_of.iter().enumerate() {
             if exclude.contains(&i) {
