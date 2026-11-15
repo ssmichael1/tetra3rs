@@ -251,7 +251,13 @@ def merge_catalogs(
 
 
 def write_merged_csv(gaia_table, hip_only, hip_gmag_only, output_path: str):
-    """Write merged catalog in the CSV format expected by gaia.rs."""
+    """Write the merged catalog as a 9-column CSV with a header row.
+
+    tetra3rs does not read this file (it loads only the binary format). To
+    turn it into a .bin, use ``gaia_catalog.convert_csv_to_binary`` from
+    gaia-catalog >= 0.1.3, which looks the columns up by name; earlier
+    versions read BP/RP magnitudes as proper motion (issue #80).
+    """
     import csv
 
     with open(output_path, "w", newline="") as f:
