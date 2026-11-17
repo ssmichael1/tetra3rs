@@ -1344,21 +1344,22 @@ def extract_centroids_fast(
     *,
     threads: Optional[int] = None,
 ) -> ExtractionResult:
-    """Fast single-pass centroid extraction — the "adequate star tracker" path.
+    """Fast centroid extraction — the "adequate star tracker" preset.
 
-    Reads each pixel once (coarse-grid background + run-length connected-
-    component moments), so it is several times faster than
-    :func:`extract_centroids` — at the cost of faint-star sensitivity and
-    sub-pixel accuracy (~0.1 px on bright stars). Use :func:`extract_centroids`
-    for calibration or faint-star work. Returns the same ``ExtractionResult``,
-    so it is a drop-in for ``solve_from_centroids``.
+    The same pipeline as :func:`extract_centroids` configured for latency: no
+    matched filter, no per-blob annulus background, and a coarser background
+    subsample. Markedly faster, at the cost of faint-star sensitivity. Use
+    :func:`extract_centroids` for calibration or faint-star work.
+    ``sigma_threshold`` means the same thing in both: sigmas of the noise
+    measured against the interpolated background. Returns the same
+    ``ExtractionResult``, so it is a drop-in for ``solve_from_centroids``.
 
     Args:
         image: 2D numpy array (height x width) of pixel values.
             Supported dtypes: float64, float32, uint16, int16, uint8.
         sigma_threshold: Detection threshold in noise sigmas above the local
             background.
-        bg_grid: Coarse background-grid block size in pixels (tracks gradients
+        bg_grid: Background-grid block size in pixels (tracks gradients
             such as vignetting / Milky Way).
         min_pixels: Minimum pixels in a region; rejects hot pixels.
         max_centroids: Maximum number of centroids to return, brightest first.

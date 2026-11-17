@@ -50,6 +50,45 @@ impl Scratch {
     }
 }
 
+/// Internal knobs that distinguish the two public presets of the one
+/// pipeline (they are not part of [`CentroidExtractionConfig`]).
+#[derive(Clone, Copy)]
+pub(super) struct Tuning {
+    /// The background grid samples every `block / stride_divisor`-th pixel
+    /// (staggered) of each block. 16 keeps extra sampling margin for
+    /// calibration-quality work; 8 is about 1.6 ms cheaper on a sparse 2048²
+    /// frame for a noise estimate within a few percent.
+    pub stride_divisor: usize,
+    /// Refine each blob's background with the median of the unlit pixels in
+    /// an annulus around it. It follows background structure finer than the
+    /// block grid, at a cost that dominates on region-dense frames.
+    pub blob_annulus: bool,
+    /// Upper bound on the residual sample the noise estimate runs on.
+    pub max_noise_samples: usize,
+    /// Report `background_mean` / `threshold` in image units (grid level
+    /// plus the residual statistics) rather than as residual statistics.
+    pub image_unit_stats: bool,
+}
+
+impl Tuning {
+    /// [`extract_centroids_from_raw`](super::extract_centroids_from_raw) and
+    /// friends.
+    pub(super) const FULL: Self = Self {
+        stride_divisor: 16,
+        blob_annulus: true,
+        max_noise_samples: usize::MAX,
+        image_unit_stats: false,
+    };
+    /// [`extract_centroids_fast`](super::extract_centroids_fast).
+    pub(super) const FAST: Self = Self {
+        stride_divisor: 8,
+        blob_annulus: false,
+        // The default block (64) samples 65k residuals of a 2048² frame.
+        max_noise_samples: 1 << 17,
+        image_unit_stats: true,
+    };
+}
+
 /// Set `v`'s length to `n` without zeroing what is already there (the
 /// caller overwrites every element).
 fn set_len_uninit<T: Copy + Default>(v: &mut Vec<T>, n: usize) {
@@ -64,6 +103,7 @@ pub(super) fn extract_from_gray(
     width: u32,
     height: u32,
     config: &CentroidExtractionConfig,
+    tuning: Tuning,
     scratch: &mut Scratch,
 ) -> Result<CentroidExtractionResult> {
     let w = width as usize;
@@ -135,25 +175,37 @@ pub(super) fn extract_from_gray(
     let bg_mean: f32;
     let bg_sigma: f32;
     let mut filter_input: Option<DynMatrix<f32>> = None;
+    // Level of the block grid and a bound on the surface's rounding error
+    // (local background only).
+    let mut grid_level: Option<f32> = None;
+    let mut rounding_margin = 0.0_f32;
 
     if let Some(block_size) = config.local_bg_block_size {
         let bs = block_size as usize;
-        // Stride bs/16 (vs the fast path's bs/8) keeps extra sampling margin
-        // on this calibration-quality path; the build-time σ is ignored in
-        // favor of the estimator below, run against the bilinear surface.
-        let (bg, _) = BackgroundGrid::build(gray_input, w, h, bs, (bs / 16).max(1));
+        let stride = (bs / tuning.stride_divisor).max(1);
+        let bg = BackgroundGrid::build(gray_input, w, h, bs, stride);
+        if tuning.image_unit_stats {
+            grid_level = Some(bg.level());
+        }
+        rounding_margin = bg.rounding_margin();
 
-        let residuals = subsample_residuals(gray_input, w, h, &bg);
+        // The noise sample uses the grid's lattice spacing unless that
+        // would exceed the preset's sample budget (a small block size means
+        // a fine lattice — a quarter of the image at block 16 — and the
+        // estimate's median/clip passes are linear in the sample).
+        let mut noise_stride = stride;
+        while (w / noise_stride) * (h / noise_stride) > tuning.max_noise_samples {
+            noise_stride += 1;
+        }
+        let residuals = subsample_residuals(gray_input, w, h, &bg, noise_stride);
         (bg_mean, bg_sigma) = estimate_background_finite(residuals, config);
 
         // Fused residual pass (rows in parallel under the `parallel` feature;
         // each row writes disjoint output, results independent of threads).
         // The bilinear surface is evaluated per row as `blend_row` +
-        // `blend_columns` — the same expression and operation order as
-        // `value_at`, with the per-pixel divide / floor / clamp hoisted into
-        // the grid's column plan — so the residuals are bit-identical to the
-        // per-pixel form: the surface goes into the output row, then the
-        // residuals replace it in place.
+        // `blend_columns` (the per-pixel divide / floor / clamp hoisted into
+        // the grid's column plan): the surface goes into the output row,
+        // then the residuals replace it in place.
         //
         // Non-finite pixels (dead/hot columns, NaN padding) are treated as
         // background (residual 0): `inf.max(0.0)` is `inf`, and one such
@@ -235,7 +287,14 @@ pub(super) fn extract_from_gray(
                 true,
             )
         }
-        _ => (bg_mean + config.sigma_threshold * bg_sigma, false),
+        // Never closer to the background than the rounding error of the
+        // interpolated surface: on a noiseless (σ = 0) frame a residual can
+        // sit an ulp above zero, and `r > threshold` would then light
+        // arbitrary patches of a perfectly flat image.
+        _ => (
+            bg_mean + (config.sigma_threshold * bg_sigma).max(rounding_margin),
+            false,
+        ),
     };
     // The measurement image, and whether its readers must clamp at zero.
     let (gray, clamp): (&[f32], bool) = match &stored_gray {
@@ -273,6 +332,14 @@ pub(super) fn extract_from_gray(
     // convention). +X right, +Y down.
     let cx = (width - 1) as f32 / 2.0;
     let cy = (height - 1) as f32 / 2.0;
+    // Without the annulus the blob background is the flat level of the
+    // measurement image: 0 for residuals, the global mean otherwise.
+    let flat_background =
+        (!tuning.blob_annulus).then_some(if config.local_bg_block_size.is_some() {
+            0.0
+        } else {
+            bg_mean as f64
+        });
     let mut centroids = compute_blob_centroids(
         (gray, clamp),
         gray_input,
@@ -280,7 +347,7 @@ pub(super) fn extract_from_gray(
         &regions,
         (w, h),
         (cx, cy),
-        config,
+        (config, flat_background),
     );
     // "Raw" blob count = connected regions before the size/elongation/mass
     // filters, matching the field's documented meaning and the fast path's
@@ -289,13 +356,16 @@ pub(super) fn extract_from_gray(
 
     sort_and_truncate_by_mass(&mut centroids, config.max_centroids);
 
+    // With local background the statistics above are those of the residual
+    // image (mean ≈ 0); `grid_level` shifts them back to image units.
+    let level = grid_level.unwrap_or(0.0);
     Ok(CentroidExtractionResult {
         centroids,
         image_width: width,
         image_height: height,
-        background_mean: bg_mean,
+        background_mean: level + bg_mean,
         background_sigma: bg_sigma,
-        threshold: mask_threshold,
+        threshold: level + mask_threshold,
         num_blobs_raw,
     })
 }
@@ -325,15 +395,20 @@ fn threshold_to_mask(src: &[f32], w: usize, h: usize, thr: f32, mask: &mut Vec<u
 /// preserves its semantics while touching ~stride² fewer samples.
 ///
 /// The surface is evaluated per sampled row as `blend_row` +
-/// `value_in_row` (bit-identical to `value_at`), and the sampled rows are
+/// `value_in_row`, and the sampled rows are
 /// gathered in bands — one task each under the `parallel` feature —
 /// concatenated in row order, so the result does not depend on the band
 /// size or thread count.
-fn subsample_residuals(pixels: &[f32], w: usize, h: usize, bg: &BackgroundGrid) -> Vec<f32> {
+fn subsample_residuals(
+    pixels: &[f32],
+    w: usize,
+    h: usize,
+    bg: &BackgroundGrid,
+    stride: usize,
+) -> Vec<f32> {
     /// Sampled rows per task under `parallel` (512 sampled rows at 2048²
     /// with the default block → 32 tasks).
     const ROWS_PER_BAND: usize = 16;
-    let stride = bg.stride();
     let nx = bg.grid_width();
     // Sampled rows are `y = k * stride`, `k < n_rows`, at column phase
     // `k % stride`.
@@ -527,10 +602,11 @@ fn compute_blob_centroids(
     regions: &runs::RunRegions,
     (w, h): (usize, usize),
     (cx, cy): (f32, f32),
-    config: &CentroidExtractionConfig,
+    (config, flat_background): (&CentroidExtractionConfig, Option<f64>),
 ) -> Vec<Centroid> {
     let (offsets, order) = regions.group_by_region();
     let ctx = BlobContext {
+        flat_background,
         gray,
         clamp,
         raw,
@@ -576,6 +652,9 @@ struct BlobContext<'a> {
     cx: f32,
     cy: f32,
     config: &'a CentroidExtractionConfig,
+    /// `Some(level)`: skip the per-blob annulus and use this background for
+    /// every blob (see [`Tuning::blob_annulus`]).
+    flat_background: Option<f64>,
 }
 
 /// Buffers reused across the regions one worker handles (dense fields have
@@ -634,29 +713,30 @@ impl BlobContext<'_> {
         // --- Per-blob local background from annulus ---
         // Expand bounding box by margin, collect pixels that are not part of
         // *any* region (not lit in the detection mask — every lit pixel was
-        // grouped into some region).
-        const ANNULUS_MARGIN: usize = 5;
-        let r0 = min_row.saturating_sub(ANNULUS_MARGIN);
-        let r1 = (max_row + ANNULUS_MARGIN + 1).min(h);
-        let c0 = min_col.saturating_sub(ANNULUS_MARGIN);
-        let c1 = (max_col + ANNULUS_MARGIN + 1).min(w);
-        let n_annulus = gather_unlit(
-            gray,
-            (mask, words_per_row),
-            w,
-            (r0, r1),
-            (c0, c1),
-            &mut scratch.annulus_vals,
-        );
-        let annulus_vals = &mut scratch.annulus_vals[..n_annulus];
-        if clamp {
-            for v in annulus_vals.iter_mut() {
-                *v = v.max(0.0);
+        // grouped into some region), and take their median (the residual
+        // local background in the bg-subtracted image).
+        let local_bg = self.flat_background.unwrap_or_else(|| {
+            const ANNULUS_MARGIN: usize = 5;
+            let r0 = min_row.saturating_sub(ANNULUS_MARGIN);
+            let r1 = (max_row + ANNULUS_MARGIN + 1).min(h);
+            let c0 = min_col.saturating_sub(ANNULUS_MARGIN);
+            let c1 = (max_col + ANNULUS_MARGIN + 1).min(w);
+            let n_annulus = gather_unlit(
+                gray,
+                (mask, words_per_row),
+                w,
+                (r0, r1),
+                (c0, c1),
+                &mut scratch.annulus_vals,
+            );
+            let annulus_vals = &mut scratch.annulus_vals[..n_annulus];
+            if clamp {
+                for v in annulus_vals.iter_mut() {
+                    *v = v.max(0.0);
+                }
             }
-        }
-
-        // Median of annulus (residual local background in bg-subtracted image).
-        let local_bg = median_f32(annulus_vals) as f64;
+            median_f32(annulus_vals) as f64
+        });
 
         // --- Single moment pass: intensity-weighted moments with the
         // annulus-local background, tracking the peak in the same sweep ---

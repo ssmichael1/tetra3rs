@@ -1,4 +1,4 @@
-//! Run-length connected-region core shared by both extraction paths.
+//! Run-length connected-region core of the extraction pipeline.
 //!
 //! A single raster sweep turns a packed detection bit mask
 //! ([`sweep_runs_mask`]) — where work scales with the number of runs rather
@@ -6,16 +6,14 @@
 //! with union-find. The pixel-by-pixel predicate form ([`sweep_runs`]) is
 //! kept as the test reference; both produce identical [`RunRegions`] for
 //! the same lit set.
-//! Region payloads live with the callers: the fast path computes moments
-//! from the run lists in a post-pass (lit pixels are ≪1% of the image, so
-//! the second touch is nearly free), while the quality path runs its
+//! Region payloads live with the caller, which runs its
 //! annulus/moment/deblend stages per region. This replaces the generic
 //! mask → labels connected-component labeling, which materialized a u8 mask
 //! and a u32 labels buffer (~10 MB at 2 Mpix) and required a per-pixel label
 //! test in every downstream stage.
 //!
-//! The row packers ([`pack_lit_row`], [`pack_above_row`]) build that bit mask
-//! one image row at a time with a vectorizable compare and a byte→bit fold.
+//! The row packer ([`pack_above_row`]) builds that bit mask one image row at
+//! a time with a vectorizable compare and a byte→bit fold.
 
 use crate::prelude::*;
 use core::ops::Range;
@@ -161,6 +159,8 @@ pub(super) fn sweep_runs(
 /// the number of runs, not pixels. Yields exactly the [`RunRegions`] that
 /// [`sweep_runs`] gives for the same lit set — runs in row-major order,
 /// same connectivity, same first-appearance region ids.
+// Used by the sequential build (and as the banded sweep's test reference).
+#[cfg_attr(feature = "parallel", allow(dead_code))]
 pub(super) fn sweep_runs_mask(
     w: usize,
     h: usize,
@@ -328,31 +328,12 @@ impl MaskGeometry {
     }
 }
 
-/// Pack one image row's detection mask: bit `c % 64` of `words[c / 64]` is
-/// set when `row[c]` is finite and exceeds `thr[c]`. `(p > t) & (p < +∞)` is
-/// exactly `p.is_finite() && p > t` (NaN fails both compares, −∞ fails the
-/// first, +∞ the second) but branch-free: the compares fill a 64-byte
-/// scratch (a vectorizable loop), then each 8 bytes fold to 8 bits with the
-/// multiply-shift trick. Padding bits at or beyond `row.len()` are zero.
-#[inline]
-pub(super) fn pack_lit_row(row: &[f32], thr: &[f32], words: &mut [u64]) {
-    debug_assert_eq!(row.len(), thr.len());
-    debug_assert_eq!(words.len(), row.len().div_ceil(64));
-    for (wi, word) in words.iter_mut().enumerate() {
-        let c0 = wi * 64;
-        let c1 = (c0 + 64).min(row.len());
-        let mut bytes = [0u8; 64];
-        for ((m, &p), &t) in bytes.iter_mut().zip(&row[c0..c1]).zip(&thr[c0..c1]) {
-            *m = ((p > t) & (p < f32::INFINITY)) as u8;
-        }
-        *word = pack_bytes(&bytes);
-    }
-}
-
 /// Pack one image row against a single threshold: bit `c % 64` of
 /// `words[c / 64]` is set exactly when `row[c] > thr` (the plain `>`
-/// predicate — a NaN is never lit, `+∞` always is). Same packing as
-/// [`pack_lit_row`]; padding bits are zero.
+/// predicate — a NaN is never lit, `+∞` always is): the compares fill a
+/// 64-byte scratch (a vectorizable loop), then each 8 bytes fold to 8 bits
+/// with the multiply-shift trick. Padding bits at or beyond `row.len()` are
+/// zero.
 #[inline]
 pub(super) fn pack_above_row(row: &[f32], thr: f32, words: &mut [u64]) {
     debug_assert_eq!(words.len(), row.len().div_ceil(64));
@@ -693,35 +674,6 @@ mod tests {
         for band_rows in [1usize, 2, 4, 8, 9, 20, 32] {
             assert_same(&a, &sweep_runs_mask_banded(w, h, wpr, &packed, band_rows));
         }
-    }
-    #[test]
-    fn test_pack_lit_row_matches_predicate() {
-        let w = 2136usize; // not a multiple of 64
-        let mut state = 0x2545_f491_4f6c_dd1du64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let thr: Vec<f32> = (0..w).map(|c| c as f32 * 0.5).collect();
-        let mut row: Vec<f32> = (0..w)
-            .map(|c| c as f32 * 0.5 + (next() % 5) as f32 - 2.0)
-            .collect();
-        // Non-finite values must never be lit, whatever the threshold.
-        row[3] = f32::NAN;
-        row[64] = f32::INFINITY;
-        row[65] = f32::NEG_INFINITY;
-        row[w - 1] = f32::INFINITY;
-        let mut words = vec![u64::MAX; w.div_ceil(64)];
-        pack_lit_row(&row, &thr, &mut words);
-        for c in 0..w {
-            let expect = row[c].is_finite() && row[c] > thr[c];
-            let got = words[c / 64] >> (c % 64) & 1 == 1;
-            assert_eq!(got, expect, "column {c}");
-        }
-        // Padding bits are zero.
-        assert_eq!(words[w / 64] >> (w % 64), 0);
     }
 
     #[test]

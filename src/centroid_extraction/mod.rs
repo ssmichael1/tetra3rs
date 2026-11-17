@@ -17,21 +17,19 @@
 //!   file (using whichever `image` feature flags suit their needs).
 //! - [`extract_centroids_from_raw`] for raw grayscale `f32` pixel data —
 //!   useful for FITS, camera SDK output, or any other non-standard source.
-//! - [`extract_centroids_fast`] is a single-pass "adequate star tracker"
-//!   alternative: it reads each pixel once (coarse-grid background +
-//!   run-length connected-component moments) for markedly lower latency, at
-//!   the cost of faint-star sensitivity and sub-pixel accuracy. The two
-//!   functions above stay the default and the right choice for calibration.
+//! - [`extract_centroids_fast`] is a preset of the same pipeline for
+//!   latency-sensitive use (trackers): no matched filter, no per-blob
+//!   annulus background, a coarser background subsample — markedly faster,
+//!   at the cost of faint-star sensitivity. The two functions above stay the
+//!   default and the right choice for calibration.
 //! - [`CentroidExtractor`] runs the same pipeline as the two default
 //!   functions but keeps its full-image working buffers between calls, for
 //!   a frame loop where every frame has the same size.
 //!
-//! With the `parallel` feature, the dominant local-background stage and the
-//! full-image element-wise maps of the connected-component path, and the
-//! background grid + detection bit mask of the fast path, run multi-threaded
-//! via rayon; results are bit-identical to the sequential build. (The fast
-//! path's run sweep over the mask is sequential — it is proportional to the
-//! number of runs, not pixels.)
+//! With the `parallel` feature, the background stage, the full-image
+//! element-wise maps, the detection mask, the run sweep and the per-region
+//! stage run multi-threaded via rayon; results are bit-identical to the
+//! sequential build.
 //!
 //! # Example
 //!
@@ -237,9 +235,8 @@ pub struct CentroidExtractionResult {
     /// Detection threshold used (background_mean + sigma_threshold * background_sigma).
     pub threshold: f32,
 
-    /// Number of blobs found before the size/elongation filters are applied
-    /// (connected components on the CCL path; detected regions before the
-    /// `min_pixels` filter on the fast path).
+    /// Number of blobs (connected regions) found before the size/elongation
+    /// filters are applied.
     pub num_blobs_raw: usize,
 }
 
@@ -337,7 +334,14 @@ impl CentroidExtractor {
     ) -> Result<CentroidExtractionResult> {
         let (width, height) = img.dimensions();
         to_grayscale_f32_into(img, &mut self.gray);
-        ccl::extract_from_gray(&self.gray, width, height, config, &mut self.scratch)
+        ccl::extract_from_gray(
+            &self.gray,
+            width,
+            height,
+            config,
+            ccl::Tuning::FULL,
+            &mut self.scratch,
+        )
     }
 
     /// [`extract_centroids_from_raw`] on this extractor's buffers.
@@ -349,7 +353,14 @@ impl CentroidExtractor {
         config: &CentroidExtractionConfig,
     ) -> Result<CentroidExtractionResult> {
         check_pixel_len(pixels.len(), width, height)?;
-        ccl::extract_from_gray(pixels, width, height, config, &mut self.scratch)
+        ccl::extract_from_gray(
+            pixels,
+            width,
+            height,
+            config,
+            ccl::Tuning::FULL,
+            &mut self.scratch,
+        )
     }
 }
 
@@ -555,7 +566,7 @@ pub(super) mod par {
     }
 }
 
-/// Coarse block-median background grid shared by both extraction paths.
+/// Coarse block-median background grid.
 ///
 /// The image is divided into `block × block` tiles; each tile's median comes
 /// from a phase-staggered stride subsample (a diagonal lattice: every
@@ -574,7 +585,6 @@ pub(super) struct BackgroundGrid {
     nx: usize,
     ny: usize,
     block: usize,
-    stride: usize,
     /// Row-independent half of the interpolation for every image column.
     cols: ColPlan,
 }
@@ -584,10 +594,9 @@ pub(super) struct BackgroundGrid {
 /// the same [`col_params`] arithmetic the per-pixel accessors use and grouped
 /// into segments of constant `(bx0, bx1)`, so blending a whole row is a
 /// straight multiply-add loop with no per-pixel divide / floor / clamp.
-/// See [`BackgroundGrid::blend_columns`]. The single-pixel accessors
-/// ([`BackgroundGrid::value_at`], [`BackgroundGrid::value_in_row`]) read the
-/// same per-column entries, so every way of evaluating the surface shares
-/// one set of weights.
+/// See [`BackgroundGrid::blend_columns`]. The single-pixel accessor
+/// ([`BackgroundGrid::value_in_row`]) reads the same per-column entries, so
+/// every way of evaluating the surface shares one set of weights.
 struct ColPlan {
     /// Column blend weight `fx` and its complement `1 - fx`.
     fx: Vec<f32>,
@@ -680,29 +689,20 @@ fn fill_empty_blocks(grid: &mut [f32], mut has_data: Vec<bool>, nx: usize, ny: u
 }
 
 impl BackgroundGrid {
-    /// Build the grid. Also returns the global noise σ estimated during the
-    /// same pass as the RMS of below-median subsample residuals about their
-    /// block median (the half-normal estimator, robust to stars which only
-    /// push the distribution upward). The fast path uses this σ directly;
-    /// the CCL path ignores it and re-estimates against the bilinear surface
-    /// (see `subsample_residuals` + `estimate_background`).
-    pub(super) fn build(
-        pixels: &[f32],
-        w: usize,
-        h: usize,
-        block: usize,
-        stride: usize,
-    ) -> (Self, f32) {
+    /// Build the grid: the median of a staggered subsample (every
+    /// `stride`-th pixel) of each `block`×`block` block. Noise statistics
+    /// are estimated separately, against the interpolated surface (see
+    /// `subsample_residuals` + `estimate_background`).
+    pub(super) fn build(pixels: &[f32], w: usize, h: usize, block: usize, stride: usize) -> Self {
         let nx = w.div_ceil(block);
         let ny = h.div_ceil(block);
 
-        // (median, Σresidual², n_below, largest sample below the median) per
-        // block, one task per block row.
-        // Each block row walks its sampled image rows once, left to right
-        // across all its blocks (forward streaming rather than a strided
-        // gather per block); each block still receives its samples in the
-        // same y-then-x order, so medians and residual sums are unchanged.
-        let per_block_row: Vec<Vec<(f32, f64, usize, f32)>> = par::map_indices(ny, |by| {
+        // Median per block (`None`: no finite sample), one task per block
+        // row. Each block row walks its sampled image rows once, left to
+        // right across all its blocks (forward streaming rather than a
+        // strided gather per block); each block still receives its samples
+        // in the same y-then-x order, so the medians are unchanged.
+        let per_block_row: Vec<Vec<Option<f32>>> = par::map_indices(ny, |by| {
             let y0 = by * block;
             let y1 = (y0 + block).min(h);
             let cap = (block / stride + 1).pow(2);
@@ -727,67 +727,26 @@ impl BackgroundGrid {
                 y += stride;
             }
             vals.iter_mut()
-                .map(|block_vals| {
-                    let median = midpoint_f32(block_vals);
-                    let mut sq = 0.0_f64;
-                    let mut n = 0usize;
-                    let mut max_below = f32::NEG_INFINITY;
-                    for &v in block_vals.iter() {
-                        if v <= median {
-                            let d = (v - median) as f64;
-                            sq += d * d;
-                            n += 1;
-                            if v < median {
-                                max_below = max_below.max(v);
-                            }
-                        }
-                    }
-                    (median, sq, n, max_below)
-                })
+                .map(|block_vals| (!block_vals.is_empty()).then(|| midpoint_f32(block_vals)))
                 .collect()
         });
 
         let per_block = per_block_row.iter().flatten();
-        let mut grid: Vec<f32> = per_block.clone().map(|&(m, ..)| m).collect();
-        let (sq_sum, n_sum) = per_block
-            .clone()
-            .fold((0.0_f64, 0usize), |(s, n), &(_, sq, k, _)| (s + sq, n + k));
-        // Quantization floor (see `quantization_sigma_floor`): the smallest
-        // per-block bound is the data's step size, and 0 on continuous data.
-        let floor = per_block
-            .clone()
-            .map(|&(m, _, _, below)| quantization_sigma_floor(m, below))
-            .filter(|&f| f > 0.0)
-            .fold(f32::INFINITY, f32::min);
-        let sigma = if n_sum > 0 {
-            let rms = (sq_sum / n_sum as f64).sqrt() as f32;
-            if floor.is_finite() {
-                rms.max(floor)
-            } else {
-                rms
-            }
-        } else {
-            0.0
-        };
-
-        // A block with no finite sample has no median (its count is 0, since
-        // a block's own median always counts). Left at the 0.0 placeholder it
-        // would be blended into its neighbours as a real level and drag the
-        // surface down across the half-block band around it.
-        let has_data: Vec<bool> = per_block.map(|&(_, _, n, _)| n > 0).collect();
+        let mut grid: Vec<f32> = per_block.clone().map(|m| m.unwrap_or(0.0)).collect();
+        // A block with no finite sample has no median. Left at the 0.0
+        // placeholder it would be blended into its neighbours as a real
+        // level and drag the surface down across the half-block band around
+        // it.
+        let has_data: Vec<bool> = per_block.map(Option::is_some).collect();
         fill_empty_blocks(&mut grid, has_data, nx, ny);
 
-        (
-            Self {
-                grid,
-                nx,
-                ny,
-                block,
-                stride,
-                cols: ColPlan::new(nx, block, w),
-            },
-            sigma,
-        )
+        Self {
+            grid,
+            nx,
+            ny,
+            block,
+            cols: ColPlan::new(nx, block, w),
+        }
     }
 
     /// Bound on the rounding error of an interpolated surface value: a few
@@ -795,10 +754,6 @@ impl BackgroundGrid {
     pub(super) fn rounding_margin(&self) -> f32 {
         let max_abs = self.grid.iter().fold(0.0_f32, |m, g| m.max(g.abs()));
         8.0 * f32::EPSILON * max_abs
-    }
-
-    pub(super) fn stride(&self) -> usize {
-        self.stride
     }
 
     /// Number of grid columns — the length [`Self::blend_row`] expects.
@@ -823,22 +778,10 @@ impl BackgroundGrid {
         (by0, by0 + 1, bf - by0 as f32)
     }
 
-    /// Background value at `(x, row)` given `row_params(row)`. `x` must be
-    /// a column of the image the grid was built for. The column half of the
-    /// interpolation comes from the column plan, so a lookup costs two row
-    /// blends and one column blend with no divide / floor / clamp.
-    #[inline]
-    pub(super) fn value_at(&self, x: usize, (by0, by1, fy): (usize, usize, f32)) -> f32 {
-        let (bx0, bx1) = (self.cols.bx0[x] as usize, self.cols.bx1[x] as usize);
-        let g0 = self.grid[by0 * self.nx + bx0] * (1.0 - fy) + self.grid[by1 * self.nx + bx0] * fy;
-        let g1 = self.grid[by0 * self.nx + bx1] * (1.0 - fy) + self.grid[by1 * self.nx + bx1] * fy;
-        g0 * self.cols.omfx[x] + g1 * self.cols.fx[x]
-    }
-
     /// Background value at column `x` of the row blended into `row_blend`
-    /// by [`Self::blend_row`] — [`Self::value_at`] with the row half hoisted
-    /// (the same expression in the same order, so the same bits), for
-    /// callers that sample several columns of one row.
+    /// by [`Self::blend_row`] — the same expression, in the same order, as
+    /// [`Self::blend_columns`] evaluates for that column (so the same bits),
+    /// for callers that sample a few columns of one row.
     #[inline]
     pub(super) fn value_in_row(&self, row_blend: &[f32], x: usize) -> f32 {
         let (bx0, bx1) = (self.cols.bx0[x] as usize, self.cols.bx1[x] as usize);
@@ -862,14 +805,11 @@ impl BackgroundGrid {
     /// out[c] = map(row_blend[bx0] * (1 - fx) + row_blend[bx1] * fx)
     /// ```
     ///
-    /// with `(bx0, bx1, fx) = col_params(c)` — the same expression and
-    /// operation order as [`Self::value_at`] (which is exactly `blend_row`
-    /// followed by this column blend), so `map = |v| v` reproduces
-    /// `value_at(c, rp)` bit for bit, but the per-column divide / floor /
-    /// clamp is hoisted into the column plan built once by [`Self::build`].
-    /// `out.len()` must equal the image width given to `build`. `map` is
-    /// applied to each blended value (`|v| v + k·σ` for a detection
-    /// threshold, see [`Self::threshold_row`]).
+    /// with `(bx0, bx1, fx) = col_params(c)` — the bilinear surface at
+    /// `(c, row)`, bit for bit what [`Self::value_in_row`] returns, with the
+    /// per-column divide / floor / clamp hoisted into the column plan built
+    /// once by [`Self::build`]. `out.len()` must equal the image width given
+    /// to `build`. `map` is applied to each blended value.
     #[inline]
     pub(super) fn blend_columns(
         &self,
@@ -886,14 +826,6 @@ impl BackgroundGrid {
                 *o = map(g0 * omf + g1 * f);
             }
         }
-    }
-
-    /// Detection threshold of every column of the row blended into
-    /// `row_blend`: `out[c] = value_at(c, rp) + k_sigma`, bit for bit (see
-    /// [`Self::blend_columns`]).
-    #[inline]
-    pub(super) fn threshold_row(&self, row_blend: &[f32], k_sigma: f32, out: &mut [f32]) {
-        self.blend_columns(row_blend, out, |v| v + k_sigma);
     }
 }
 

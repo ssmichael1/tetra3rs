@@ -2,14 +2,13 @@
 
 tetra3rs includes a complete centroid extraction pipeline that detects stars in an image and computes sub-pixel positions with uncertainty estimates. The pipeline is designed to be robust across a range of conditions — from low-SNR ground-based images to crowded spacecraft fields.
 
-!!! tip "Two extractors"
-    This page describes the default **connected-component pipeline**
-    (`extract_centroids` / `extract_centroids_from_raw`), which prioritizes
-    fidelity. For latency-critical use (e.g. frame-rate tracking on embedded
-    hardware) there is also a **fast single-pass extractor**
-    (`extract_centroids_fast`), faster at lower fidelity — see
-    [Fast single-pass extraction](#fast-single-pass-extraction-extract_centroids_fast)
-    below.
+!!! tip "Two entry points, one pipeline"
+    This page describes the extraction pipeline in its default
+    configuration (`extract_centroids` / `extract_centroids_from_raw`),
+    which prioritizes fidelity. For latency-critical use (e.g. frame-rate
+    tracking) `extract_centroids_fast` runs the same pipeline with the
+    expensive stages switched off — see
+    [Fast preset](#fast-preset-extract_centroids_fast) below.
 
 ## Pipeline Overview
 
@@ -173,8 +172,9 @@ Optionally, the list can be truncated to `max_centroids` entries.
 
 ## Performance
 
-On a 2048×2048 TESS frame the connected-component path runs in **~26 ms**
-single-threaded (matched filter on); the fast path below in ~15–20 ms. Block
+On a 2048×2048 TESS frame the default configuration (matched filter on) runs
+in roughly **10–12 ms** single-threaded on an Apple M3; the
+[fast preset](#fast-preset-extract_centroids_fast) below in ~2 ms. Block
 medians are computed from a stride subsample of each tile, and background
 subtraction, noise statistics, and the filter input are produced by one fused
 pass over the image — there is no materialized full-image background buffer.
@@ -249,50 +249,37 @@ for frame in frames:
 extractor per thread. (Rust: `CentroidExtractor::extract_from_raw` /
 `extract_from_image`.)
 
-## Fast single-pass extraction (`extract_centroids_fast`)
+## Fast preset (`extract_centroids_fast`)
 
-The pipeline above prioritizes fidelity — local-background interpolation, an
-optional matched filter, full connected-component analysis, per-blob annulus
-backgrounds, and shape/elongation gating. For latency-critical applications
-(frame-rate tracking, embedded star trackers) tetra3rs offers an alternative
-that reads each pixel **once**: `extract_centroids_fast`
-(`FastCentroidConfig` in Rust). It is an *additive* alternative — the
-connected-component path stays the default and the right choice for
-calibration and faint-star work.
+The default configuration prioritizes fidelity — an optional matched filter,
+per-blob annulus backgrounds, a densely sampled background grid. For
+latency-critical applications (frame-rate tracking) `extract_centroids_fast`
+(`FastCentroidConfig` in Rust) runs the **same pipeline** with those stages
+switched off:
 
-### Algorithm
+- **No matched filter**, so faint-star sensitivity is lower — sized for the
+  stars a tracker locks onto, not deep detection.
+- **No per-blob annulus background**: each blob is measured against the
+  block-grid background surface alone. The annulus is what dominates the
+  cost on region-dense frames; on the TESS and SkyView test frames dropping
+  it does not change solve accuracy.
+- **Coarser sampling**: the background grid uses every `bg_grid/8`-th pixel
+  (instead of `/16`) and the noise estimate is capped at ~131k samples.
 
-1. **Coarse background pre-pass.** A subsampled grid (~1/64 of the pixels)
-   gives a `bg_grid`-spaced background grid and a global noise σ. Cheap, and
-   still tracks large-scale gradients (vignetting, Milky Way).
-2. **Single raster sweep.** Each pixel is thresholded against the bilinearly
-   interpolated background (`> bg + sigma_threshold·σ`). Lit pixels are grouped
-   into connected regions on the fly via **run-length + union-find**, with
-   intensity-weighted moments (including second moments, so `Centroid.cov` is
-   populated like the main path) accumulated inline. One center-of-mass is
-   emitted per region, with the same 3×3 quadratic peak refinement as the main
-   pipeline (gated to agree with the CoM).
-
-No convolution and no second pass, so the cost is dominated by a single memory
-read rather than compute.
+Everything else is shared: the block-median background surface, the noise
+estimate against that surface (so `sigma_threshold` means the same thing in
+both entry points), run-length connected regions, intensity-weighted moments
+(`Centroid.cov` is populated), the 3×3 quadratic peak refinement, and the
+size / sharpness / elongation / border filters.
 
 ### Speed and accuracy
 
-On 2048×2048 TESS frames, single-threaded: **~15–20 ms vs ~26 ms** for the
-connected-component path, with equal end-to-end solve accuracy and
-~**0.1 px** centroid agreement on bright stars. (The gap has narrowed as the
-connected-component path got faster; the fast path's remaining edge is that
-it reads each pixel once and never convolves.)
-
-The trade-offs are deliberate:
-
-- **No matched filter**, so faint-star sensitivity is lower — sized for the
-  brightest stars a tracker locks onto, not deep detection.
-- **Center-of-mass is threshold-clipped**: sub-pixel accuracy is ~0.1 px on
-  bright stars, degrading for faint ones. Use the connected-component path
-  for calibration / tight astrometry.
-- A **global noise σ** is used (adequate when read/shot noise is roughly
-  uniform even where the background *level* varies).
+On 2048×2048 frames (Apple M-series, single-threaded) the preset takes about
+2 ms on sparse fields and 3–5 ms on fields with thousands of detected
+regions; with the `parallel` feature, 1–2.5 ms. Solving the TESS and SkyView
+test images from its centroids gives the same boresight error against the
+FITS WCS, the same match counts and the same calibration residuals as the
+default configuration without the matched filter.
 
 It returns the same `ExtractionResult` (center-origin coordinates, brightest
 first), so it is a drop-in for `solve_from_centroids`.
@@ -302,7 +289,7 @@ first), so it is a drop-in for `solve_from_centroids`.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `sigma_threshold` | 5.0 | Detection threshold in noise σ above the local background |
-| `bg_grid` | 64 | Coarse background-grid block size (pixels) |
+| `bg_grid` | 64 | Background-grid block size (pixels) |
 | `min_pixels` | 2 | Minimum pixels in a region (rejects hot pixels) |
 | `max_pixels` | 10,000 | Maximum pixels in a region (rejects satellite trails / bloomed regions, which would otherwise be the *brightest* centroid handed to the solver) |
 | `max_elongation` | None | Maximum elongation ratio (opt-in — moment-based elongation is noisy for few-pixel regions) |
@@ -311,7 +298,7 @@ first), so it is a drop-in for `solve_from_centroids`.
 | `border_margin` | 0 | Drop regions within this margin of an image edge (0 = off) |
 | `max_centroids` | None | Maximum centroids to return, brightest first (None = all) |
 
-The coarse background grid already absorbs structure larger than a block
+The background grid already absorbs structure larger than a block
 (~64 px) before these filters see it, so `max_pixels` matters mainly for sharp
 bloomed regions and `max_elongation` for trails.
 

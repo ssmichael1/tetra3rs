@@ -1,35 +1,32 @@
-//! Fast single-pass star-tracker extraction path: coarse subsampled
-//! background grid + one thresholding pass into a packed bit mask + a
-//! run-length sweep over the mask, with moments computed from the run lists.
-//! Split out of the crate-facing module; entry via [`extract_centroids_fast`].
+//! The fast preset of the extraction pipeline: [`extract_centroids_fast`]
+//! and its small [`FastCentroidConfig`]. It runs the same code as
+//! [`extract_centroids_from_raw`](super::extract_centroids_from_raw) with the
+//! matched filter and the per-blob annulus background switched off and a
+//! coarser background subsample.
 
 use super::{
-    check_pixel_len, check_sigma_threshold, elongation_from_cov, finish_region, par, runs,
-    sort_and_truncate_by_mass, BackgroundGrid, CentroidExtractionResult,
+    ccl, check_pixel_len, CentroidExtractionConfig, CentroidExtractionResult, DeblendMode,
 };
-use crate::centroid::Centroid;
 use crate::error::{Error, Result};
-use crate::prelude::*;
 
 // ─── Fast single-pass star-tracker path ─────────────────────────────────────
 
 /// Configuration for [`extract_centroids_fast`].
 ///
-/// Deliberately small — the four knobs a single-pass detector needs. None of
-/// the connected-component path's quality filters (block-interpolated
-/// background, elongation, per-blob annulus background, sub-pixel agreement
-/// gates) appear, because this path trades them away for speed.
+/// Deliberately small — the knobs a tracker-style detector needs. The
+/// matched filter, the per-blob annulus background and deblending of the
+/// full [`CentroidExtractionConfig`] do not appear, because this preset
+/// switches them off for speed.
 #[derive(Debug, Clone)]
 pub struct FastCentroidConfig {
     /// Detection threshold in noise sigmas above the local background. A pixel
     /// is "lit" when `value > bg(x, y) + sigma_threshold · σ`. Default: 5.0
     pub sigma_threshold: f32,
 
-    /// Coarse background-grid block size in pixels. The background is estimated
-    /// once on a `bg_grid`-spaced grid (from a subsampled pre-pass, ~1/64 the
-    /// pixels) and bilinearly interpolated during the main sweep, so gradients
-    /// (vignetting, Milky Way) are handled without a full-image background
-    /// stage. Larger blocks are cheaper but follow gradients more coarsely.
+    /// Background-grid block size in pixels. The background is the median
+    /// of a subsample of each `bg_grid`-sized block, bilinearly interpolated
+    /// between block centers, so gradients (vignetting, Milky Way) are
+    /// followed. Larger blocks are cheaper but follow gradients more coarsely.
     /// Default: 64
     pub bg_grid: u32,
 
@@ -97,208 +94,67 @@ impl Default for FastCentroidConfig {
     }
 }
 
-/// Fast single-pass centroid extraction — the "adequate star tracker" path.
+/// Fast centroid extraction — the "adequate star tracker" preset.
 ///
-/// An alternative to [`extract_centroids_from_raw`](super::extract_centroids_from_raw) that reads each pixel
-/// **once**: a cheap subsampled pre-pass builds a coarse background grid, then
-/// a single pass thresholds every row against the bilinearly-interpolated
-/// background into a packed bit mask (1 bit per pixel), a run-length +
-/// union-find sweep over the mask groups lit pixels into connected regions
-/// (work proportional to runs, not pixels), and intensity-weighted moments
-/// over the run lists give a center-of-mass per region. No convolution, no
-/// full-image background buffer, no second pass over the image — so it runs
-/// close to memory bandwidth and markedly faster than the connected-component
-/// path (which stays the default and the right choice for calibration /
-/// faint-star work). With the `parallel` feature the background grid and the
-/// bit mask are built multi-threaded; results are bit-identical either way.
+/// The same pipeline as [`extract_centroids_from_raw`](super::extract_centroids_from_raw)
+/// (block-median background surface, noise estimate against that surface,
+/// thresholding into a bit mask, run-length connected regions,
+/// intensity-weighted moments, 3×3 peak refinement) configured for latency:
 ///
-/// # Trade-offs
+/// - no matched filter, so faint-star sensitivity is lower — sized for the
+///   stars a tracker locks onto, not deep detection;
+/// - no per-blob annulus background: each blob is measured against the
+///   block-grid surface alone, which is what dominates the cost on
+///   region-dense frames;
+/// - the background grid samples every `bg_grid / 8`-th pixel instead of
+///   every `/16`-th, and the noise estimate is capped at ~131k samples.
 ///
-/// - No matched filter, so faint-star sensitivity is lower — sized for the
-///   brightest stars a tracker locks onto, not deep detection.
-/// - Center-of-mass is threshold-clipped: sub-pixel accuracy is ~0.1 px for
-///   bright stars, degrading for faint ones. A 3×3 parabola refine on the peak
-///   (`quadratic_peak_offset`) sharpens it when the region is large enough
-///   and the fit agrees with the CoM, matching the CCL path's gate.
-/// - A global noise σ is used (adequate when read/shot noise is roughly
-///   uniform even where the background level is not).
+/// On sparse 2048² frames this is about 2-3× faster than the default
+/// configuration of the full function. With the `parallel` feature the
+/// background, mask, sweep and region stages run multi-threaded; results
+/// are bit-identical either way.
 ///
-/// Returns the same [`CentroidExtractionResult`] as the CCL path (centroids in
+/// `sigma_threshold` means the same thing as in the full pipeline: sigmas
+/// of the noise measured against the interpolated background.
+///
+/// Returns the same [`CentroidExtractionResult`] (centroids in
 /// image-center-origin coordinates, brightest first), so it is a drop-in for
 /// [`SolverDatabase::solve_from_centroids`](crate::SolverDatabase::solve_from_centroids).
-/// `background_mean` is the median of the coarse grid, `background_sigma` the
-/// global noise σ, `threshold` a representative `bg_mean + k·σ`, and
-/// `num_blobs_raw` the region count before the `min_pixels` filter.
+/// `background_mean` and `threshold` are in image units (the grid's median
+/// level plus the residual statistics), `background_sigma` is the global
+/// noise σ, and `num_blobs_raw` the region count before the size filters.
 pub fn extract_centroids_fast(
     pixels: &[f32],
     width: u32,
     height: u32,
     config: &FastCentroidConfig,
 ) -> Result<CentroidExtractionResult> {
-    let w = width as usize;
-    let h = height as usize;
     check_pixel_len(pixels.len(), width, height)?;
-    check_sigma_threshold(config.sigma_threshold)?;
     if config.bg_grid == 0 {
         return Err(Error::InvalidInput("bg_grid must be >= 1".into()));
     }
-    if w < 2 || h < 2 {
-        return Err(Error::InvalidInput("image must be at least 2x2".into()));
-    }
-
-    // ── Pre-pass: coarse background grid + global noise σ (subsampled) ──
-    let block = config.bg_grid as usize;
-    let (bg, sigma) = BackgroundGrid::build(pixels, w, h, block, (block / 8).max(1));
-    let nx = w.div_ceil(block);
-    let k = config.sigma_threshold;
-    // Never below the rounding error of the interpolated background: on a
-    // noiseless (σ = 0) frame the blend `g0·(1−f) + g1·f` of equal block
-    // medians can land an ulp under the pixel value, and `p > thr` would
-    // then light arbitrary patches of a perfectly flat image.
-    let k_sigma = (k * sigma).max(bg.rounding_margin());
-
-    // ── Threshold pass: packed detection bit mask ──
-    // Per row: blend the two bracketing grid rows (row-constant half of the
-    // interpolation), expand to a per-column threshold through the grid's
-    // precomputed column plan, and compare the pixels into one bit each.
-    // The whole-image mask (h × ⌈w/64⌉ words; 512 KB at 2048²) is filled in
-    // independent 16-row chunks — multi-threaded under `parallel` — and
-    // then consumed by one sequential run sweep, so region ids are
-    // identical to a pixel-by-pixel raster sweep. Moments are computed
-    // afterwards from the run lists: lit pixels are ≪1% of the image, so
-    // the second touch of them is nearly free.
-    const ROWS_PER_CHUNK: usize = 16;
-    let words_per_row = w.div_ceil(64);
-    let mut mask = vec![0u64; words_per_row * h];
-    par::for_each_chunk_mut(&mut mask, words_per_row * ROWS_PER_CHUNK, |ci, chunk| {
-        let mut grid_row = vec![0.0_f32; nx];
-        let mut thr = vec![0.0_f32; w];
-        for (i, words) in chunk.chunks_exact_mut(words_per_row).enumerate() {
-            let r = ci * ROWS_PER_CHUNK + i;
-            bg.blend_row(bg.row_params(r), &mut grid_row);
-            bg.threshold_row(&grid_row, k_sigma, &mut thr);
-            runs::pack_lit_row(&pixels[r * w..(r + 1) * w], &thr, words);
-        }
-    });
-
-    // ── Run-length sweep over the mask via the shared core ──
-    let regions = runs::sweep_runs_mask(w, h, words_per_row, &mask);
-    let (offsets, order) = regions.group_by_region();
-
-    // ── Emit one centroid per region ──
-    // Origin at the geometric image center (W-1)/2, (H-1)/2 (see the CCL path).
-    let cx = (width - 1) as f32 / 2.0;
-    let cy = (height - 1) as f32 / 2.0;
-    let mut centroids: Vec<Centroid> = Vec::new();
-    let num_blobs_raw = regions.n_regions;
-    'region: for kreg in 0..regions.n_regions {
-        let region_runs = &order[offsets[kreg] as usize..offsets[kreg + 1] as usize];
-        let extent = regions.extent(region_runs);
-        let npix = extent.npix;
-        if npix < config.min_pixels || npix > config.max_pixels {
-            continue;
-        }
-        if !extent.clear_of_border(config.border_margin as usize, w, h) {
-            continue;
-        }
-
-        // Intensity-weighted moments over the run list, background
-        // re-interpolated per run (identical arithmetic to the sweep's).
-        let mut sum_w = 0.0_f64;
-        let mut sum_wx = 0.0_f64;
-        let mut sum_wy = 0.0_f64;
-        let mut sum_wxx = 0.0_f64;
-        let mut sum_wyy = 0.0_f64;
-        let mut sum_wxy = 0.0_f64;
-        let mut peak_val = f32::NEG_INFINITY;
-        let mut peak_x = 0usize;
-        let mut peak_y = 0usize;
-        for &i in region_runs {
-            let run = regions.runs[i as usize];
-            let r = run.row as usize;
-            let rp = bg.row_params(r);
-            let row_off = r * w;
-            for c in run.c0 as usize..=run.c1 as usize {
-                let p = pixels[row_off + c];
-                let weight = (p - bg.value_at(c, rp)).max(0.0) as f64;
-                let (cf, rf) = (c as f64, r as f64);
-                sum_w += weight;
-                sum_wx += weight * cf;
-                sum_wy += weight * rf;
-                sum_wxx += weight * cf * cf;
-                sum_wyy += weight * rf * rf;
-                sum_wxy += weight * cf * rf;
-                if p > peak_val {
-                    peak_val = p;
-                    peak_x = c;
-                    peak_y = r;
-                }
-            }
-        }
-        if sum_w <= 0.0 {
-            continue;
-        }
-
-        let fx = sum_wx / sum_w;
-        let fy = sum_wy / sum_w;
-
-        // Intensity-weighted central second moments — the same statistic the
-        // CCL path reports as `cov` and judges elongation on.
-        let cxx = sum_wxx / sum_w - fx * fx;
-        let cyy = sum_wyy / sum_w - fy * fy;
-        let cxy = sum_wxy / sum_w - fx * fy;
-        if let Some(max_elong) = config.max_elongation {
-            if elongation_from_cov(cxx, cyy, cxy) > max_elong {
-                continue 'region;
-            }
-        }
-
-        let (pc, pr) = (peak_x, peak_y);
-        let peak_bg = bg.value_at(pc, bg.row_params(pr)) as f64;
-        let v = |dy: isize, dx: isize| -> f64 {
-            let rr = (pr as isize + dy) as usize;
-            let cc = (pc as isize + dx) as usize;
-            // Non-finite neighbours read as background (residual 0), like
-            // the CCL path: a −∞ next to the peak would otherwise make the
-            // sharpness infinite and reject a real star.
-            let p = pixels[rr * w + cc];
-            if p.is_finite() {
-                p as f64 - peak_bg
-            } else {
-                0.0
-            }
-        };
-
-        // Sharpness gate, peak refinement, and assembly are shared with the
-        // CCL path (see `finish_region`).
-        let saturated = config.saturation_level.is_some_and(|s| peak_val >= s);
-        if let Some(c) = finish_region(
-            npix,
-            (pc, pr),
-            (w, h),
-            (fx, fy),
-            (cxx, cyy, cxy),
-            sum_w,
-            saturated,
-            config.max_sharpness,
-            (cx, cy),
-            v,
-        ) {
-            centroids.push(c);
-        }
-    }
-
-    sort_and_truncate_by_mass(&mut centroids, config.max_centroids);
-
-    let bg_mean = bg.level();
-
-    Ok(CentroidExtractionResult {
-        centroids,
-        image_width: width,
-        image_height: height,
-        background_mean: bg_mean,
-        background_sigma: sigma,
-        threshold: bg_mean + k * sigma,
-        num_blobs_raw,
-    })
+    let defaults = CentroidExtractionConfig::default();
+    let full = CentroidExtractionConfig {
+        sigma_threshold: config.sigma_threshold,
+        min_pixels: config.min_pixels,
+        max_pixels: config.max_pixels,
+        max_centroids: config.max_centroids,
+        local_bg_block_size: Some(config.bg_grid),
+        max_elongation: config.max_elongation,
+        matched_filter_sigma: None,
+        max_sharpness: config.max_sharpness,
+        saturation_level: config.saturation_level,
+        deblend: DeblendMode::Off,
+        border_margin: config.border_margin,
+        sigma_clip_iterations: defaults.sigma_clip_iterations,
+        sigma_clip_factor: defaults.sigma_clip_factor,
+    };
+    ccl::extract_from_gray(
+        pixels,
+        width,
+        height,
+        &full,
+        ccl::Tuning::FAST,
+        &mut ccl::Scratch::new(),
+    )
 }

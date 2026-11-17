@@ -83,7 +83,7 @@ largest internal cost.
 | `distortion/calibrate.rs` | Branches on `n_valid` solves: 1 image → pooled fit with the solve's own attitude; 2+ → alternating per-image WCS refine + global fit (3 outer iterations). Both call `fit::fit_pooled` |
 | `distortion/fit.rs` | `fit_pooled` (polynomial / radial dispatch, before/after RMSE); `fit_polynomial_sigma_clip`, `fit_radial_centered_sigma_clip` loops |
 | `distortion/polynomial.rs` | `term_pairs(order)`, `coeff_index(p, q)`, `num_coeffs(order)` — SIP term ordering; Newton `undistort` (NaN when it does not converge) |
-| `centroid_extraction/` (feature `image`) | Local background subtraction, CCL, quadratic sub-pixel peak refinement |
+| `centroid_extraction/` (feature `image`) | One pipeline (`ccl.rs`): block-median background surface, noise estimate, optional matched filter, run-length CCL (`runs.rs`), per-blob moments, quadratic peak refinement. `extract_centroids_fast` (`fast.rs`) is a preset over it (`ccl::Tuning::FAST`: no filter, no per-blob annulus, coarser sampling) |
 | `centroid/`, `star/` | Data types |
 | `starcatalog/` | Catalog management, proper-motion propagation |
 | `catalogs/` | Gaia DR3 (+ optional Hipparcos). Merged catalog: Gaia primary, Hipparcos for G<4 |

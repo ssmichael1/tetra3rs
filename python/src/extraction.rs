@@ -473,16 +473,14 @@ impl PyCentroidExtractor {
     }
 }
 
-/// Fast single-pass centroid extraction — the "adequate star tracker" path.
+/// Fast centroid extraction — the "adequate star tracker" preset.
 ///
-/// Reads each pixel once: a cheap subsampled pre-pass builds a coarse
-/// background grid, then a single raster sweep thresholds against the
-/// interpolated background and groups lit pixels into connected regions
-/// (run-length + union-find), emitting one center-of-mass per region. No
-/// convolution and no second pass, so it is several times faster than
-/// :func:`extract_centroids` — at the cost of faint-star sensitivity and
-/// sub-pixel accuracy (~0.1 px on bright stars). Use :func:`extract_centroids`
-/// for calibration or faint-star work.
+/// The same pipeline as :func:`extract_centroids` configured for latency: no
+/// matched filter, no per-blob annulus background, and a coarser background
+/// subsample. Markedly faster, at the cost of faint-star sensitivity. Use
+/// :func:`extract_centroids` for calibration or faint-star work.
+/// ``sigma_threshold`` means the same thing in both: sigmas of the noise
+/// measured against the interpolated background.
 ///
 /// Returns the same ``ExtractionResult`` as :func:`extract_centroids`, so it
 /// is a drop-in for ``solve_from_centroids``.
@@ -492,7 +490,7 @@ impl PyCentroidExtractor {
 ///         Supported dtypes: float64, float32, uint16, int16, uint8.
 ///     sigma_threshold: Detection threshold in noise sigmas above the local
 ///         background. Default 5.0.
-///     bg_grid: Coarse background-grid block size in pixels. Gradients
+///     bg_grid: Background-grid block size in pixels. Gradients
 ///         (vignetting, Milky Way) are tracked via this grid. Default 64.
 ///     min_pixels: Minimum pixels in a region (rejects hot pixels). Default 2.
 ///     max_centroids: Maximum number of centroids to return, brightest first.
