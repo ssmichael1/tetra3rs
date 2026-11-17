@@ -249,6 +249,11 @@ for frame in frames:
 extractor per thread. (Rust: `CentroidExtractor::extract_from_raw` /
 `extract_from_image`.)
 
+The [fast preset](#fast-preset-extract_centroids_fast) has the same option:
+`extractor.extract_fast(frame, ...)` (Rust:
+`CentroidExtractor::extract_fast_from_raw`). It matters there too — the preset
+works on a full-frame residual image (16 MB at 2048²).
+
 ## Fast preset (`extract_centroids_fast`)
 
 The default configuration prioritizes fidelity — an optional matched filter,
@@ -292,7 +297,7 @@ first), so it is a drop-in for `solve_from_centroids`.
 | `bg_grid` | 64 | Background-grid block size (pixels) |
 | `min_pixels` | 2 | Minimum pixels in a region (rejects hot pixels) |
 | `max_pixels` | 10,000 | Maximum pixels in a region (rejects satellite trails / bloomed regions, which would otherwise be the *brightest* centroid handed to the solver) |
-| `max_elongation` | None | Maximum elongation ratio (opt-in — moment-based elongation is noisy for few-pixel regions) |
+| `max_elongation` | None | Maximum elongation ratio, ≥ 1 (opt-in — moment-based elongation is noisy for few-pixel regions) |
 | `max_sharpness` | 0.9 | Hot-pixel / cosmic-ray gate (see [blob filtering](#5-blob-filtering); None = disabled) |
 | `saturation_level` | None | Peak level at which sub-pixel refinement is skipped (CoM kept) |
 | `border_margin` | 0 | Drop regions within this margin of an image edge (0 = off) |
@@ -318,9 +323,9 @@ path's knobs are listed [above](#configuration)).
 | `min_pixels` | 3 | Minimum blob size (pixels) |
 | `max_pixels` | 10,000 | Maximum blob size (pixels) |
 | `max_centroids` | None | Maximum centroids to return (None = all) |
-| `local_bg_block_size` | 64 | Tile size for local background (None = skip) |
-| `max_elongation` | 3.0 | Maximum elongation ratio (None = disabled) |
-| `matched_filter_sigma` | 1.5 | Gaussian matched filter σ in pixels (None = disabled) |
+| `local_bg_block_size` | 64 | Tile size for local background (None = global background only; a tile larger than the image is treated as one tile) |
+| `max_elongation` | 3.0 | Maximum elongation ratio, ≥ 1 (None = disabled) |
+| `matched_filter_sigma` | 1.5 | Gaussian matched filter σ in pixels, in (0, 64] (None = disabled; 0 or a negative value is an error) |
 | `max_sharpness` | 0.9 | Hot-pixel / cosmic-ray peak-sharpness gate (None = disabled) |
 | `saturation_level` | None | Sensor saturation level; saturated peaks keep the CoM position |
 | `deblend` | `"off"` | `"reject"` drops blobs with multiple distinct intensity peaks |

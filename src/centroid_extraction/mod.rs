@@ -95,7 +95,9 @@ pub struct CentroidExtractionConfig {
     /// Default: None
     pub max_centroids: Option<usize>,
 
-    /// Number of iterations for sigma-clipped background estimation.
+    /// Passes of the sigma-clipped noise estimate: the first pass is the
+    /// unclipped estimate and each further one clips and re-estimates, so
+    /// `N` means up to `N − 1` clips (0 and 1 both mean "no clipping").
     /// Default: 5
     pub sigma_clip_iterations: usize,
 
@@ -116,6 +118,8 @@ pub struct CentroidExtractionConfig {
     /// image width. Smaller blocks follow finer structure but risk
     /// subtracting real stars.
     ///
+    /// A block larger than the image is treated as one block covering it.
+    ///
     /// When `None`, only global background subtraction is used (original
     /// behavior).
     ///
@@ -127,7 +131,7 @@ pub struct CentroidExtractionConfig {
     /// (e.g. cosmic rays, satellite trails, diffraction spikes).
     ///
     /// A value of 2.0 means the blob can be at most 2× longer than wide.
-    /// Set to a large value (e.g. 100) or `None` to disable.
+    /// Must be >= 1 when set; `None` disables the test.
     ///
     /// Default: `Some(3.0)`
     pub max_elongation: Option<f32>,
@@ -149,6 +153,9 @@ pub struct CentroidExtractionConfig {
     /// noise-suppression factor, so `sigma_threshold` means "sigmas of the
     /// noise actually present in the thresholded image" whether the filter
     /// is on or off — no retuning needed when toggling it.
+    ///
+    /// Must be in `(0, 64]` px when set (a non-positive or NaN value is an
+    /// error, not "off").
     ///
     /// Default: Some(1.5). Set `None` to threshold the unfiltered image
     /// (marginally faster; appropriate when downstream limits like
@@ -226,13 +233,19 @@ pub struct CentroidExtractionResult {
     /// Image height in pixels.
     pub image_height: u32,
 
-    /// Estimated background level (in image intensity units).
+    /// Estimated background level, in image intensity units (with a local
+    /// background model: the median level of the background grid plus the
+    /// median residual against its surface).
     pub background_mean: f32,
 
     /// Estimated background noise standard deviation.
     pub background_sigma: f32,
 
-    /// Detection threshold used (background_mean + sigma_threshold * background_sigma).
+    /// Representative detection threshold in image intensity units:
+    /// `background_mean + sigma_threshold · background_sigma` (times the
+    /// kernel's noise-suppression factor when the matched filter is on). With
+    /// a local background model the threshold actually applied follows the
+    /// background surface; this is its value at the median level.
     pub threshold: f32,
 
     /// Number of blobs (connected regions) found before the size/elongation
@@ -361,6 +374,18 @@ impl CentroidExtractor {
             ccl::Tuning::FULL,
             &mut self.scratch,
         )
+    }
+    /// [`extract_centroids_fast`] on this extractor's buffers — the fast
+    /// preset for a frame loop (it works on a full-frame residual image,
+    /// 16 MB at 2048², which the free function allocates on every call).
+    pub fn extract_fast_from_raw(
+        &mut self,
+        pixels: &[f32],
+        width: u32,
+        height: u32,
+        config: &FastCentroidConfig,
+    ) -> Result<CentroidExtractionResult> {
+        fast::extract_fast(pixels, width, height, config, &mut self.scratch)
     }
 }
 
@@ -2289,5 +2314,147 @@ mod tests {
         let r =
             extract_centroids_fast(&pixels, width, height, &FastCentroidConfig::default()).unwrap();
         assert_eq!(r.centroids.len(), 1);
+    }
+
+    #[test]
+    fn test_background_stats_are_in_image_units_on_both_presets() {
+        // With a local background model the pipeline works on residuals
+        // (mean ≈ 0); the reported level and threshold must still be in
+        // image units, whichever entry point is used.
+        let (width, height) = (256u32, 256u32);
+        let pixels = render_stars(width, height, 100.0, 0.0, 6.0, 1.5, &TRIO);
+        let full = extract_centroids_from_raw(
+            &pixels,
+            width,
+            height,
+            &CentroidExtractionConfig {
+                matched_filter_sigma: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fast =
+            extract_centroids_fast(&pixels, width, height, &FastCentroidConfig::default()).unwrap();
+        for r in [&full, &fast] {
+            assert!(
+                (r.background_mean - 100.0).abs() < 1.0,
+                "{}",
+                r.background_mean
+            );
+            let expect = r.background_mean + 5.0 * r.background_sigma;
+            assert!(
+                (r.threshold - expect).abs() < 1e-3,
+                "{} vs {expect}",
+                r.threshold
+            );
+        }
+        // Global background: unchanged meaning.
+        let global = extract_centroids_from_raw(
+            &pixels,
+            width,
+            height,
+            &CentroidExtractionConfig {
+                matched_filter_sigma: None,
+                local_bg_block_size: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!((global.background_mean - 100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_settings_that_would_be_ignored_or_reject_everything_are_errors() {
+        let pixels = vec![0.0_f32; 32 * 32];
+        let bad = |f: fn(&mut CentroidExtractionConfig)| {
+            let mut c = CentroidExtractionConfig::default();
+            f(&mut c);
+            assert!(extract_centroids_from_raw(&pixels, 32, 32, &c).is_err());
+        };
+        // Used to mean "filter off" silently.
+        bad(|c| c.matched_filter_sigma = Some(0.0));
+        bad(|c| c.matched_filter_sigma = Some(-1.5));
+        bad(|c| c.matched_filter_sigma = Some(f32::NAN));
+        // An elongation ratio is >= 1: anything lower rejects every blob.
+        bad(|c| c.max_elongation = Some(0.5));
+        bad(|c| c.max_elongation = Some(f32::NAN));
+        bad(|c| {
+            c.min_pixels = 50;
+            c.max_pixels = 10;
+        });
+        // The same checks reach the fast preset.
+        let fast_bad = FastCentroidConfig {
+            max_elongation: Some(0.5),
+            ..Default::default()
+        };
+        assert!(extract_centroids_fast(&pixels, 32, 32, &fast_bad).is_err());
+        // `None` remains the way to switch either off.
+        let off = CentroidExtractionConfig {
+            matched_filter_sigma: None,
+            max_elongation: None,
+            ..Default::default()
+        };
+        assert!(extract_centroids_from_raw(&pixels, 32, 32, &off).is_ok());
+    }
+
+    #[test]
+    fn test_block_larger_than_image_is_one_block() {
+        // The subsample stride derives from the block size; an oversized
+        // block used to reduce the whole background to pixel (0, 0).
+        let (width, height) = (256u32, 256u32);
+        let pixels = render_stars(width, height, 100.0, 0.0, 6.0, 1.5, &TRIO);
+        for block in [4096u32, u32::MAX] {
+            let full = CentroidExtractionConfig {
+                local_bg_block_size: Some(block),
+                ..Default::default()
+            };
+            let r = extract_centroids_from_raw(&pixels, width, height, &full).unwrap();
+            assert_eq!(r.centroids.len(), 3, "full, block {block}");
+            assert!(r.background_sigma > 1.0);
+            let fast = FastCentroidConfig {
+                bg_grid: block,
+                ..Default::default()
+            };
+            let r = extract_centroids_fast(&pixels, width, height, &fast).unwrap();
+            assert_eq!(r.centroids.len(), 3, "fast, block {block}");
+            assert!(r.background_sigma > 1.0);
+        }
+    }
+
+    #[test]
+    fn test_extractor_fast_matches_free_function_across_reuse() {
+        let config = FastCentroidConfig::default();
+        let mut extractor = CentroidExtractor::new();
+        // Different sizes and contents, plus a default-preset call in
+        // between, so stale buffer contents would show.
+        let frames = [
+            (
+                256u32,
+                256u32,
+                render_stars(256, 256, 100.0, 20.0, 6.0, 1.5, &TRIO),
+            ),
+            (
+                128,
+                96,
+                render_stars(128, 96, 40.0, 0.0, 3.0, 1.4, &[(60.2, 40.7, 300.0)]),
+            ),
+            (256, 256, render_stars(256, 256, 10.0, 5.0, 2.0, 1.6, &TRIO)),
+        ];
+        for (w, h, pixels) in &frames {
+            let a = extract_centroids_fast(pixels, *w, *h, &config).unwrap();
+            let b = extractor
+                .extract_fast_from_raw(pixels, *w, *h, &config)
+                .unwrap();
+            assert_eq!(a.centroids.len(), b.centroids.len());
+            for (ca, cb) in a.centroids.iter().zip(&b.centroids) {
+                assert_eq!(ca.x.to_bits(), cb.x.to_bits());
+                assert_eq!(ca.y.to_bits(), cb.y.to_bits());
+                assert_eq!(ca.mass.map(f32::to_bits), cb.mass.map(f32::to_bits));
+            }
+            assert_eq!(a.threshold.to_bits(), b.threshold.to_bits());
+            extractor
+                .extract_from_raw(pixels, *w, *h, &CentroidExtractionConfig::default())
+                .unwrap();
+        }
     }
 }

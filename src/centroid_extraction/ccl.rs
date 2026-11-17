@@ -65,9 +65,6 @@ pub(super) struct Tuning {
     pub blob_annulus: bool,
     /// Upper bound on the residual sample the noise estimate runs on.
     pub max_noise_samples: usize,
-    /// Report `background_mean` / `threshold` in image units (grid level
-    /// plus the residual statistics) rather than as residual statistics.
-    pub image_unit_stats: bool,
 }
 
 impl Tuning {
@@ -77,7 +74,6 @@ impl Tuning {
         stride_divisor: 16,
         blob_annulus: true,
         max_noise_samples: usize::MAX,
-        image_unit_stats: false,
     };
     /// [`extract_centroids_fast`](super::extract_centroids_fast).
     pub(super) const FAST: Self = Self {
@@ -85,7 +81,6 @@ impl Tuning {
         blob_annulus: false,
         // The default block (64) samples 65k residuals of a 2048² frame.
         max_noise_samples: 1 << 17,
-        image_unit_stats: true,
     };
 }
 
@@ -131,21 +126,36 @@ pub(super) fn extract_from_gray(
         ));
     }
     check_sigma_threshold(config.sigma_threshold)?;
+    // Settings that would otherwise be silently ignored, or silently reject
+    // every blob.
+    if config.min_pixels > config.max_pixels {
+        return Err(Error::InvalidInput(format!(
+            "min_pixels ({}) must not exceed max_pixels ({})",
+            config.min_pixels, config.max_pixels
+        )));
+    }
+    if let Some(e) = config.max_elongation {
+        // An elongation ratio is >= 1 by construction (major / minor axis).
+        if e.is_nan() || e < 1.0 {
+            return Err(Error::InvalidInput(format!(
+                "max_elongation must be >= 1 (or None to disable), got {e}"
+            )));
+        }
+    }
 
     // The Gaussian kernel spans 2·⌈3σ⌉+1 taps, so an absurd σ is a
     // multi-gigabyte allocation / effective hang, not a blur. 64 px covers
     // any plausible star PSF with two orders of magnitude to spare.
     const MAX_MATCHED_FILTER_SIGMA: f32 = 64.0;
     if let Some(s) = config.matched_filter_sigma {
-        if s.is_finite() && s > MAX_MATCHED_FILTER_SIGMA {
+        if !(s > 0.0 && s <= MAX_MATCHED_FILTER_SIGMA) {
             return Err(Error::InvalidInput(format!(
-                "matched_filter_sigma must be <= {MAX_MATCHED_FILTER_SIGMA} px, got {s}"
+                "matched_filter_sigma must be in (0, {MAX_MATCHED_FILTER_SIGMA}] px \
+                 (or None to disable the filter), got {s}"
             )));
         }
     }
-    let filter_sigma = config
-        .matched_filter_sigma
-        .filter(|s| s.is_finite() && *s > 0.0);
+    let filter_sigma = config.matched_filter_sigma;
 
     // ── Steps 1-2: background model, residuals, and noise stats ──
     // With `local_bg_block_size` set, a block-median grid is built (from a
@@ -181,12 +191,13 @@ pub(super) fn extract_from_gray(
     let mut rounding_margin = 0.0_f32;
 
     if let Some(block_size) = config.local_bg_block_size {
-        let bs = block_size as usize;
+        // A block larger than the image is one block: clamping keeps the
+        // subsample stride (derived from the block size) inside the frame
+        // instead of reducing the whole background to a single pixel.
+        let bs = (block_size as usize).min(w.max(h));
         let stride = (bs / tuning.stride_divisor).max(1);
         let bg = BackgroundGrid::build(gray_input, w, h, bs, stride);
-        if tuning.image_unit_stats {
-            grid_level = Some(bg.level());
-        }
+        grid_level = Some(bg.level());
         rounding_margin = bg.rounding_margin();
 
         // The noise sample uses the grid's lattice spacing unless that
@@ -357,7 +368,9 @@ pub(super) fn extract_from_gray(
     sort_and_truncate_by_mass(&mut centroids, config.max_centroids);
 
     // With local background the statistics above are those of the residual
-    // image (mean ≈ 0); `grid_level` shifts them back to image units.
+    // image (mean ≈ 0); the grid's level shifts them back to image units, so
+    // `background_mean` and `threshold` read the same whichever background
+    // model is in use.
     let level = grid_level.unwrap_or(0.0);
     Ok(CentroidExtractionResult {
         centroids,

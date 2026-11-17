@@ -235,7 +235,7 @@ impl PyExtractionResult {
 ///         sigma~1.5 px PSF). Used only to form the detection mask, so
 ///         photometry is unaffected, and the threshold is automatically
 ///         scaled for the filtered noise level — no retuning needed.
-///         None = disabled. Default 1.5.
+///         None = disabled (0 or a negative value is an error). Default 1.5.
 ///     max_sharpness: Reject blobs whose peak sharpness
 ///         ``(peak - mean(8 neighbors)) / peak`` exceeds this — values near 1
 ///         are hot pixels / cosmic rays, not stars. A critically sampled PSF
@@ -383,6 +383,8 @@ fn ccl_config(
 ///     extractor = tetra3rs.CentroidExtractor()
 ///     for frame in frames:
 ///         result = extractor.extract(frame, sigma_threshold=5.0)
+///
+/// ``extract_fast`` does the same for :func:`extract_centroids_fast`.
 #[pyclass(name = "CentroidExtractor", module = "tetra3rs")]
 pub(crate) struct PyCentroidExtractor {
     inner: tetra3::centroid_extraction::CentroidExtractor,
@@ -456,6 +458,66 @@ impl PyCentroidExtractor {
         // re-entering), on the module's own thread pool (see `threads`).
         let result = crate::threads::run(image.py(), threads, pixels.len(), || {
             inner.extract_from_raw(&pixels, width, height, &config)
+        })?
+        .map_err(crate::helpers::map_tetra3_err)?;
+        Ok(PyExtractionResult {
+            inner: result.into(),
+        })
+    }
+
+    /// The fast preset (:func:`extract_centroids_fast`) on this extractor's
+    /// buffers.
+    ///
+    /// Takes exactly the arguments of :func:`extract_centroids_fast`
+    /// (including the keyword-only ``threads``), with the same defaults, and
+    /// returns the same ``ExtractionResult``, bit for bit. The preset works
+    /// on a full-frame residual image (16 MB at 2048²) that the free
+    /// function allocates on every call; a frame loop should call this.
+    #[pyo3(signature = (
+        image,
+        sigma_threshold = 5.0,
+        bg_grid = 64,
+        min_pixels = 2,
+        max_centroids = None,
+        max_sharpness = Some(0.9),
+        saturation_level = None,
+        max_pixels = 10000,
+        max_elongation = None,
+        border_margin = 0,
+        *,
+        threads = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn extract_fast(
+        &mut self,
+        image: &Bound<'_, pyo3::PyAny>,
+        sigma_threshold: f32,
+        bg_grid: u32,
+        min_pixels: usize,
+        max_centroids: Option<usize>,
+        max_sharpness: Option<f32>,
+        saturation_level: Option<f32>,
+        max_pixels: usize,
+        max_elongation: Option<f32>,
+        border_margin: u32,
+        threads: Option<usize>,
+    ) -> PyResult<PyExtractionResult> {
+        let config = FastCentroidConfig {
+            sigma_threshold,
+            bg_grid,
+            min_pixels,
+            max_centroids,
+            max_sharpness,
+            saturation_level,
+            max_pixels,
+            max_elongation,
+            border_margin,
+        };
+        let (pixels, width, height) = image_to_f32(image)?;
+        let inner = &mut self.inner;
+        // As in `extract`: GIL released, module-owned thread pool.
+        let result = crate::threads::run(image.py(), threads, pixels.len(), || {
+            inner.extract_fast_from_raw(&pixels, width, height, &config)
         })?
         .map_err(crate::helpers::map_tetra3_err)?;
         Ok(PyExtractionResult {

@@ -1194,6 +1194,8 @@ class CentroidExtractor:
         extractor = tetra3rs.CentroidExtractor()
         for frame in frames:
             result = extractor.extract(frame, sigma_threshold=5.0)
+
+    ``extract_fast`` does the same for :func:`extract_centroids_fast`.
     """
 
     def __init__(self) -> None: ...
@@ -1235,7 +1237,8 @@ class CentroidExtractor:
                 sigma~1.5 px PSF). Used only to form the detection mask, so
                 photometry is unaffected, and the threshold is automatically
                 scaled for the filtered noise level — no retuning needed.
-                None = disabled. Default 1.5.
+                None = disabled (0 or a negative value is an error).
+                Default 1.5.
             max_sharpness: Reject blobs whose peak sharpness
                 ``(peak - mean(8 neighbors)) / peak`` exceeds this — values near
                 1 are hot pixels / cosmic rays, not stars. A critically sampled
@@ -1263,6 +1266,32 @@ class CentroidExtractor:
 
         Returns:
             ExtractionResult with centroids and image statistics.
+        """
+        ...
+
+    def extract_fast(
+        self,
+        image: npt.NDArray,
+        sigma_threshold: float = 5.0,
+        bg_grid: int = 64,
+        min_pixels: int = 2,
+        max_centroids: Optional[int] = None,
+        max_sharpness: Optional[float] = 0.9,
+        saturation_level: Optional[float] = None,
+        max_pixels: int = 10000,
+        max_elongation: Optional[float] = None,
+        border_margin: int = 0,
+        *,
+        threads: Optional[int] = None,
+    ) -> ExtractionResult:
+        """The fast preset (:func:`extract_centroids_fast`) on this
+        extractor's buffers.
+
+        Takes exactly the arguments of :func:`extract_centroids_fast`, with
+        the same defaults, and returns the same result bit for bit. The
+        preset works on a full-frame residual image (16 MB at 2048²) that
+        the free function allocates on every call; a frame loop should call
+        this instead.
         """
         ...
 

@@ -630,6 +630,38 @@ class TestCentroidExtractor:
             assert len(fresh.centroids) >= 2
             assert self._flat(fresh) == self._flat(reused)
 
+    def test_fast_reuse_matches_free_function(self):
+        extractor = tetra3rs.CentroidExtractor()
+        # big -> small -> big, with a default-preset call in between
+        for i, (w, h) in enumerate([(200, 160), (96, 80), (200, 160)]):
+            image = self._scene(w, h, seed=10 + i)
+            fresh = tetra3rs.extract_centroids_fast(image, sigma_threshold=5.0)
+            reused = extractor.extract_fast(image, sigma_threshold=5.0)
+            assert len(fresh.centroids) >= 2
+            assert self._flat(fresh) == self._flat(reused)
+            extractor.extract(image)
+
+    def test_background_stats_in_image_units(self):
+        image = self._scene(200, 160, seed=4)
+        for result in (
+            tetra3rs.extract_centroids(image),
+            tetra3rs.extract_centroids(image, local_bg_block_size=None),
+            tetra3rs.extract_centroids_fast(image),
+        ):
+            assert abs(result.background_mean - 100.0) < 2.0
+            assert result.threshold > result.background_mean
+
+    def test_rejects_settings_that_were_silently_ignored(self):
+        image = self._scene(96, 80, seed=5)
+        for kw in (
+            dict(matched_filter_sigma=0.0),
+            dict(matched_filter_sigma=-1.0),
+            dict(max_elongation=0.5),
+            dict(min_pixels=50, max_pixels=10),
+        ):
+            with pytest.raises(ValueError):
+                tetra3rs.extract_centroids(image, **kw)
+
     def test_pickle_gives_a_working_extractor(self):
         extractor = tetra3rs.CentroidExtractor()
         image = self._scene(120, 90, seed=3)

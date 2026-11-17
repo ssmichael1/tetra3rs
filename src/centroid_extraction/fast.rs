@@ -66,7 +66,7 @@ pub struct FastCentroidConfig {
     /// Maximum elongation ratio (major/minor axis from intensity-weighted
     /// second moments) — rejects streaks and trails too small for
     /// `max_pixels`. Off by default: moment-based elongation is noisy for
-    /// regions of only a few pixels (this path's `min_pixels` default is 2),
+    /// regions of only a few pixels (this preset's `min_pixels` default is 2),
     /// so enable it (e.g. 3.0-5.0) when trails are expected and `min_pixels`
     /// is raised enough (≳5) for the moments to be meaningful.
     /// Default: None (disabled)
@@ -120,14 +120,26 @@ impl Default for FastCentroidConfig {
 /// Returns the same [`CentroidExtractionResult`] (centroids in
 /// image-center-origin coordinates, brightest first), so it is a drop-in for
 /// [`SolverDatabase::solve_from_centroids`](crate::SolverDatabase::solve_from_centroids).
-/// `background_mean` and `threshold` are in image units (the grid's median
-/// level plus the residual statistics), `background_sigma` is the global
-/// noise σ, and `num_blobs_raw` the region count before the size filters.
+/// A frame loop should use
+/// [`CentroidExtractor::extract_fast_from_raw`](super::CentroidExtractor::extract_fast_from_raw),
+/// which keeps the working buffers between calls.
 pub fn extract_centroids_fast(
     pixels: &[f32],
     width: u32,
     height: u32,
     config: &FastCentroidConfig,
+) -> Result<CentroidExtractionResult> {
+    extract_fast(pixels, width, height, config, &mut ccl::Scratch::new())
+}
+
+/// [`extract_centroids_fast`] on caller-owned working buffers (see
+/// [`CentroidExtractor::extract_fast_from_raw`](super::CentroidExtractor::extract_fast_from_raw)).
+pub(super) fn extract_fast(
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    config: &FastCentroidConfig,
+    scratch: &mut ccl::Scratch,
 ) -> Result<CentroidExtractionResult> {
     check_pixel_len(pixels.len(), width, height)?;
     if config.bg_grid == 0 {
@@ -149,12 +161,5 @@ pub fn extract_centroids_fast(
         sigma_clip_iterations: defaults.sigma_clip_iterations,
         sigma_clip_factor: defaults.sigma_clip_factor,
     };
-    ccl::extract_from_gray(
-        pixels,
-        width,
-        height,
-        &full,
-        ccl::Tuning::FAST,
-        &mut ccl::Scratch::new(),
-    )
+    ccl::extract_from_gray(pixels, width, height, &full, ccl::Tuning::FAST, scratch)
 }

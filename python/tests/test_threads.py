@@ -63,6 +63,7 @@ def _extractors():
         "extract_centroids": tetra3rs.extract_centroids,
         "extract_centroids_fast": tetra3rs.extract_centroids_fast,
         "CentroidExtractor.extract": extractor.extract,
+        "CentroidExtractor.extract_fast": extractor.extract_fast,
     }
 
 
