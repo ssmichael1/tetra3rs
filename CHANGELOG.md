@@ -19,6 +19,7 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 - **Breaking:** `extract_centroids_from_raw` / `_from_image` reject `sigma_threshold <= 0` (the fast path already did). ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
 - **Breaking:** polynomial distortion fits need `2 * num_coeffs(order)` matched points (was `num_coeffs`, an exactly determined fit). ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- `extract_centroids_fast` is now a preset of the main extraction pipeline (no matched filter, no per-blob annulus, coarser sampling) instead of a separate implementation; signatures unchanged. Its `sigma_threshold` uses the pipeline's unbiased noise estimate, so it detects more at the same setting, and it now allocates the full-frame residual image. ([#84](https://github.com/ssmichael1/tetra3rs/pull/84))
 - Tests read FITS images with `fitskit`; `BreadthFirstCombinations` no longer keeps a dedup set (same order). ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
 
 ### Fixed
