@@ -7,6 +7,7 @@ must be abandoned, not used — otherwise the first such call in a forked child
 waits forever.
 """
 
+import functools
 import multiprocessing
 import os
 import pickle
@@ -45,7 +46,13 @@ def _key(result):
     """Everything an extraction returns, exactly (floats compared bit for bit)."""
     return (
         [
-            (c.x, c.y, c.brightness, None if c.cov is None else c.cov.tobytes())
+            (
+                c.x,
+                c.y,
+                c.brightness,
+                None if c.cov is None else c.cov.tobytes(),
+                None if c.shape is None else c.shape.tobytes(),
+            )
             for c in result.centroids
         ],
         result.image_width,
@@ -54,15 +61,23 @@ def _key(result):
         result.background_sigma,
         result.threshold,
         result.num_blobs_raw,
+        result.psf_sigma_estimate,
     )
 
 
 def _extractors():
+    """The extraction entry points, with detection at both binnings (the
+    binned and full-resolution paths parallelize different-sized passes)."""
     extractor = tetra3rs.CentroidExtractor()
     return {
         "extract_centroids": tetra3rs.extract_centroids,
-        "extract_centroids_fast": tetra3rs.extract_centroids_fast,
+        "extract_centroids[full-res]": functools.partial(
+            tetra3rs.extract_centroids, detection_binning=1
+        ),
         "CentroidExtractor.extract": extractor.extract,
+        "CentroidExtractor.extract[full-res]": functools.partial(
+            extractor.extract, detection_binning=1
+        ),
     }
 
 
@@ -96,12 +111,9 @@ def test_threads_validation(name):
         fn(LARGE, threads=1_000_000)
     with pytest.raises((OverflowError, ValueError)):
         fn(LARGE, threads=-1)
-    # Keyword-only.
+    # Keyword-only (as is everything after `sigma_threshold`).
     with pytest.raises(TypeError):
-        if name == "extract_centroids_fast":
-            fn(LARGE, 5.0, 64, 2, None, 0.9, None, 10000, None, 0, 2)
-        else:
-            fn(LARGE, 5.0, 3, 10000, None, 64, 3.0, 1.5, 0.9, None, "off", 0, 2)
+        fn(LARGE, 5.0, 2)
 
 
 def test_many_thread_counts_reuse_a_bounded_set_of_pools():

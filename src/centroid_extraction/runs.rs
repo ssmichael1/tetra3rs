@@ -1,21 +1,14 @@
-//! Run-length connected-region core shared by both extraction paths.
+//! Run-length connected regions of the detection mask.
 //!
-//! A single raster sweep turns a packed detection bit mask
-//! ([`sweep_runs_mask`]) — where work scales with the number of runs rather
-//! than pixels — into horizontal runs, merging 8-connected runs across rows
-//! with union-find. The pixel-by-pixel predicate form ([`sweep_runs`]) is
-//! kept as the test reference; both produce identical [`RunRegions`] for
-//! the same lit set.
-//! Region payloads live with the callers: the fast path computes moments
-//! from the run lists in a post-pass (lit pixels are ≪1% of the image, so
-//! the second touch is nearly free), while the quality path runs its
-//! annulus/moment/deblend stages per region. This replaces the generic
-//! mask → labels connected-component labeling, which materialized a u8 mask
-//! and a u32 labels buffer (~10 MB at 2 Mpix) and required a per-pixel label
-//! test in every downstream stage.
+//! A raster sweep over a packed bit mask ([`sweep_runs_mask`], or its
+//! row-banded parallel form) turns lit pixels into horizontal runs and
+//! merges 8-connected runs across rows with union-find, so the work scales
+//! with the number of runs rather than pixels. The pixel-by-pixel predicate
+//! form ([`sweep_runs`]) is kept as the test reference; all produce
+//! identical [`RunRegions`] for the same lit set.
 //!
-//! The row packers ([`pack_lit_row`], [`pack_above_row`]) build that bit mask
-//! one image row at a time with a vectorizable compare and a byte→bit fold.
+//! [`pack_lit_row`] builds the mask one image row at a time with a
+//! vectorizable compare and a byte→bit fold.
 
 use crate::prelude::*;
 use core::ops::Range;
@@ -54,23 +47,6 @@ pub(super) struct RegionExtent {
     pub max_row: usize,
     pub min_col: usize,
     pub max_col: usize,
-}
-
-impl RegionExtent {
-    /// Border gate shared by both extraction paths: `false` when the bounding
-    /// box comes within `margin` pixels of any edge of a `w`×`h` image (a
-    /// star cut by the frame edge has a truncated PSF and a CoM biased
-    /// toward the interior — a plausible but wrong position). `margin == 0`
-    /// disables the gate. The `min_*` tests come first so a margin larger
-    /// than the image cannot underflow `h - margin`.
-    #[inline]
-    pub(super) fn clear_of_border(&self, margin: usize, w: usize, h: usize) -> bool {
-        margin == 0
-            || !(self.min_row < margin
-                || self.min_col < margin
-                || self.max_row >= h - margin
-                || self.max_col >= w - margin)
-    }
 }
 
 impl RunRegions {
@@ -120,7 +96,7 @@ impl RunRegions {
 
 /// Run-length 8-connected labeling over `lit(row, col)` — the pixel-by-pixel
 /// reference that [`sweep_runs_mask`] (and its banded variant) is tested
-/// against; both extraction paths use the mask form.
+/// against; the pipeline uses the mask form.
 ///
 /// The predicate is called exactly once per pixel in raster order, so callers
 /// may keep per-row state inside the closure (e.g. a row-blended background).
@@ -161,6 +137,7 @@ pub(super) fn sweep_runs(
 /// the number of runs, not pixels. Yields exactly the [`RunRegions`] that
 /// [`sweep_runs`] gives for the same lit set — runs in row-major order,
 /// same connectivity, same first-appearance region ids.
+#[cfg_attr(all(feature = "parallel", not(test)), allow(dead_code))]
 pub(super) fn sweep_runs_mask(
     w: usize,
     h: usize,
@@ -187,7 +164,7 @@ pub(super) fn sweep_runs_mask(
 /// appearance order over that list — so the result is identical to
 /// [`sweep_runs_mask`] regardless of `band_rows` or thread count.
 ///
-/// The CCL path uses it under `parallel`; the sequential build keeps the
+/// The pipeline uses it under `parallel`; the sequential build keeps the
 /// plain sweep (the function stays compiled so its tests run in both).
 #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 pub(super) fn sweep_runs_mask_banded(
@@ -344,24 +321,6 @@ pub(super) fn pack_lit_row(row: &[f32], thr: &[f32], words: &mut [u64]) {
         let mut bytes = [0u8; 64];
         for ((m, &p), &t) in bytes.iter_mut().zip(&row[c0..c1]).zip(&thr[c0..c1]) {
             *m = ((p > t) & (p < f32::INFINITY)) as u8;
-        }
-        *word = pack_bytes(&bytes);
-    }
-}
-
-/// Pack one image row against a single threshold: bit `c % 64` of
-/// `words[c / 64]` is set exactly when `row[c] > thr` (the plain `>`
-/// predicate — a NaN is never lit, `+∞` always is). Same packing as
-/// [`pack_lit_row`]; padding bits are zero.
-#[inline]
-pub(super) fn pack_above_row(row: &[f32], thr: f32, words: &mut [u64]) {
-    debug_assert_eq!(words.len(), row.len().div_ceil(64));
-    for (wi, word) in words.iter_mut().enumerate() {
-        let c0 = wi * 64;
-        let c1 = (c0 + 64).min(row.len());
-        let mut bytes = [0u8; 64];
-        for (m, &p) in bytes.iter_mut().zip(&row[c0..c1]) {
-            *m = (p > thr) as u8;
         }
         *word = pack_bytes(&bytes);
     }
@@ -721,33 +680,6 @@ mod tests {
             assert_eq!(got, expect, "column {c}");
         }
         // Padding bits are zero.
-        assert_eq!(words[w / 64] >> (w % 64), 0);
-    }
-
-    #[test]
-    fn test_pack_above_row_matches_predicate() {
-        let w = 2136usize;
-        let mut state = 0x2545_f491_4f6c_dd1du64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let thr = 2.0_f32;
-        let mut row: Vec<f32> = (0..w).map(|_| (next() % 5) as f32).collect();
-        // Plain `>`: NaN never lit, +inf lit, -inf not.
-        row[3] = f32::NAN;
-        row[64] = f32::INFINITY;
-        row[65] = f32::NEG_INFINITY;
-        row[w - 1] = f32::INFINITY;
-        let mut words = vec![u64::MAX; w.div_ceil(64)];
-        pack_above_row(&row, thr, &mut words);
-        for c in 0..w {
-            let expect = row[c] > thr;
-            let got = words[c / 64] >> (c % 64) & 1 == 1;
-            assert_eq!(got, expect, "column {c}");
-        }
         assert_eq!(words[w / 64] >> (w % 64), 0);
     }
 }

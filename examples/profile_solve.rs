@@ -159,6 +159,7 @@ fn main() {
                 y: (rng.unit() * 2.0 - 1.0) * half_w_px,
                 mass: Some(rng.unit() * 5.0),
                 cov: None,
+                shape: None,
             });
         }
     };

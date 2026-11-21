@@ -130,6 +130,7 @@ fn test_generate_and_solve() {
                     y: cy_rad / pixel_scale,
                     mass: Some(10.0 - db.star_catalog.stars()[idx].mag), // brighter = higher mass
                     cov: None,
+                    shape: None,
                 });
             }
         }
@@ -283,6 +284,7 @@ fn test_matched_indices_survive_dropped_centroid() {
                     y: cy_rad / pixel_scale,
                     mass: Some(10.0 - db.star_catalog.stars()[idx].mag),
                     cov: None,
+                    shape: None,
                 });
                 source_ids.push(db.star_catalog_ids[idx]);
             }
@@ -306,6 +308,7 @@ fn test_matched_indices_survive_dropped_centroid() {
             y: 12.0,
             mass: Some(100.0),
             cov: None,
+            shape: None,
         },
     );
     source_ids.insert(insert_at, i64::MIN); // sentinel: must never be matched
@@ -408,6 +411,7 @@ fn orion_synthetic_centroids(db: &SolverDatabase, fov_rad: f32, image_width: u32
                     y: cy_rad / pixel_scale,
                     mass: Some(10.0 - db.star_catalog.stars()[idx].mag),
                     cov: None,
+                    shape: None,
                 });
             }
         }
@@ -744,6 +748,7 @@ fn generate_centroids_with_noise(
                     y: cy_rad / pixel_scale + ny,
                     mass: Some(10.0 - db.star_catalog.stars()[idx].mag),
                     cov: None,
+                    shape: None,
                 });
             }
         }
@@ -1145,6 +1150,7 @@ fn test_save_and_load_database() {
             y: 25.0 * i as f32 - 60.0,
             mass: Some(100.0),
             cov: None,
+            shape: None,
         })
         .collect();
     let fail = db
@@ -1734,6 +1740,7 @@ fn test_pattern_budget_reports_timeout() {
             y,
             mass: None,
             cov: None,
+            shape: None,
         }
     }
 
@@ -1855,6 +1862,7 @@ fn test_calibration_corrects_aberration_per_image() {
                         y: cy / pixel_scale,
                         mass: Some(10.0 - db.star_catalog.stars()[i].mag),
                         cov: None,
+                        shape: None,
                     });
                 }
             }

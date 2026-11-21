@@ -110,6 +110,7 @@ pub(crate) fn parse_centroids_single(
                     None
                 },
                 cov: None,
+                shape: None,
             })
             .collect());
     }

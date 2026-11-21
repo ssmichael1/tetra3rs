@@ -515,31 +515,61 @@ class ExtractionResult:
 
     @property
     def background_mean(self) -> float:
-        """Estimated background mean."""
+        """Background level (the median block level), in image units."""
         ...
 
     @property
     def background_sigma(self) -> float:
-        """Estimated background standard deviation."""
+        """Background noise sigma per raw pixel (the median block sigma).
+
+        It is measured on the detection image and converted assuming
+        uncorrelated pixel noise, so on resampled or compressed frames it is
+        an equivalent white-noise level rather than the literal pixel scatter.
+        """
         ...
 
     @property
     def threshold(self) -> float:
-        """Detection threshold used."""
+        """Detection threshold at the median block, on the (smoothed) detection
+        image: ``background_mean + sigma_threshold * sigma_detection``.
+        """
         ...
 
     @property
     def num_blobs_raw(self) -> int:
-        """Number of raw blobs before filtering."""
+        """Number of connected regions above threshold, before any filter."""
+        ...
+
+    @property
+    def psf_sigma_estimate(self) -> Optional[float]:
+        """PSF width (Gaussian sigma, pixels) measured from this frame.
+
+        The median over the well-exposed, unsaturated stars. None with fewer
+        than five such stars. Compare with the ``psf_sigma`` you passed; the
+        estimate saturates near twice that value, so if it comes back much
+        larger, raise ``psf_sigma`` and look again.
+        """
         ...
 
 @final
 class Centroid:
-    """A detected star centroid with position, brightness, and shape.
+    """A detected star centroid with position, brightness, position
+    covariance, and shape.
 
     Returned by ``extract_centroids``. Centroids use pixel coordinates
     with the origin at the image center, +X right, +Y down.
     Supports ``pickle`` serialization.
+
+    Attributes:
+        x: X position in pixels (origin at image center, +X right).
+        y: Y position in pixels (origin at image center, +Y down).
+        brightness: Flux above background.
+        cov: 2x2 covariance of the position, [[σx², σxy], [σxy, σy²]] in
+            pixels² — how well the centroid is located. The solver folds it
+            into each star's match tolerance.
+        shape: 2x2 intensity second moments, [[xx, xy], [xy, yy]] in pixels²
+            — how big and how round the star is (about σ_psf² on the
+            diagonal for a round star).
     """
 
     def __reduce__(self) -> tuple: ...
@@ -573,17 +603,27 @@ class Centroid:
 
     @property
     def cov(self) -> Optional[npt.NDArray[np.float64]]:
-        """2x2 intensity-weighted covariance matrix [[sigma_xx, sigma_xy], [sigma_xy, sigma_yy]] in pixels squared.
+        """2x2 covariance of the centroid position, [[σx², σxy], [σxy, σy²]] in pixels².
 
-        The eigenvalues give the squared semi-axes of the intensity profile,
-        and the eigenvectors give the orientation.
+        The position uncertainty from the measured background noise (the
+        star's own photon noise is not included). None for centroids not
+        produced by extraction.
+        """
+        ...
+
+    @property
+    def shape(self) -> Optional[npt.NDArray[np.float64]]:
+        """2x2 intensity second moments of the detection, [[xx, xy], [xy, yy]] in pixels².
+
+        Its size and roundness (about σ_psf² on the diagonal for a round
+        star). None for centroids not produced by extraction.
         """
         ...
 
     def with_offset(self, dx: float, dy: float) -> Centroid:
         """Return a new Centroid with position shifted by (dx, dy).
 
-        Preserves brightness and covariance.
+        Preserves brightness, covariance and shape.
         """
         ...
 
@@ -593,7 +633,7 @@ class Centroid:
         """Remove lens distortion from this centroid's position (distorted → ideal).
 
         Returns a new Centroid at the corrected position.
-        Brightness and covariance are preserved.
+        Brightness, covariance and shape are preserved.
         """
         ...
 
@@ -603,7 +643,7 @@ class Centroid:
         """Apply lens distortion to this centroid's position (ideal → distorted).
 
         Returns a new Centroid at the distorted position.
-        Brightness and covariance are preserved.
+        Brightness, covariance and shape are preserved.
         """
         ...
 
@@ -1179,21 +1219,20 @@ class CentroidExtractor:
     """The :func:`extract_centroids` pipeline with its working buffers kept
     between calls.
 
-    :func:`extract_centroids` allocates its full-image buffers (~32 MB at
-    2048²) fresh on every call, and the first touch of each page costs more
-    than the allocation (~0.4 ms per 2048² frame). An extractor reuses
-    them, resizing only when the frame size changes, so a frame loop pays
-    that once. Results are bit-identical to :func:`extract_centroids`.
+    :func:`extract_centroids` allocates its full-image buffers fresh on
+    every call, and the first touch of each page costs more than the
+    allocation. An extractor reuses them, resizing only when the frame size
+    changes, so a frame loop pays that once. Results are bit-identical to
+    :func:`extract_centroids`.
 
-    The buffers are sized for the largest frame seen and freed with the
-    object. Use one extractor per thread. Pickling keeps no buffers — an
-    unpickled extractor starts empty.
+    The buffers are freed with the object. Use one extractor per thread.
+    Pickling keeps no buffers — an unpickled extractor starts empty.
 
     Example::
 
         extractor = tetra3rs.CentroidExtractor()
         for frame in frames:
-            result = extractor.extract(frame, sigma_threshold=5.0)
+            result = extractor.extract(frame, psf_sigma=1.5)
     """
 
     def __init__(self) -> None: ...
@@ -1201,59 +1240,68 @@ class CentroidExtractor:
         self,
         image: npt.NDArray,
         sigma_threshold: float = 5.0,
-        min_pixels: int = 3,
-        max_pixels: int = 10000,
-        max_centroids: Optional[int] = None,
-        local_bg_block_size: Optional[int] = 64,
-        max_elongation: Optional[float] = 3.0,
-        matched_filter_sigma: Optional[float] = 1.5,
-        max_sharpness: Optional[float] = 0.9,
-        saturation_level: Optional[float] = None,
-        deblend: str = "off",
-        border_margin: int = 0,
         *,
+        psf_sigma: float = 1.5,
+        bg_block_size: int = 64,
+        max_centroids: Optional[int] = None,
+        saturation_level: Optional[float] = None,
+        border_margin: int = 0,
+        max_pixels: int = 10000,
+        max_elongation: Optional[float] = 3.0,
+        reject_hot_pixels: bool = True,
+        detection_binning: Optional[int] = None,
         threads: Optional[int] = None,
     ) -> ExtractionResult:
         """Extract star centroids from a 2D image array, reusing this
         extractor's buffers.
 
-        Takes exactly the arguments of :func:`extract_centroids`, with the
-        same defaults.
+        Takes exactly the arguments of :func:`extract_centroids` (including
+        the keyword-only ``threads``), with the same defaults, and returns
+        the same ``ExtractionResult``.
 
         Args:
             image: 2D numpy array (height x width) of pixel values.
                 Supported dtypes: float64, float32, uint16, int16, uint8.
-            sigma_threshold: Detection threshold in sigma above background.
-            min_pixels: Minimum blob size in pixels.
-            max_pixels: Maximum blob size in pixels.
-            max_centroids: Maximum number of centroids to return. None = all.
-            local_bg_block_size: Block size for local background estimation.
-                None = global background only.
-            max_elongation: Maximum blob elongation ratio. None = disabled.
-            matched_filter_sigma: Apply a Gaussian matched filter of this sigma
-                (in pixels) before thresholding (~2x point-source SNR for a
-                sigma~1.5 px PSF). Used only to form the detection mask, so
-                photometry is unaffected, and the threshold is automatically
-                scaled for the filtered noise level — no retuning needed.
-                None = disabled. Default 1.5.
-            max_sharpness: Reject blobs whose peak sharpness
-                ``(peak - mean(8 neighbors)) / peak`` exceeds this — values near
-                1 are hot pixels / cosmic rays, not stars. A critically sampled
-                PSF scores ~0.5; strongly undersampled optics up to ~0.85.
-                Set to None for severely undersampled data (PSF FWHM below
-                ~1.5 px), where real stars are indistinguishable from hot
-                pixels. Default 0.9.
-            saturation_level: Pixel value at or above which the sensor is
-                saturated; such blobs skip sub-pixel peak refinement (a flat top
-                has no meaningful maximum) and keep the center-of-mass position.
-                None = disabled.
-            deblend: Policy for blobs with more than one distinct intensity
-                peak (blended pairs centroid to a wrong midpoint position).
-                "off" keeps them merged; "reject" drops them — the safe choice
-                for plate solving. Saturated blobs are exempt.
-            border_margin: Drop blobs whose bounding box comes within this many
-                pixels of an image edge (truncated PSFs bias the center-of-mass
-                inward).
+                Non-finite values are treated as background.
+            sigma_threshold: Detection threshold in sigma of the detection
+                image's noise — a star is detected when its matched-filter
+                signal-to-noise ratio exceeds this. Default 5.0.
+            psf_sigma: Expected PSF width, the Gaussian sigma in pixels
+                (FWHM / 2.355). Sets the detection kernel and the measurement
+                window; the one parameter worth matching to the optics. The
+                optimum is broad (within a factor ~1.5 of the true width costs
+                under ~30% in position error) and ``psf_sigma_estimate`` on the
+                result reports the width actually measured. Must be in (0, 10].
+                Default 1.5.
+            bg_block_size: Block size in pixels of the background / noise grid.
+                Roughly 1-3% of the image width. Default 64.
+            max_centroids: Maximum number of centroids to return, brightest
+                first. None = all.
+            saturation_level: Raw pixel value at or above which the sensor is
+                saturated. A region whose brightest peak is saturated is measured
+                by its center of mass and yields one centroid. Blobs far broader
+                than ``psf_sigma`` take that path automatically, so this is a
+                refinement for mildly saturated stars. None = not set.
+            border_margin: Drop centroids within this many pixels of an image
+                edge. Stars whose measurement window does not fit in the frame
+                (closer than about ``3 * psf_sigma`` to an edge) are always
+                dropped. Default 0.
+            max_pixels: Regions larger than this many pixels are dropped whole
+                (satellite trails, horizon glow). Default 10000.
+            max_elongation: Maximum elongation (major/minor axis ratio) —
+                rejects streaks, unresolved blends, and saturated stars whose
+                charge has bled far along a column. On a CCD that blooms, raise
+                it (5-6) if the solver lacks bright stars. None = disabled.
+                Default 3.0.
+            reject_hot_pixels: Reject detections much narrower than the PSF (hot
+                pixels, cosmic-ray hits). Turn off for severely undersampled data
+                (PSF FWHM below ~1.2 px). Default True.
+            detection_binning: 1 detects at full resolution, 2 on the frame
+                binned 2x2 (about twice as fast overall; costs roughly a tenth of
+                the detection signal-to-noise for a PSF sigma >= 1.25 px and
+                nothing in accuracy — positions are always measured on unbinned
+                pixels). None picks 2 when ``psf_sigma >= 1.25`` and 1 otherwise.
+                Default None.
             threads: Worker threads for this call. None (default) uses every
                 available core — or ``RAYON_NUM_THREADS`` if set — except for
                 frames under ~512×512, which run on one thread because waking
@@ -1269,118 +1317,74 @@ class CentroidExtractor:
 def extract_centroids(
     image: npt.NDArray,
     sigma_threshold: float = 5.0,
-    min_pixels: int = 3,
-    max_pixels: int = 10000,
-    max_centroids: Optional[int] = None,
-    local_bg_block_size: Optional[int] = 64,
-    max_elongation: Optional[float] = 3.0,
-    matched_filter_sigma: Optional[float] = 1.5,
-    max_sharpness: Optional[float] = 0.9,
-    saturation_level: Optional[float] = None,
-    deblend: str = "off",
-    border_margin: int = 0,
     *,
+    psf_sigma: float = 1.5,
+    bg_block_size: int = 64,
+    max_centroids: Optional[int] = None,
+    saturation_level: Optional[float] = None,
+    border_margin: int = 0,
+    max_pixels: int = 10000,
+    max_elongation: Optional[float] = 3.0,
+    reject_hot_pixels: bool = True,
+    detection_binning: Optional[int] = None,
     threads: Optional[int] = None,
 ) -> ExtractionResult:
     """Extract star centroids from a 2D image array.
 
-    Args:
-        image: 2D numpy array (height x width) of pixel values.
-            Supported dtypes: float64, float32, uint16, int16, uint8.
-        sigma_threshold: Detection threshold in sigma above background.
-        min_pixels: Minimum blob size in pixels.
-        max_pixels: Maximum blob size in pixels.
-        max_centroids: Maximum number of centroids to return. None = all.
-        local_bg_block_size: Block size for local background estimation.
-            None = global background only.
-        max_elongation: Maximum blob elongation ratio. None = disabled.
-        matched_filter_sigma: Apply a Gaussian matched filter of this sigma
-            (in pixels) before thresholding (~2x point-source SNR for a
-            sigma~1.5 px PSF). Used only to form the detection mask, so
-            photometry is unaffected, and the threshold is automatically
-            scaled for the filtered noise level — no retuning needed.
-            None = disabled. Default 1.5.
-        max_sharpness: Reject blobs whose peak sharpness
-            ``(peak - mean(8 neighbors)) / peak`` exceeds this — values near
-            1 are hot pixels / cosmic rays, not stars. A critically sampled
-            PSF scores ~0.5; strongly undersampled optics up to ~0.85.
-            Set to None for severely undersampled data (PSF FWHM below
-            ~1.5 px), where real stars are indistinguishable from hot
-            pixels. Default 0.9.
-        saturation_level: Pixel value at or above which the sensor is
-            saturated; such blobs skip sub-pixel peak refinement (a flat top
-            has no meaningful maximum) and keep the center-of-mass position.
-            None = disabled.
-        deblend: Policy for blobs with more than one distinct intensity
-            peak (blended pairs centroid to a wrong midpoint position).
-            "off" keeps them merged; "reject" drops them — the safe choice
-            for plate solving. Saturated blobs are exempt.
-        border_margin: Drop blobs whose bounding box comes within this many
-            pixels of an image edge (truncated PSFs bias the center-of-mass
-            inward).
-        threads: Worker threads for this call. None (default) uses every
-            available core — or ``RAYON_NUM_THREADS`` if set — except for
-            frames under ~512×512, which run on one thread because waking
-            the workers costs more than it saves. An integer uses exactly
-            that many; 1 is single-threaded. The result is the same for
-            every setting. Safe to use in forked child processes.
-
-    Returns:
-        ExtractionResult with centroids and image statistics.
-    """
-    ...
-
-def extract_centroids_fast(
-    image: npt.NDArray,
-    sigma_threshold: float = 5.0,
-    bg_grid: int = 64,
-    min_pixels: int = 2,
-    max_centroids: Optional[int] = None,
-    max_sharpness: Optional[float] = 0.9,
-    saturation_level: Optional[float] = None,
-    max_pixels: int = 10000,
-    max_elongation: Optional[float] = None,
-    border_margin: int = 0,
-    *,
-    threads: Optional[int] = None,
-) -> ExtractionResult:
-    """Fast single-pass centroid extraction — the "adequate star tracker" path.
-
-    Reads each pixel once (coarse-grid background + run-length connected-
-    component moments), so it is several times faster than
-    :func:`extract_centroids` — at the cost of faint-star sensitivity and
-    sub-pixel accuracy (~0.1 px on bright stars). Use :func:`extract_centroids`
-    for calibration or faint-star work. Returns the same ``ExtractionResult``,
-    so it is a drop-in for ``solve_from_centroids``.
+    Detects on a smoothed copy of the frame and measures on the raw pixels:
+    the frame is (optionally) binned 2x2 and convolved with a small Gaussian
+    (a matched filter for a PSF of width ``psf_sigma``); the background level
+    and a per-block noise sigma are measured on that detection image; pixels
+    above ``level + sigma_threshold * sigma`` are grouped into regions; every
+    local maximum inside a region is a candidate star; and each candidate
+    gets an iterative Gaussian-windowed centroid on the raw pixels, giving
+    position, flux (``brightness``), position covariance (``cov``) and shape
+    (``shape``). Saturated and very broad blobs fall back to the region's
+    center of mass.
 
     Args:
         image: 2D numpy array (height x width) of pixel values.
             Supported dtypes: float64, float32, uint16, int16, uint8.
-        sigma_threshold: Detection threshold in noise sigmas above the local
-            background.
-        bg_grid: Coarse background-grid block size in pixels (tracks gradients
-            such as vignetting / Milky Way).
-        min_pixels: Minimum pixels in a region; rejects hot pixels.
-        max_centroids: Maximum number of centroids to return, brightest first.
-            None = all.
-        max_sharpness: Reject regions whose peak sharpness
-            ``(peak - mean(8 neighbors)) / peak`` exceeds this — values near
-            1 are hot pixels / cosmic rays, not stars. Set to None for
-            severely undersampled data (PSF FWHM below ~1.5 px).
-            Default 0.9.
-        saturation_level: Pixel value at or above which the sensor is
-            saturated; such regions skip sub-pixel peak refinement and keep
-            the center-of-mass position. None = disabled.
-        max_pixels: Maximum region size in pixels — without it a satellite
-            trail or horizon glow becomes the *brightest* centroid handed to
-            the solver.
-        max_elongation: Maximum elongation ratio (major/minor axis) from
-            intensity-weighted second moments — rejects streaks too small
-            for max_pixels. Off by default (noisy for few-pixel regions);
-            enable (3.0-5.0) with min_pixels raised to ~5+. None = disabled.
-        border_margin: Drop regions whose bounding box comes within this
-            many pixels of an image edge (truncated PSFs bias the
-            center-of-mass inward).
+            Non-finite values are treated as background.
+        sigma_threshold: Detection threshold in sigma of the detection
+            image's noise — a star is detected when its matched-filter
+            signal-to-noise ratio exceeds this. Default 5.0.
+        psf_sigma: Expected PSF width, the Gaussian sigma in pixels
+            (FWHM / 2.355). Sets the detection kernel and the measurement
+            window; the one parameter worth matching to the optics. The
+            optimum is broad (within a factor ~1.5 of the true width costs
+            under ~30% in position error) and ``psf_sigma_estimate`` on the
+            result reports the width actually measured. Must be in (0, 10].
+            Default 1.5.
+        bg_block_size: Block size in pixels of the background / noise grid.
+            Roughly 1-3% of the image width. Default 64.
+        max_centroids: Maximum number of centroids to return, brightest
+            first. None = all.
+        saturation_level: Raw pixel value at or above which the sensor is
+            saturated. A region whose brightest peak is saturated is measured
+            by its center of mass and yields one centroid. Blobs far broader
+            than ``psf_sigma`` take that path automatically, so this is a
+            refinement for mildly saturated stars. None = not set.
+        border_margin: Drop centroids within this many pixels of an image
+            edge. Stars whose measurement window does not fit in the frame
+            (closer than about ``3 * psf_sigma`` to an edge) are always
+            dropped. Default 0.
+        max_pixels: Regions larger than this many pixels are dropped whole
+            (satellite trails, horizon glow). Default 10000.
+        max_elongation: Maximum elongation (major/minor axis ratio) —
+            rejects streaks, unresolved blends, and saturated stars whose
+            charge has bled far along a column. On a CCD that blooms, raise
+            it (5-6) if the solver lacks bright stars. None = disabled.
+            Default 3.0.
+        reject_hot_pixels: Reject detections much narrower than the PSF (hot
+            pixels, cosmic-ray hits). Turn off for severely undersampled data
+            (PSF FWHM below ~1.2 px). Default True.
+        detection_binning: 1 detects at full resolution, 2 on the frame
+            binned 2x2 (about twice as fast overall; costs roughly a tenth of
+            the detection signal-to-noise for a PSF sigma >= 1.25 px and
+            nothing in accuracy — positions are always measured on unbinned
+            pixels). None picks 2 when ``psf_sigma >= 1.25`` and 1 otherwise.
+            Default None.
         threads: Worker threads for this call. None (default) uses every
             available core — or ``RAYON_NUM_THREADS`` if set — except for
             frames under ~512×512, which run on one thread because waking

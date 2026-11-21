@@ -61,9 +61,12 @@ from astropy.io import fits
 hdul = fits.open("my_image.fits")
 image = hdul[0].data.astype(np.float64)
 
-# Extract star centroids
-extraction = tetra3rs.extract_centroids(image, sigma_threshold=5.0)
+# Extract star centroids. psf_sigma is the width of a star on the detector
+# (Gaussian sigma in pixels, FWHM / 2.355) — the one setting worth matching
+# to your camera.
+extraction = tetra3rs.extract_centroids(image, sigma_threshold=5.0, psf_sigma=1.5)
 print(f"Found {len(extraction.centroids)} stars")
+print(f"Measured PSF sigma: {extraction.psf_sigma_estimate} px")
 
 # Solve
 result = db.solve_from_centroids(
@@ -109,8 +112,8 @@ let db = SolverDatabase::load_from_file("data/my_database.bin")?;
 
 // Solve from image centroids (pixel coordinates, origin at image center)
 let centroids = vec![
-    Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None },
-    Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None },
+    Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None, shape: None },
+    Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None, shape: None },
     // ...
 ];
 

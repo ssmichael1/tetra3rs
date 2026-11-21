@@ -115,6 +115,7 @@ pub fn project_field(
                 y: cy / pixel_scale + ny,
                 mass: Some(10.0 - mags[i]),
                 cov: None,
+                shape: None,
             });
         }
     }

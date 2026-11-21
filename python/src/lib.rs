@@ -49,7 +49,6 @@ fn tetra3rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<distortion::PyRadialDistortion>()?;
     m.add_class::<distortion::PyPolynomialDistortion>()?;
     m.add_function(wrap_pyfunction!(extraction::extract_centroids, m)?)?;
-    m.add_function(wrap_pyfunction!(extraction::extract_centroids_fast, m)?)?;
     m.add_function(wrap_pyfunction!(earth_barycentric_velocity, m)?)?;
     m.add_function(wrap_pyfunction!(reset_log_cache, m)?)?;
     m.add("__git_hash__", env!("TETRA3RS_GIT_HASH"))?;

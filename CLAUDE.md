@@ -21,11 +21,15 @@ cargo test --features image                  # integration tests (download test 
 cargo test --test skyview_solve_test --features image -- --nocapture
 cargo test --test tess_solve_test --features image -- --nocapture
 
-# Multi-threaded centroid extraction (rayon). Parallelizes the dominant
-# local-background stage + full-image maps; also turns on numeris's rayon
-# imageproc (matched-filter blur). Bit-identical results; ~1.9x sparse /
-# ~1.45x dense on 8 cores. Combine with `image`.
+# Multi-threaded centroid extraction (rayon). Parallelizes the full-image
+# passes, block statistics and per-region measurement; also turns on
+# numeris's rayon imageproc (the detection convolution). Bit-identical
+# results; ~2.7x on 8 cores at 2048². Combine with `image`.
 cargo build --release --features image,parallel
+
+# Centroid ground-truth benchmark: completeness, position error vs the
+# Cramér–Rao bound, false detections, timing (env knobs in the file header).
+cargo run --release --features image,parallel --example centroid_bench
 
 # no_std: the lib must keep building without `std` (bare-metal star trackers).
 # Lint on a bare-metal target — on the host, std leaks in transitively through
@@ -83,7 +87,7 @@ largest internal cost.
 | `distortion/calibrate.rs` | Branches on `n_valid` solves: 1 image → pooled fit with the solve's own attitude; 2+ → alternating per-image WCS refine + global fit (3 outer iterations). Both call `fit::fit_pooled` |
 | `distortion/fit.rs` | `fit_pooled` (polynomial / radial dispatch, before/after RMSE); `fit_polynomial_sigma_clip`, `fit_radial_centered_sigma_clip` loops |
 | `distortion/polynomial.rs` | `term_pairs(order)`, `coeff_index(p, q)`, `num_coeffs(order)` — SIP term ordering; Newton `undistort` (NaN when it does not converge) |
-| `centroid_extraction/` (feature `image`) | Local background subtraction, CCL, quadratic sub-pixel peak refinement |
+| `centroid_extraction/` (feature `image`) | One pipeline, "detect on the smoothed image, measure on the raw one": `detect.rs` (binned + Gaussian-smoothed detection image via numeris `convolve2d_separable_into`, threshold mask, regions, peaks), `background.rs` (block level + per-block noise σ measured on the detection image), `runs.rs` (run-length regions), `measure.rs` (iterative Gaussian-windowed centroid → position, flux, position covariance, shape) |
 | `centroid/`, `star/` | Data types |
 | `starcatalog/` | Catalog management, proper-motion propagation |
 | `catalogs/` | Gaia DR3 (+ optional Hipparcos). Merged catalog: Gaia primary, Hipparcos for G<4 |

@@ -1,196 +1,215 @@
 # Centroid Extraction
 
-tetra3rs includes a complete centroid extraction pipeline that detects stars in an image and computes sub-pixel positions with uncertainty estimates. The pipeline is designed to be robust across a range of conditions — from low-SNR ground-based images to crowded spacecraft fields.
+Before an image can be solved, its stars have to be found and located. `extract_centroids` (Rust: `extract_centroids_from_raw` / `extract_centroids_from_image`, behind the `image` feature) takes a grayscale image and returns a list of star centroids — sub-pixel position, flux, position uncertainty and shape — sorted brightest first and ready for `solve_from_centroids`.
 
-!!! tip "Two extractors"
-    This page describes the default **connected-component pipeline**
-    (`extract_centroids` / `extract_centroids_from_raw`), which prioritizes
-    fidelity. For latency-critical use (e.g. frame-rate tracking on embedded
-    hardware) there is also a **fast single-pass extractor**
-    (`extract_centroids_fast`), faster at lower fidelity — see
-    [Fast single-pass extraction](#fast-single-pass-extraction-extract_centroids_fast)
-    below.
+There is one pipeline and one parameter that really matters, `psf_sigma`: how wide a star is on your detector.
 
 ## Pipeline Overview
+
+The pipeline **detects on a smoothed copy of the frame and measures on the raw pixels**:
 
 ```
 Raw image
   │
-  ├─ 1. Local background subtraction (block median + bilinear interpolation)
+  ├─ 1. Detection image (optional 2×2 binning + Gaussian smoothing = matched filter)
   │
-  ├─ 2. Global noise estimation (lower-half sigma clipping)
+  ├─ 2. Background level and noise σ, per block, measured on the detection image
   │
-  ├─ 3. Gaussian matched filter (PSF-tuned σ, on by default)
+  ├─ 3. Threshold → connected regions (run-length union-find)
   │
-  ├─ 4. Thresholding (σ above background, filter-compensated)
+  ├─ 4. Peaks: every local maximum in a region is a candidate star
   │
-  ├─ 5. Connected-region detection (run-length union-find)
+  ├─ 5. Measurement on the raw pixels (iterative Gaussian-windowed centroid)
   │
-  ├─ 6. Blob filtering (size, elongation, sharpness, border, deblend)
-  │
-  ├─ 7. Centroid computation (intensity-weighted moments + quadratic refinement)
-  │
-  └─ Output: sorted list of Centroid objects
+  └─ Output: Centroid list, brightest first
 ```
 
-## 1. Local Background Subtraction
+Smoothing is the right thing for *finding* stars — it gathers a star's light into one peak and averages the noise down. It is the wrong thing for *locating* them, so positions are never read off the smoothed image: each detection only seeds a measurement made on the original pixels.
 
-Large-scale intensity variations (nebulosity, Milky Way emission, vignetting, illumination gradients) must be removed before detection. The algorithm:
+## 1. Detection Image
 
-1. Divides the image into `block_size × block_size` tiles (configurable via `local_bg_block_size`, default 64)
-2. Computes the **median** pixel value within each tile from a phase-staggered stride subsample (non-finite samples excluded; zeros and negatives are kept — they are legitimate background on dark-subtracted frames)
-3. Reconstructs a smooth background surface by **bilinear interpolation** between tile centers, linearly extrapolating beyond the outermost centers
-4. Subtracts the interpolated surface, clamping negative values to zero in the measurement image (the matched filter, when enabled, convolves the *unclamped* residual — see below)
+The frame is convolved with a small separable Gaussian whose width matches the PSF. This is a **matched filter**: for a star of Gaussian width `psf_sigma` in uncorrelated noise, it is the linear filter that maximizes the star's signal-to-noise ratio at its peak. A faint star that is spread over a dozen pixels, none of them individually significant, becomes one clearly significant peak.
 
-The median is chosen over the mean because it is robust to contamination from bright stars within each tile.
+Optionally the frame is first **binned 2×2**. Binning is itself a (box) smoothing, so the Gaussian that follows is narrowed to compensate and the two together still match the PSF. See [Detection binning](#detection-binning) for the trade-off.
 
-**Tuning**: Smaller blocks follow finer spatial structure but risk subtracting actual stars. Typical values are 16–128 pixels, or roughly 1–3% of image width. Set `local_bg_block_size=None` to skip local background subtraction entirely.
+Non-finite pixels (NaN, ±∞) are treated as background.
 
-## 2. Global Noise Estimation
+## 2. Background and Noise
 
-After local background subtraction, the residual noise level is estimated robustly using only the uncontaminated portion of the pixel distribution:
+The detection image is divided into blocks of `bg_block_size` pixels (default 64). Each block contributes two numbers:
 
-1. Compute the **global median** of all pixels — this is the background level
-2. Select only pixels **at or below the median** (the "lower half")
-3. Compute the RMS of these pixels **about the median** — for Gaussian noise the lower half's second moment about the median equals the full variance, so this mirrors directly into the true Gaussian σ
-4. Apply **iterative sigma clipping** (5 iterations, 3σ factor) to the lower tail to reject remaining outliers (e.g. dead or strongly negative pixels), re-estimating about the median each pass
+- a **background level** — the block's median, which a few bright stars inside the block do not move. The level is bilinearly interpolated between block centers (and linearly extrapolated to the image edges), so vignetting, stray light, sky gradients and the Milky Way are followed smoothly.
+- a **noise σ** — measured from the residuals against that interpolated surface, using only the pixels at or below the residual median. Stars and nebulosity only ever add light, so the lower half of the distribution is the uncontaminated half; its RMS about the median is the Gaussian noise σ.
 
-The detection threshold is then:
+Two things about this are worth knowing:
 
-$$
-\text{threshold} = \mu_{\text{bg}} + \sigma_{\text{threshold}} \times \sigma
-$$
+**The statistics are taken on the detection image, not the raw one.** The threshold is applied to the smoothed image, so that is where the noise has to be known. Measuring it there — rather than measuring the raw noise and predicting what smoothing does to it — keeps the threshold correct when the pixel noise is *correlated*, as it is in resampled, debayered or compressed images.
 
-**Why the lower half?** Stars and nebulosity only contaminate pixels *above* the background. By using only the lower half of the distribution and assuming symmetry, we get a clean estimate of the Gaussian noise floor without any astrophysical contamination.
+**The noise is per block.** A frame with a bright sky gradient or strong vignetting has more noise in one corner than another; each block is thresholded against its own σ.
 
-!!! warning "Changed in 0.9: `sigma_threshold` scale"
-    Earlier versions computed the lower-half RMS about the lower half's *own
-    mean*, which under-measures Gaussian noise by ~40% — a configured
-    `sigma_threshold=5.0` was really a ~3σ cut. The estimator now returns true
-    Gaussian sigmas (matching `extract_centroids_fast`, which was always
-    correct). To keep your previous effective detection depth, multiply old
-    configured values by ≈0.6 (e.g. `5.0` → `3.0`); leave them unchanged to
-    get the threshold you had nominally been asking for.
+**Tuning**: `bg_block_size` should be much larger than a star and smaller than the background structure you want removed — roughly 1–3% of the image width. Smaller blocks follow finer structure but are noisier and can be pulled up by a bright star; in crowded fields a larger block (128) is steadier.
 
-## 3. Gaussian Matched Filter
+## 3. Threshold and Regions
 
-Enabled by default (`matched_filter_sigma=1.5`), the *unclamped* bg-subtracted residual is convolved with a separable Gaussian (kernel truncated at 3σ) before thresholding. The filtered image is used **only** to form the detection mask — centroid positions and intensities are still measured on the unfiltered residual, so photometry is unaffected. Set `matched_filter_sigma=None` to threshold the unfiltered residual instead.
-
-A matched filter concentrates a star's PSF into fewer effective pixels, raising the per-pixel signal-to-noise of point sources relative to single-pixel noise spikes: for a σ≈1.5 px PSF the peak-SNR gain is ~2× (≈0.75 mag more detection depth at the same false-positive rate). The gain is largest for faint stars in noisy or dense images, where many spurious blobs would otherwise survive the threshold and contaminate the brightness-sorted top-N list.
-
-**Tuning**: σ within a factor of ~2 of the true PSF width recovers nearly all the SNR — the filter has a broad optimum. The detection threshold is automatically scaled by the kernel's noise-suppression factor, so `sigma_threshold` always means "sigmas of the noise actually present in the thresholded image" whether the filter is on or off — **no retuning is needed when toggling it**. `ExtractionResult.threshold` reports the threshold actually applied.
-
-**Cost**: the separable 1D blur (+ one full-image float buffer) is now one of the larger stages of the much-faster pipeline — roughly 60% extra over the unfiltered path on a sparse 4 Mpx frame single-threaded (~8 ms extra), a much smaller fraction on dense fields where per-blob work dominates, and about half that with the `parallel` feature. Disable it (`None`) only if that overhead matters more than detection depth in your application.
-
-## 4. Connected-Region Detection
-
-Pixels above the threshold are grouped into blobs by a **run-length union-find** sweep with 8-connectivity (diagonal neighbors included): a single raster pass turns the threshold predicate into horizontal runs of lit pixels, merges runs that touch (including diagonally) runs on the previous row through a union-find structure, and hands each downstream stage its blob as a list of runs. No per-pixel label map is materialized. Both extraction paths — this one and `extract_centroids_fast` — share this detection core.
-
-## 5. Blob Filtering
-
-Blobs are filtered before centroid computation:
-
-- **Minimum pixels** (`min_pixels`, default 3) — Rejects hot pixels and single-pixel noise spikes
-- **Maximum pixels** (`max_pixels`, default 10,000) — Rejects very extended objects, large nebulae, or noise blobs from detector artifacts
-- **Elongation** (`max_elongation`, default 3.0) — Computed from the covariance eigenvalue ratio $\sqrt{\lambda_{\max} / \lambda_{\min}}$. Rejects cosmic ray hits, satellite trails, and diffraction spikes. Set to `None` to disable.
-- **Sharpness** (`max_sharpness`, default 0.9) — DAOFIND-style hot-pixel / cosmic-ray gate: rejects blobs whose peak sharpness $(\text{peak} - \text{mean of 8 neighbors})/\text{peak}$ exceeds the limit, measured on the *unfiltered* background-subtracted image (so a matched-filter-smeared hot pixel is still caught). The default passes any system whose PSF spans multiple pixels — a critically sampled PSF scores ~0.5, a strongly undersampled one ~0.85, a hot pixel ~1.0. Set to `None` for severely undersampled data (PSF FWHM below ~1.5 px, e.g. resampled survey cutouts), where real stars are geometrically indistinguishable from hot pixels.
-- **Border margin** (`border_margin`, default 0 = off) — Drops blobs whose bounding box comes within the margin of an image edge. A star cut off by the frame boundary has a truncated PSF, biasing its center of mass toward the interior — a plausible but wrong position.
-- **Deblending** (`deblend`, default `"off"`) — With `"reject"`, drops blobs containing more than one distinct intensity peak. A blended star pair otherwise produces one centroid at the flux-weighted midpoint — a wrong position the pattern hash will consume. Saturated blobs are exempt (plateau noise fakes maxima on a genuinely single star).
-
-## 6. Centroid Computation
-
-Each surviving blob is centroided through several substeps:
-
-### Per-Blob Local Background
-
-For each blob, a refined local background is computed from a pixel annulus:
-
-1. Expand the blob's bounding box by a 5-pixel margin
-2. Collect all non-blob pixels within this annulus
-3. Take the **median** as the per-blob local background
-
-This corrects for residual gradients not removed by the block-based subtraction in step 1.
-
-### Intensity-Weighted Moments
-
-The centroid position is computed as the intensity-weighted center of mass:
+A pixel of the detection image is "lit" when it exceeds
 
 $$
-\bar{x} = \frac{\sum_i I_i \, x_i}{\sum_i I_i}, \qquad
-\bar{y} = \frac{\sum_i I_i \, y_i}{\sum_i I_i}
+\text{level} + \texttt{sigma\_threshold} \times \sigma
 $$
 
-where $I_i = \max(\text{pixel}_i - \text{local\_bg}, \; 0)$ is the background-subtracted intensity at pixel $i$.
+with the level and σ of step 2. Lit pixels are grouped into connected regions (8-connectivity) by a single run-length union-find sweep.
 
-### Covariance Matrix
+### What `sigma_threshold` means
 
-The intensity-weighted second moments give a 2×2 covariance matrix:
+Because the threshold sits on the matched-filtered image, `sigma_threshold` is a cut on a **star's** signal-to-noise ratio — the significance of the whole star, all its pixels combined — not on any single pixel's. `sigma_threshold=5` keeps stars detected at 5σ or better.
+
+This makes the number comparable across cameras: 5σ is 5σ whether the star covers two pixels or twenty. It also means that a threshold tuned for an extractor that cuts on individual raw pixels does not carry over — the equivalent value here is smaller (for the TESS frames in the tutorials, 180 became 50).
+
+For plate solving you rarely want the faintest stars. The solver works from the brightest few dozen, and in a crowded field a high threshold (tens of σ) is a simple way to keep only stars that stand clear of their neighbours.
+
+`ExtractionResult.threshold` reports the threshold at a typical (median) block, in detection-image units. `ExtractionResult.background_sigma` reports the noise converted back to **raw-pixel** units; the conversion assumes uncorrelated pixel noise, so on resampled or compressed frames read it as an equivalent white-noise level.
+
+Regions larger than `max_pixels` (default 10,000) are dropped whole. These are satellite trails, horizon glow and stray-light blobs — and since results are sorted by brightness, such an object would otherwise be the *first* centroid handed to the solver.
+
+## 4. Peaks
+
+A region only says which pixels belong together. The stars are its **local maxima**: every pixel of the detection image that is brighter than its eight neighbours is a candidate.
+
+- The **brightest peak** of a region is always measured.
+- A **fainter peak** in the same region has to show that it is a separate star rather than noise or structure on a bright neighbour's wing. It must settle on its own position (not slide into the neighbour), lie at least `2 × psf_sigma` from every star already accepted, and — in a local fit of a Gaussian on a constant pedestal — have an amplitude that is significant against the noise and at least half the pedestal it sits on. On a bright star's wing the pedestal is the wing, which is what stops wings from spawning false companions.
+
+So close pairs are separated automatically; there is no deblending switch. The limit is resolution: two stars closer than a few `psf_sigma` have a single maximum in the smoothed image and come out as one centroid, near the brighter star but pulled toward its companion.
+
+## 5. Measurement
+
+Each candidate is measured on the **raw pixels** with an iterative Gaussian-windowed centroid. Starting from the peak, the position is repeatedly moved to the centroid of the background-subtracted pixels weighted by a Gaussian window centered on the current estimate:
 
 $$
-\mathbf{C} = \begin{pmatrix}
-\sigma_{xx} & \sigma_{xy} \\
-\sigma_{xy} & \sigma_{yy}
-\end{pmatrix}
+\mathbf{x} \leftarrow \mathbf{x} + g \, \frac{\sum_i w_i \, d_i \, (\mathbf{x}_i - \mathbf{x})}{\sum_i w_i \, d_i},
+\qquad
+w_i = \exp\!\left(-\frac{|\mathbf{x}_i - \mathbf{x}|^2}{2\sigma_w^2}\right)
 $$
 
-where $\sigma_{xx} = \frac{\sum I_i (x_i - \bar{x})^2}{\sum I_i}$ and similarly for the other terms.
+where $d_i$ is pixel $i$ minus the local background and $g \ge 1$ is a step gain that makes up for the window pulling each step short. The fixed point is where the image's correlation with a Gaussian is greatest — the maximum of the matched filter, evaluated in the continuum instead of on the pixel grid. For a Gaussian PSF in background-limited noise that is the maximum-likelihood position.
 
-The eigenvalues and eigenvectors of $\mathbf{C}$ define the principal axes of the PSF — an uncertainty ellipse that characterizes the shape and orientation of each detection. This is stored in `Centroid.cov` and can be used for weighted matching or quality assessment.
+Compared with a center of mass over the above-threshold pixels, this has no footprint to depend on: the window is the same for a faint star and a bright one, the noisy outer pixels are weighted down rather than cut off, and an error in the background level cancels by symmetry.
 
-### Quadratic Sub-Pixel Refinement
+The window width is `psf_sigma`, but never less than 1 px — a narrower window cannot be sampled on the pixel grid without the result wobbling with the star's sub-pixel position.
 
-For blobs with ≥5 pixels and a peak at least 1 pixel from the image edge, a quadratic surface is fit to the 3×3 neighborhood around the peak pixel:
+A star whose window does not fit inside the frame (closer than about `3 × psf_sigma` to an edge) is dropped, because a truncated window pulls the position toward the interior. `border_margin` widens that exclusion zone if you want one.
 
-$$
-f(x, y) = a + bx + cy + dx^2 + ey^2 + fxy
-$$
+### What a centroid carries
 
-When all nine background-subtracted samples are positive, the fit is performed on **log intensity**: a Gaussian PSF is exactly quadratic in $\ln(v)$, so the log fit removes the linear fit's S-curve bias (~0.05–0.1 px at quarter-pixel peak phases). Blobs with a non-positive sample in the window (faint stars whose wings dip below the local background) keep the linear-intensity fit.
+| Field | Meaning |
+|---|---|
+| `x`, `y` | Position in pixels, origin at the image center, +X right, +Y down (see [Coordinate Conventions](coordinates.md)) |
+| `brightness` (Rust: `mass`) | Flux above background, from the same Gaussian weighting. The list is sorted on it |
+| `cov` | 2×2 covariance of the **position**, px² — how well the star is located |
+| `shape` | 2×2 intensity second moments, px² — how big and how round the star is |
 
-The sub-pixel offset is found by setting $\nabla f = 0$ and solving the resulting 2×2 linear system. The refinement is accepted only if:
+`cov` and `shape` are easy to confuse and differ by orders of magnitude:
 
-- The offset is within ±0.5 pixels of the peak
-- The quadratic position agrees with the center-of-mass within 0.5 pixels
+- **`shape`** describes the star. For a round star its diagonal is about `psf_sigma²` — 2.25 px² for a 1.5 px PSF — whatever the brightness. Its eigenvectors and eigenvalues give the orientation and axis lengths of an elongated detection. The solver does not use it.
+- **`cov`** describes the measurement. It is the variance of `x` and `y` implied by the measured background noise, and it shrinks as the star gets brighter: from around 0.2 px² for a star near a 5σ threshold down to 10⁻⁴ px² and below for a bright one (a hundredth of a pixel). The solver folds it into each star's match tolerance. It accounts for background noise only — not the star's own photon noise, and not pixel-response or PSF-model errors, which set the floor for very bright stars.
 
-Otherwise, the center-of-mass position is kept. This fallback ensures robustness for blended or asymmetric sources where the quadratic model breaks down. Blobs whose peak reaches `saturation_level` (opt-in, default off) skip the refinement entirely and keep the center-of-mass position — a flat-topped or bloomed profile has no meaningful maximum.
+To draw a star's outline, use `shape`. To weight a fit or judge a residual, use `cov`.
 
-## 7. Output
+### Saturated and very broad objects
 
-Centroids are converted to **geometric-image-center origin** coordinates
-(pixel centers at integer indices, so the center is `(W−1)/2`, `(H−1)/2` —
-matching FITS / astropy / OpenCV; see [Coordinate Conventions](coordinates.md)):
+A saturated star has a flat top: there is no peak for the window to settle on. The same is true of anything far broader than the window (wider than about twice `psf_sigma`), or a measurement that does not converge. In those cases the region is measured by the plain **center of mass** of its pixels and yields a single centroid.
+
+This happens automatically from the measured width. Setting `saturation_level` (the raw pixel value at which the sensor clips) additionally sends *mildly* saturated stars down the same path — ones whose clipped core is still narrow enough to look like a star.
+
+## Filters
+
+| Filter | Removes | How |
+|---|---|---|
+| `reject_hot_pixels` (default on) | Hot pixels, cosmic-ray hits | Measured width much narrower than the PSF |
+| `max_elongation` (default 3.0) | Streaks, trails, unresolved blends, bleed columns | Major/minor axis ratio of the measured shape |
+| `max_pixels` (default 10,000) | Satellite trails, glow, stray light | Region size |
+| `border_margin` (default 0) | Stars near the edge | Distance of the centroid from the frame edge |
+
+### Hot pixels
+
+A hot pixel is one pixel wide; a star is as wide as the PSF. With `reject_hot_pixels=True`, a detection whose measured width is under about 0.4 px (or `0.4 × psf_sigma`, if that is larger) is discarded.
+
+The test needs stars to be measurably wider than a pixel. For **severely undersampled** data — PSF FWHM below about 1.2 px, e.g. survey cutouts resampled to a coarse scale — a real star is geometrically indistinguishable from a hot pixel and the filter would remove stars. Turn it off there (`reject_hot_pixels=False`).
+
+### Elongation, and CCDs that bloom
+
+`max_elongation` rejects detections whose long axis exceeds the short one by more than the given ratio: satellite streaks too small for `max_pixels`, cosmic-ray tracks, and pairs too close to split.
+
+On a CCD without anti-blooming, a saturated star spills charge along its column, and the result is exactly such an elongated blob. Rejecting the long ones is correct — their center of mass can be pixels away from the star. But saturated stars are also the *brightest* stars, which are the ones the solver builds its patterns from. If solves fail for lack of bright stars on such a sensor, raise `max_elongation` to 5–6: that keeps stars with a short bleed, whose center of mass is still good, and continues to drop the long ones. `None` disables the gate.
+
+## Choosing `psf_sigma`
+
+`psf_sigma` is the Gaussian σ of a star image in pixels: FWHM / 2.355. It sets both the detection kernel and the measurement window.
+
+It does not need to be exact. A value within a factor of about 1.5 of the true width keeps the position error within about 30% of the best achievable, so one setting per camera is enough, and modest focus or temperature drift does not call for retuning.
+
+To find it for a new camera, extract a typical frame and read back what was measured:
+
+```python
+result = tetra3rs.extract_centroids(image)   # psf_sigma=1.5
+print(result.psf_sigma_estimate)             # e.g. 0.8
+```
+
+`psf_sigma_estimate` is the median width of the well-exposed, unsaturated stars in the frame (`None` if there are fewer than five). It is the width of a star *as sampled by the detector*, so it includes the pixel's own footprint: optics that deliver σ = 0.75 px measure about 0.80 px. That sampled width is what is in the image, and is the value to pass. Use the estimate as follows:
+
+- **Close to what you passed** — nothing to do.
+- **Clearly different** — pass the estimate as `psf_sigma` and extract again.
+- **About twice what you passed** — the estimate cannot see much beyond twice the window width, so it has hit its ceiling and the true value may be larger still. Double `psf_sigma` and look again.
+
+The valid range is (0, 10] pixels.
+
+## Detection Binning
+
+`detection_binning` chooses the resolution of the detection image:
+
+| Value | Detection image |
+|---|---|
+| `1` | Full resolution |
+| `2` | Frame binned 2×2 |
+| `None` (default) | 2 when `psf_sigma ≥ 1.25`, otherwise 1 |
+
+Binning makes every full-image pass four times cheaper, and the extraction as a whole about twice as fast. What it costs:
+
+- **Accuracy: nothing.** Positions are always measured on the unbinned pixels; binning only affects which stars are found.
+- **Depth: about a tenth** of the detection signal-to-noise, for a PSF of σ ≥ 1.25 px. This only matters for stars right at the threshold.
+
+For a narrower PSF a 2×2 bin is wider than the star, and would cost real depth and merge close pairs — which is why the default switches to full resolution below 1.25 px. Force `detection_binning=1` when you want the deepest detection regardless of speed.
+
+## Output
+
+Centroids use **geometric-image-center origin** coordinates (pixel centers at integer indices, so the center is `(W−1)/2`, `(H−1)/2` — matching FITS / astropy / OpenCV):
 
 $$
 x_{\text{out}} = x_{\text{px}} - \frac{W-1}{2}, \qquad
 y_{\text{out}} = y_{\text{px}} - \frac{H-1}{2}
 $$
 
-where $W$ and $H$ are the image dimensions. The coordinate convention is +X right, +Y down — the same as the camera frame used by the solver. See [Coordinate Conventions](coordinates.md) for details.
+with +X right and +Y down, the camera frame the solver uses. See [Coordinate Conventions](coordinates.md).
 
-The final list is **sorted by brightness** (integrated intensity above background, descending). This ordering is important for the solver, which tries patterns from the brightest stars first.
+The list is **sorted by brightness**, brightest first, which is the order the solver tries patterns in. `max_centroids` truncates it.
 
-Optionally, the list can be truncated to `max_centroids` entries.
+`ExtractionResult` also reports `background_mean`, `background_sigma`, `threshold`, `num_blobs_raw` (the number of regions above threshold, before any filter — one region can hold several stars) and `psf_sigma_estimate`.
 
-## Performance
+## Accuracy and Performance
 
-On a 2048×2048 TESS frame the connected-component path runs in **~26 ms**
-single-threaded (matched filter on); the fast path below in ~15–20 ms. Block
-medians are computed from a stride subsample of each tile, and background
-subtraction, noise statistics, and the filter input are produced by one fused
-pass over the image — there is no materialized full-image background buffer.
+On synthetic 2048×2048 frames with about 2100 stars and a PSF of σ = 1.5 px, the position error stays within about 10% of the read-noise Cramér–Rao bound — $\sqrt{2}\,\sigma_{\text{psf}} / \text{SNR}$ per axis — at all brightnesses.
+
+Timings for the same frames on an 8-core Apple M-series machine:
+
+| Detection | All cores | One core |
+|---|---|---|
+| Automatic (binned 2×2) | 1.3 ms | 3.3 ms |
+| Full resolution (`detection_binning=1`) | 2.5 ms | 7.3 ms |
 
 ### Multi-threading
 
-The extraction hot paths are multi-threaded with [rayon](https://docs.rs/rayon):
-the background grid, the noise subsample, the per-row residual pass, the
-matched-filter blur, the detection bit mask and — on this path — the run sweep
-(in bands of rows) and the per-blob annulus / moment / refinement stage (one
-task per blob). `extract_centroids_fast` threads its background grid and bit
-mask. Results are bit-identical for every thread count, including one.
+The full-image passes and the per-region measurement are multi-threaded with [rayon](https://docs.rs/rayon). Results are bit-identical for every thread count, including one.
 
-**Python.** The wheels are built with threading on, and the extraction
-functions (`extract_centroids`, `extract_centroids_fast`,
-`CentroidExtractor.extract`) take a keyword-only `threads` argument:
+**Python.** The wheels are built with threading on, and `extract_centroids` and `CentroidExtractor.extract` take a keyword-only `threads` argument:
 
 | `threads` | Behavior |
 |---|---|
@@ -203,141 +222,74 @@ result = tetra3rs.extract_centroids(image)             # all cores
 result = tetra3rs.extract_centroids(image, threads=1)  # one core
 ```
 
-Measured from Python on an 8-core Apple M3 (float32 input, default settings):
+Set `threads=1` when you already run one process or thread per core (a `multiprocessing` pool, a frame loop per camera), or to leave cores free for other work.
 
-| Frame | `threads=1` | default |
-|---|---|---|
-| 2048², tracker-like (400 stars) | 8.5 ms | 4.4 ms |
-| 2048², dense TESS field | 20.8 ms | 8.4 ms |
-| 1920×1080 | 4.0 ms | 2.2 ms |
-| 640×480 | 0.63 ms | 0.43 ms |
+The worker threads live in pools owned by the extension, never in a process-global pool, which makes extraction **safe after `fork()`**: threads do not survive a fork, and a child that inherited a pool would wait on it forever. A forked child (`multiprocessing`'s `fork` start method, `os.fork`) notices the pools belong to its parent and starts its own. Database loading and unpickling, which decode and validate the pattern table on all cores, use the same pools and are fork-safe the same way.
 
-Set `threads=1` when you already run one process or thread per core (a
-`multiprocessing` pool, a frame loop per camera), or to leave cores free for
-other work.
+**Rust.** Threading is the crate's `parallel` feature (`cargo build --release --features image,parallel`); without it the same code runs sequentially. Parallel regions use the rayon pool they are called in — the global one by default, sized by `RAYON_NUM_THREADS` — so to choose a thread count for a call, run it inside your own pool with `ThreadPool::install`.
 
-The worker threads live in pools owned by the extension, never in a
-process-global pool, which makes extraction **safe after `fork()`**: threads do
-not survive a fork, and a child that inherited a pool would wait on it forever.
-A forked child (`multiprocessing`'s `fork` start method, `os.fork`) notices the
-pools belong to its parent and starts its own. Database loading and unpickling,
-which decode and validate the pattern table on all cores, use the same pools
-and are fork-safe the same way.
+### Reusing buffers across frames (`CentroidExtractor`)
 
-**Rust.** Threading is the crate's `parallel` feature
-(`cargo build --release --features image,parallel`); without it the same code
-runs sequentially. Parallel regions use the rayon pool they are called in — the
-global one by default, sized by `RAYON_NUM_THREADS` — so to choose a thread
-count for a call, run it inside your own pool with `ThreadPool::install`.
-
-## Reusing buffers across frames (`CentroidExtractor`)
-
-`extract_centroids` allocates its full-image working buffers — the residual
-image, the matched filter's output and the detection bit mask, about 32 MB
-at 2048² — fresh on every call. The allocation itself is cheap, but the first
-touch of each page is not: roughly 0.4 ms per 2048² frame. In a frame loop,
-`CentroidExtractor` keeps those buffers between calls (resizing only when the
-frame size changes) and gives bit-identical results:
+`extract_centroids` allocates its full-image working buffers fresh on every call. The allocation itself is cheap, but the first touch of each page is not. In a frame loop, `CentroidExtractor` keeps those buffers between calls (resizing only when the frame size changes) and gives bit-identical results:
 
 ```python
 extractor = tetra3rs.CentroidExtractor()
 for frame in frames:
-    result = extractor.extract(frame, sigma_threshold=5.0, max_centroids=100)
+    result = extractor.extract(frame, psf_sigma=1.5, max_centroids=100)
 ```
 
-`extract()` takes exactly the arguments of `extract_centroids`. Use one
-extractor per thread. (Rust: `CentroidExtractor::extract_from_raw` /
-`extract_from_image`.)
+`extract()` takes exactly the arguments of `extract_centroids`. Use one extractor per thread. (Rust: `CentroidExtractor::extract_from_raw` / `extract_from_image`.)
 
-## Fast single-pass extraction (`extract_centroids_fast`)
+## Configuration Reference
 
-The pipeline above prioritizes fidelity — local-background interpolation, an
-optional matched filter, full connected-component analysis, per-blob annulus
-backgrounds, and shape/elongation gating. For latency-critical applications
-(frame-rate tracking, embedded star trackers) tetra3rs offers an alternative
-that reads each pixel **once**: `extract_centroids_fast`
-(`FastCentroidConfig` in Rust). It is an *additive* alternative — the
-connected-component path stays the default and the right choice for
-calibration and faint-star work.
-
-### Algorithm
-
-1. **Coarse background pre-pass.** A subsampled grid (~1/64 of the pixels)
-   gives a `bg_grid`-spaced background grid and a global noise σ. Cheap, and
-   still tracks large-scale gradients (vignetting, Milky Way).
-2. **Single raster sweep.** Each pixel is thresholded against the bilinearly
-   interpolated background (`> bg + sigma_threshold·σ`). Lit pixels are grouped
-   into connected regions on the fly via **run-length + union-find**, with
-   intensity-weighted moments (including second moments, so `Centroid.cov` is
-   populated like the main path) accumulated inline. One center-of-mass is
-   emitted per region, with the same 3×3 quadratic peak refinement as the main
-   pipeline (gated to agree with the CoM).
-
-No convolution and no second pass, so the cost is dominated by a single memory
-read rather than compute.
-
-### Speed and accuracy
-
-On 2048×2048 TESS frames, single-threaded: **~15–20 ms vs ~26 ms** for the
-connected-component path, with equal end-to-end solve accuracy and
-~**0.1 px** centroid agreement on bright stars. (The gap has narrowed as the
-connected-component path got faster; the fast path's remaining edge is that
-it reads each pixel once and never convolves.)
-
-The trade-offs are deliberate:
-
-- **No matched filter**, so faint-star sensitivity is lower — sized for the
-  brightest stars a tracker locks onto, not deep detection.
-- **Center-of-mass is threshold-clipped**: sub-pixel accuracy is ~0.1 px on
-  bright stars, degrading for faint ones. Use the connected-component path
-  for calibration / tight astrometry.
-- A **global noise σ** is used (adequate when read/shot noise is roughly
-  uniform even where the background *level* varies).
-
-It returns the same `ExtractionResult` (center-origin coordinates, brightest
-first), so it is a drop-in for `solve_from_centroids`.
-
-### Configuration
+Python keyword arguments of `extract_centroids` / `CentroidExtractor.extract`; the fields of `CentroidExtractionConfig` in Rust have the same names. In Python everything after `sigma_threshold` is keyword-only.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `sigma_threshold` | 5.0 | Detection threshold in noise σ above the local background |
-| `bg_grid` | 64 | Coarse background-grid block size (pixels) |
-| `min_pixels` | 2 | Minimum pixels in a region (rejects hot pixels) |
-| `max_pixels` | 10,000 | Maximum pixels in a region (rejects satellite trails / bloomed regions, which would otherwise be the *brightest* centroid handed to the solver) |
-| `max_elongation` | None | Maximum elongation ratio (opt-in — moment-based elongation is noisy for few-pixel regions) |
-| `max_sharpness` | 0.9 | Hot-pixel / cosmic-ray gate (see [blob filtering](#5-blob-filtering); None = disabled) |
-| `saturation_level` | None | Peak level at which sub-pixel refinement is skipped (CoM kept) |
-| `border_margin` | 0 | Drop regions within this margin of an image edge (0 = off) |
+| `sigma_threshold` | 5.0 | Detection threshold: a star's matched-filter signal-to-noise ratio |
+| `psf_sigma` | 1.5 | Expected PSF width, Gaussian σ in pixels (FWHM / 2.355); range (0, 10] |
+| `bg_block_size` | 64 | Block size of the background / noise grid, pixels |
 | `max_centroids` | None | Maximum centroids to return, brightest first (None = all) |
+| `saturation_level` | None | Raw pixel value at which the sensor saturates; such stars are measured by center of mass |
+| `border_margin` | 0 | Drop centroids within this many pixels of an image edge |
+| `max_pixels` | 10,000 | Regions larger than this are dropped whole |
+| `max_elongation` | 3.0 | Maximum major/minor axis ratio (None = disabled) |
+| `reject_hot_pixels` | True | Reject detections much narrower than the PSF |
+| `detection_binning` | None | 1 = full resolution, 2 = binned 2×2, None = automatic |
+| `threads` (Python only) | None | Worker threads (None = all cores) |
 
-The coarse background grid already absorbs structure larger than a block
-(~64 px) before these filters see it, so `max_pixels` matters mainly for sharp
-bloomed regions and `max_elongation` for trails.
+!!! tip "Example: TESS full-frame images"
+    TESS is undersampled (PSF σ ≈ 0.8 px), its fields are crowded, and its brightest stars saturate and bleed along columns:
 
-```python
-result = tetra3rs.extract_centroids_fast(image, sigma_threshold=5.0, max_centroids=30)
-solution = db.solve_from_centroids(result.centroids, camera_model=cam)
-```
+    ```python
+    result = tetra3rs.extract_centroids(
+        image,
+        psf_sigma=0.8,          # narrow PSF
+        sigma_threshold=50.0,   # only stars standing clear of the crowd
+        bg_block_size=128,      # steadier background in a crowded field
+        max_elongation=6.0,     # keep bright stars with a short bleed
+    )
+    ```
 
-## Configuration Reference (connected-component pipeline)
+!!! tip "Example: severely undersampled survey cutouts"
+    For 10° SkyView / DSS cutouts, where a star is smaller than a pixel:
 
-These parameters configure the default `extract_centroids` pipeline (the fast
-path's knobs are listed [above](#configuration)).
+    ```python
+    result = tetra3rs.extract_centroids(
+        image,
+        psf_sigma=0.8,
+        sigma_threshold=6.0,
+        reject_hot_pixels=False,   # a star looks like a hot pixel here
+        max_centroids=200,
+    )
+    ```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `sigma_threshold` | 5.0 | Detection threshold in (true Gaussian) σ above background |
-| `min_pixels` | 3 | Minimum blob size (pixels) |
-| `max_pixels` | 10,000 | Maximum blob size (pixels) |
-| `max_centroids` | None | Maximum centroids to return (None = all) |
-| `local_bg_block_size` | 64 | Tile size for local background (None = skip) |
-| `max_elongation` | 3.0 | Maximum elongation ratio (None = disabled) |
-| `matched_filter_sigma` | 1.5 | Gaussian matched filter σ in pixels (None = disabled) |
-| `max_sharpness` | 0.9 | Hot-pixel / cosmic-ray peak-sharpness gate (None = disabled) |
-| `saturation_level` | None | Sensor saturation level; saturated peaks keep the CoM position |
-| `deblend` | `"off"` | `"reject"` drops blobs with multiple distinct intensity peaks |
-| `border_margin` | 0 | Drop blobs within this margin of an image edge (0 = off) |
+!!! warning "Changed: one extraction pipeline"
+    This pipeline replaces both the earlier connected-component extractor and `extract_centroids_fast`, which no longer exists. If you are updating code:
 
-!!! tip "TESS example"
-    For TESS Full Frame Images with their wide-field defocused optics, typical settings are `sigma_threshold=180`, `min_pixels=4`, `local_bg_block_size=16`, `max_elongation=6.0`. The high sigma threshold rejects the dense background, and the relaxed elongation allows for the broad, slightly asymmetric TESS PSF. (Before 0.9 the equivalent setting was `sigma_threshold=300` — see the noise-estimator note in [step 2](#2-global-noise-estimation).)
+    - `min_pixels`, `matched_filter_sigma`, `max_sharpness` and `deblend` are gone. Use `psf_sigma` in place of `matched_filter_sigma`, `reject_hot_pixels` in place of `max_sharpness`; close pairs are always separated.
+    - `local_bg_block_size` is now `bg_block_size` and cannot be `None`.
+    - `sigma_threshold` is a cut on the star's matched-filter signal-to-noise ratio, so values tuned for the old extractor need retuning (they will be too high; see [What `sigma_threshold` means](#what-sigma_threshold-means)).
+    - `Centroid.cov` is now the covariance of the **position**; the intensity moments it used to hold are in `Centroid.shape`.
+    - `ExtractionResult.background_sigma` is the raw-pixel noise and `threshold` is on the smoothed detection image.
+    - Pickles of `Centroid`, `ExtractionResult` and `SolveResult` from earlier versions do not load.

@@ -22,8 +22,15 @@ pub struct Centroid {
     /// Optional "brightness" value used for sorting (brighter = higher).
     /// The exact meaning is image-dependent.
     pub mass: Option<f32>,
-    /// Optional covariance matrix representing the uncertainty in the centroid position.
+    /// Optional covariance of the centroid **position**, in pixels²
+    /// (`[[σx², σxy], [σxy, σy²]]`). The solver folds it into each star's
+    /// match tolerance. Centroid extraction fills it from the measured
+    /// background noise; it does not include the star's own photon noise.
     pub cov: Option<Matrix2>,
+    /// Optional **shape** of the detection: its intensity second moments in
+    /// pixels² (`[[xx, xy], [xy, yy]]`) — about `σ_psf²` on the diagonal
+    /// for a round star. Not used by the solver.
+    pub shape: Option<Matrix2>,
 }
 
 impl Centroid {
