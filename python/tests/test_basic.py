@@ -37,7 +37,6 @@ class TestImport:
         for name in [
             "earth_barycentric_velocity",
             "extract_centroids",
-            "extract_centroids_fast",
         ]:
             assert callable(getattr(tetra3rs, name)), f"Not callable: {name}"
 
@@ -368,6 +367,37 @@ class TestEarthBarycentricVelocity:
 # ---------------------------------------------------------------------------
 
 
+def _star_field(w, h, stars, psf_sigma, noise=3.0, seed=0, background=100.0):
+    """Noise frame with Gaussian stars at ``stars`` = [(x, y, amplitude), ...]
+    (array coordinates: x = column, y = row, pixel centers at integers)."""
+    rng = np.random.default_rng(seed)
+    image = rng.normal(background, noise, (h, w))
+    yy, xx = np.mgrid[0:h, 0:w]
+    for x, y, amp in stars:
+        image += amp * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * psf_sigma**2))
+    return image.astype(np.float32)
+
+
+def _random_stars(w, h, n, seed, amp=(500.0, 3000.0), margin=12):
+    rng = np.random.default_rng(seed)
+    return [
+        (rng.uniform(margin, w - margin), rng.uniform(margin, h - margin), rng.uniform(*amp))
+        for _ in range(n)
+    ]
+
+
+def _nearest_px(result, x, y):
+    """Distance from array position (x, y) to the nearest centroid."""
+    w, h = result.image_width, result.image_height
+    return min(
+        (
+            math.hypot(c.x + (w - 1) / 2 - x, c.y + (h - 1) / 2 - y)
+            for c in result.centroids
+        ),
+        default=math.inf,
+    )
+
+
 class TestExtractCentroids:
     def test_gaussian_spots(self):
         """Create an image with Gaussian spots and verify extraction."""
@@ -386,7 +416,7 @@ class TestExtractCentroids:
             image[yy, xx] += g.astype(np.float32)
 
         result = tetra3rs.extract_centroids(
-            image, sigma_threshold=5.0, min_pixels=3, max_centroids=20
+            image, sigma_threshold=5.0, psf_sigma=2.0, max_centroids=20
         )
 
         assert isinstance(result, tetra3rs.ExtractionResult)
@@ -401,18 +431,32 @@ class TestExtractCentroids:
             assert abs(c.y) <= h / 2 + 1
 
     def test_extraction_result_pickle(self):
-        """ExtractionResult supports pickle."""
-        h, w = 64, 64
-        image = np.random.normal(100, 5, (h, w)).astype(np.float32)
-        image[32, 32] = 10000  # bright pixel
+        """ExtractionResult (and its centroids) round-trip through pickle."""
+        w, h = 200, 160
+        image = _star_field(w, h, _random_stars(w, h, 8, seed=11), psf_sigma=1.5)
 
-        result = tetra3rs.extract_centroids(image, sigma_threshold=3.0)
+        result = tetra3rs.extract_centroids(image, sigma_threshold=5.0)
+        assert len(result.centroids) >= 5
         result2 = pickle.loads(pickle.dumps(result))
         assert result2.image_width == result.image_width
+        assert result2.image_height == result.image_height
+        assert result2.background_mean == result.background_mean
+        assert result2.background_sigma == result.background_sigma
+        assert result2.threshold == result.threshold
+        assert result2.num_blobs_raw == result.num_blobs_raw
+        assert result2.psf_sigma_estimate == result.psf_sigma_estimate
         assert len(result2.centroids) == len(result.centroids)
+        for c, c2 in zip(result.centroids, result2.centroids):
+            assert (c2.x, c2.y, c2.brightness) == (c.x, c.y, c.brightness)
+            assert np.array_equal(c2.cov, c.cov)
+            assert np.array_equal(c2.shape, c.shape)
+        # A single centroid pickles on its own too, shape included.
+        c = result.centroids[0]
+        c2 = pickle.loads(pickle.dumps(c))
+        assert np.array_equal(c2.cov, c.cov) and np.array_equal(c2.shape, c.shape)
 
-    def test_fast_gaussian_spots(self):
-        """The single-pass fast path recovers spots over a gradient."""
+    def test_spots_over_gradient(self):
+        """Spots are recovered over a background gradient."""
         h, w = 512, 512
         # Background with a left-to-right gradient + noise.
         gradient = np.linspace(50, 250, w, dtype=np.float32)[None, :]
@@ -426,19 +470,23 @@ class TestExtractCentroids:
             g = 5000 * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.0**2))
             image[yy, xx] += g.astype(np.float32)
 
-        result = tetra3rs.extract_centroids_fast(
-            image, sigma_threshold=5.0, bg_grid=64, max_centroids=20
+        result = tetra3rs.extract_centroids(
+            image, sigma_threshold=5.0, psf_sigma=2.0, bg_block_size=64, max_centroids=20
         )
         assert isinstance(result, tetra3rs.ExtractionResult)
         assert result.image_width == w and result.image_height == h
         assert result.background_sigma > 0
-        assert len(result.centroids) >= 3
+        assert len(result.centroids) >= 5
 
-        # Brightest of the 5 injected spots should be recovered to ~1 px.
-        found = [(c.x + w / 2, c.y + h / 2) for c in result.centroids]
+        # Every injected spot is recovered to well under a pixel, and the
+        # five spots are the five brightest detections.
         for cy, cx in spots:
-            nearest = min(((fx - cx) ** 2 + (fy - cy) ** 2) ** 0.5 for fx, fy in found)
-            assert nearest < 1.0, f"spot ({cx},{cy}) nearest detection {nearest:.2f} px"
+            nearest = _nearest_px(result, cx, cy)
+            assert nearest < 0.1, f"spot ({cx},{cy}) nearest detection {nearest:.3f} px"
+        top5 = tetra3rs.extract_centroids(image, psf_sigma=2.0, max_centroids=5)
+        assert len(top5.centroids) == 5
+        for cy, cx in spots:
+            assert _nearest_px(top5, cx, cy) < 0.1
 
     def test_degenerate_image_raises_not_panics(self):
         """Zero-size / 1-wide images and bad config raise, not abort."""
@@ -450,7 +498,64 @@ class TestExtractCentroids:
             tetra3rs.extract_centroids(tiny)
         img = np.zeros((16, 16), dtype=np.float32)
         with pytest.raises(ValueError):
-            tetra3rs.extract_centroids(img, local_bg_block_size=0)
+            tetra3rs.extract_centroids(img, bg_block_size=0)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(psf_sigma=0.0),
+            dict(psf_sigma=-1.0),
+            dict(psf_sigma=float("nan")),
+            dict(psf_sigma=float("inf")),
+            dict(psf_sigma=10.5),
+            dict(detection_binning=0),
+            dict(detection_binning=3),
+            dict(sigma_threshold=0.0),
+            dict(sigma_threshold=float("nan")),
+        ],
+        ids=repr,
+    )
+    def test_invalid_config_raises_valueerror(self, kwargs):
+        img = np.zeros((64, 64), dtype=np.float32)
+        with pytest.raises(ValueError):
+            tetra3rs.extract_centroids(img, **kwargs)
+        with pytest.raises(ValueError):
+            tetra3rs.CentroidExtractor().extract(img, **kwargs)
+
+    def test_valid_config_extremes_accepted(self):
+        img = np.zeros((64, 64), dtype=np.float32)
+        tetra3rs.extract_centroids(img, psf_sigma=10.0)
+        tetra3rs.extract_centroids(img, psf_sigma=0.3, detection_binning=1)
+        tetra3rs.extract_centroids(img, psf_sigma=0.8, detection_binning=2)
+        tetra3rs.extract_centroids(img, max_elongation=None)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(min_pixels=3),
+            dict(local_bg_block_size=64),
+            dict(matched_filter_sigma=1.5),
+            dict(max_sharpness=0.9),
+            dict(deblend="off"),
+        ],
+        ids=repr,
+    )
+    def test_removed_arguments_are_rejected(self, kwargs):
+        """Arguments of the pre-rewrite extractor fail loudly, not silently."""
+        img = np.zeros((64, 64), dtype=np.float32)
+        with pytest.raises(TypeError):
+            tetra3rs.extract_centroids(img, **kwargs)
+        with pytest.raises(TypeError):
+            tetra3rs.CentroidExtractor().extract(img, **kwargs)
+        assert not hasattr(tetra3rs, "extract_centroids_fast")
+
+    def test_only_sigma_threshold_is_positional(self):
+        img = np.zeros((64, 64), dtype=np.float32)
+        tetra3rs.extract_centroids(img, 5.0)
+        with pytest.raises(TypeError):
+            tetra3rs.extract_centroids(img, 5.0, 1.5)
+        with pytest.raises(TypeError):
+            tetra3rs.CentroidExtractor().extract(img, 5.0, 1.5)
 
     def test_non_ndarray_raises_typeerror(self):
         """A plain list gives a clear TypeError, not an AttributeError."""
@@ -474,12 +579,8 @@ class TestExtractCentroids:
         # Same values in → same centroid position out.
         assert abs(r_native.centroids[0].x - r_big.centroids[0].x) < 1e-4
 
-    @pytest.mark.parametrize(
-        "extract",
-        [tetra3rs.extract_centroids, tetra3rs.extract_centroids_fast],
-        ids=["ccl", "fast"],
-    )
-    def test_layout_and_dtype_give_identical_centroids(self, extract):
+    @pytest.mark.parametrize("detection_binning", [1, 2], ids=["full", "binned"])
+    def test_layout_and_dtype_give_identical_centroids(self, detection_binning):
         """C-contiguous input takes a slice fast path; strided views and
         other dtypes must produce bit-identical centroids."""
         h, w = 256, 320
@@ -494,7 +595,12 @@ class TestExtractCentroids:
         assert u16.flags.c_contiguous
 
         def key(img):
-            r = extract(img, sigma_threshold=5.0, max_centroids=20)
+            r = tetra3rs.extract_centroids(
+                img,
+                sigma_threshold=5.0,
+                max_centroids=20,
+                detection_binning=detection_binning,
+            )
             assert len(r.centroids) >= 3
             return [(c.x, c.y, c.brightness) for c in r.centroids]
 
@@ -516,23 +622,189 @@ class TestExtractCentroids:
         assert not view.flags.c_contiguous
         assert key(view) == key(np.ascontiguousarray(view))
 
-    def test_fast_result_pickle_and_drop_in(self):
-        """Fast path returns a pickleable ExtractionResult with usable centroids."""
-        h, w = 64, 64
-        image = np.random.normal(100, 5, (h, w)).astype(np.float32)
-        # A star-shaped 3x3 patch (a bare 2-pixel spike is a hot-pixel pair,
-        # which the default sharpness gate now correctly rejects).
-        image[32, 32] = 10000
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            image[32 + dr, 32 + dc] = 5000
-        for dr, dc in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
-            image[32 + dr, 32 + dc] = 2500
+    def test_positions_are_subpixel_accurate(self):
+        """Bright stars at random sub-pixel phases are located to a few
+        hundredths of a pixel, and brightness orders them."""
+        w, h = 400, 300
+        stars = _random_stars(w, h, 30, seed=1)
+        result = tetra3rs.extract_centroids(_star_field(w, h, stars, 1.5, seed=1))
+        assert len(result.centroids) == len(stars)
+        errors = [_nearest_px(result, x, y) for x, y, _ in stars]
+        assert max(errors) < 0.05, f"max position error {max(errors):.4f} px"
+        fluxes = [c.brightness for c in result.centroids]
+        assert fluxes == sorted(fluxes, reverse=True)
+        assert all(f > 0 for f in fluxes)
 
-        result = tetra3rs.extract_centroids_fast(image, sigma_threshold=4.0)
-        assert len(result.centroids) >= 1
-        result2 = pickle.loads(pickle.dumps(result))
-        assert result2.image_width == result.image_width
-        assert len(result2.centroids) == len(result.centroids)
+    def test_detection_binning_does_not_move_bright_stars(self):
+        """Binning only affects detection: positions are measured on the
+        unbinned pixels, so bright stars land in the same place either way."""
+        w, h = 400, 300
+        stars = _random_stars(w, h, 30, seed=2)
+        image = _star_field(w, h, stars, 1.5, seed=2)
+        full = tetra3rs.extract_centroids(image, detection_binning=1)
+        binned = tetra3rs.extract_centroids(image, detection_binning=2)
+        assert len(full.centroids) == len(binned.centroids) == len(stars)
+        for a in full.centroids:
+            # Pair by position (near-equal fluxes may sort differently).
+            b = min(binned.centroids, key=lambda c: math.hypot(a.x - c.x, a.y - c.y))
+            assert math.hypot(a.x - b.x, a.y - b.y) < 1e-3
+            assert b.brightness == pytest.approx(a.brightness, rel=1e-3)
+        for x, y, _ in stars:
+            assert _nearest_px(full, x, y) < 0.05
+            assert _nearest_px(binned, x, y) < 0.05
+
+        def positions(r):
+            return [(c.x, c.y) for c in r.centroids]
+
+        # None picks binning 2 at psf_sigma >= 1.25 and 1 below it.
+        assert positions(tetra3rs.extract_centroids(image)) == positions(binned)
+        narrow_auto = tetra3rs.extract_centroids(image, psf_sigma=1.0)
+        narrow_full = tetra3rs.extract_centroids(image, psf_sigma=1.0, detection_binning=1)
+        assert positions(narrow_auto) == positions(narrow_full)
+
+    @pytest.mark.parametrize("true_sigma", [1.0, 1.5, 2.0, 2.5])
+    def test_psf_sigma_estimate_recovers_the_psf_width(self, true_sigma):
+        """`psf_sigma_estimate` reports the PSF width measured from the frame,
+        including when the configured `psf_sigma` is not quite right."""
+        w, h = 400, 300
+        image = _star_field(w, h, _random_stars(w, h, 30, seed=1), true_sigma, seed=1)
+        matched = tetra3rs.extract_centroids(image, psf_sigma=true_sigma)
+        assert matched.psf_sigma_estimate == pytest.approx(true_sigma, rel=0.03)
+        default = tetra3rs.extract_centroids(image)  # psf_sigma=1.5
+        assert default.psf_sigma_estimate == pytest.approx(true_sigma, rel=0.03)
+
+    def test_psf_sigma_estimate_is_none_without_enough_stars(self):
+        w, h = 200, 160
+        blank = _star_field(w, h, [], 1.5)
+        assert tetra3rs.extract_centroids(blank).psf_sigma_estimate is None
+        few = _star_field(w, h, [(50.3, 40.6, 2000.0), (150.7, 110.2, 2000.0)], 1.5)
+        result = tetra3rs.extract_centroids(few)
+        assert len(result.centroids) == 2
+        assert result.psf_sigma_estimate is None
+
+    def test_cov_is_position_uncertainty_and_shape_is_star_size(self):
+        """`cov` is how well the position is known (tiny for a bright star,
+        larger for a faint one); `shape` is the star's second moments
+        (about psf_sigma² on the diagonal, whatever the brightness)."""
+        w, h = 240, 120
+        psf_sigma = 1.5
+        stars = [(60.3, 60.6, 5000.0), (180.7, 59.2, 50.0)]
+        result = tetra3rs.extract_centroids(_star_field(w, h, stars, psf_sigma, seed=4))
+        assert len(result.centroids) == 2
+        bright, faint = result.centroids  # brightest first
+        assert _nearest_px(result, 60.3, 60.6) < 0.05
+
+        for c in (bright, faint):
+            assert c.cov.shape == (2, 2) and c.cov.dtype == np.float64
+            assert c.shape.shape == (2, 2) and c.shape.dtype == np.float64
+            assert np.allclose(c.cov, c.cov.T) and np.allclose(c.shape, c.shape.T)
+            assert c.cov[0, 0] > 0 and c.cov[1, 1] > 0
+
+        # Shape: the PSF's variance, independent of brightness.
+        assert bright.shape[0, 0] == pytest.approx(psf_sigma**2, rel=0.05)
+        assert bright.shape[1, 1] == pytest.approx(psf_sigma**2, rel=0.05)
+        assert abs(bright.shape[0, 1]) < 0.05 * psf_sigma**2
+
+        # Position covariance: orders of magnitude below the shape for a
+        # bright star, and it scales as 1/SNR² (amplitudes differ 100x).
+        assert bright.cov[0, 0] < 1e-3 * bright.shape[0, 0]
+        ratio = faint.cov[0, 0] / bright.cov[0, 0]
+        assert 100**2 / 4 < ratio < 100**2 * 4, ratio
+        # ...and it is honest: the read-noise bound for a Gaussian PSF is
+        # sigma_pos = sqrt(2) * psf_sigma / SNR per axis, with matched-filter
+        # SNR = amplitude * sqrt(pi) * psf_sigma / noise.
+        snr = 50.0 * math.sqrt(math.pi) * psf_sigma / 3.0
+        bound = (math.sqrt(2) * psf_sigma / snr) ** 2
+        for var in (faint.cov[0, 0], faint.cov[1, 1]):
+            assert 0.8 * bound < var < 1.5 * bound, (var, bound)
+
+        # Centroids built by hand carry neither.
+        manual = tetra3rs.Centroid(1.0, 2.0, 3.0)
+        assert manual.cov is None and manual.shape is None
+        # with_offset keeps both.
+        moved = bright.with_offset(1.0, -2.0)
+        assert np.array_equal(moved.cov, bright.cov)
+        assert np.array_equal(moved.shape, bright.shape)
+
+    def test_reject_hot_pixels(self):
+        """Single-pixel spikes are dropped by default and kept on request;
+        real stars are unaffected."""
+        w, h = 400, 300
+        stars = _random_stars(w, h, 10, seed=3)
+        image = _star_field(w, h, stars, 1.5, seed=3)
+        hot = [(50, 60), (200, 150), (350, 250), (120, 280)]
+        for x, y in hot:
+            image[y, x] += 4000.0
+
+        default = tetra3rs.extract_centroids(image)
+        assert len(default.centroids) == len(stars)
+        for x, y in hot:
+            assert _nearest_px(default, x, y) > 3.0
+        for x, y, _ in stars:
+            assert _nearest_px(default, x, y) < 0.05
+
+        kept = tetra3rs.extract_centroids(image, reject_hot_pixels=False)
+        assert len(kept.centroids) == len(stars) + len(hot)
+        for x, y in hot:
+            assert _nearest_px(kept, x, y) < 0.5
+
+    def test_close_pair_is_separated(self):
+        """Two stars sharing one above-threshold region come out as two
+        centroids (there is no `deblend` switch any more)."""
+        w, h = 200, 200
+        stars = [(96.0, 100.3, 3000.0), (104.0, 100.3, 2000.0)]
+        result = tetra3rs.extract_centroids(_star_field(w, h, stars, 1.5, seed=5))
+        assert len(result.centroids) == 2
+        for x, y, _ in stars:
+            assert _nearest_px(result, x, y) < 0.1
+
+    def test_saturated_star_gives_one_centroid(self):
+        """A clipped (flat-topped) star falls back to the center of mass:
+        one centroid, at the star, with or without `saturation_level`."""
+        w, h = 200, 200
+        image = _star_field(w, h, [(100.4, 99.7, 200000.0)], 1.5, seed=5)
+        image = np.minimum(image, 4095.0).astype(np.float32)
+        for saturation_level in (None, 4095.0):
+            result = tetra3rs.extract_centroids(image, saturation_level=saturation_level)
+            assert len(result.centroids) == 1
+            assert _nearest_px(result, 100.4, 99.7) < 0.2
+
+    def test_max_elongation_rejects_a_streak(self):
+        w, h = 200, 200
+        image = _star_field(w, h, [(60.3, 60.6, 3000.0)], 1.5, seed=6)
+        yy, xx = np.mgrid[0:h, 0:w]
+        # A 30 px horizontal trail with a Gaussian cross-section.
+        image += (
+            1500.0 * np.exp(-((yy - 140.0) ** 2) / (2 * 1.5**2)) * ((xx >= 90) & (xx < 120))
+        ).astype(np.float32)
+        result = tetra3rs.extract_centroids(image)
+        assert len(result.centroids) == 1
+        assert _nearest_px(result, 60.3, 60.6) < 0.05
+        ungated = tetra3rs.extract_centroids(image, max_elongation=None)
+        assert len(ungated.centroids) > 1
+
+    def test_border_margin(self):
+        w, h = 200, 160
+        stars = [(20.3, 80.6, 3000.0), (100.7, 80.2, 3000.0)]
+        image = _star_field(w, h, stars, 1.5, seed=8)
+        assert len(tetra3rs.extract_centroids(image).centroids) == 2
+        inner = tetra3rs.extract_centroids(image, border_margin=30)
+        assert len(inner.centroids) == 1
+        assert _nearest_px(inner, 100.7, 80.2) < 0.05
+
+    def test_background_statistics(self):
+        """`background_sigma` is the raw-pixel noise; `threshold` sits on the
+        smoothed detection image, so it is far closer to the background than
+        `sigma_threshold` raw sigmas would be."""
+        w, h = 400, 300
+        image = _star_field(w, h, _random_stars(w, h, 10, seed=9), 1.5, noise=5.0, seed=9)
+        result = tetra3rs.extract_centroids(image, sigma_threshold=5.0)
+        assert result.background_mean == pytest.approx(100.0, abs=0.5)
+        assert result.background_sigma == pytest.approx(5.0, rel=0.15)
+        assert result.background_mean < result.threshold
+        assert result.threshold < result.background_mean + 5.0 * result.background_sigma
+        # Regions, not stars: one region can hold several centroids.
+        assert 1 <= result.num_blobs_raw <= 10
 
 
 class TestArgumentValidation:
@@ -601,13 +873,20 @@ class TestCentroidExtractor:
     @staticmethod
     def _flat(result):
         return [
-            (c.x, c.y, c.brightness, None if c.cov is None else c.cov.tobytes())
+            (
+                c.x,
+                c.y,
+                c.brightness,
+                None if c.cov is None else c.cov.tobytes(),
+                None if c.shape is None else c.shape.tobytes(),
+            )
             for c in result.centroids
         ] + [
             result.background_mean,
             result.background_sigma,
             result.threshold,
             result.num_blobs_raw,
+            result.psf_sigma_estimate,
             result.image_width,
             result.image_height,
         ]
@@ -615,12 +894,13 @@ class TestCentroidExtractor:
     def test_reuse_matches_free_function(self):
         extractor = tetra3rs.CentroidExtractor()
         assert repr(extractor) == "CentroidExtractor()"
-        # big -> small -> big, matched filter on and off, local/global background
+        # big -> small -> big; binned and full-resolution detection, a
+        # different kernel, a different background grid
         frames = [
-            ((200, 160), dict(matched_filter_sigma=1.5)),
-            ((96, 80), dict(matched_filter_sigma=1.5)),
-            ((96, 80), dict(matched_filter_sigma=None)),
-            ((200, 160), dict(local_bg_block_size=None)),
+            ((200, 160), dict(detection_binning=2)),
+            ((96, 80), dict(detection_binning=2)),
+            ((96, 80), dict(detection_binning=1)),
+            ((200, 160), dict(psf_sigma=1.0, bg_block_size=32)),
             ((130, 70), {}),
         ]
         for i, ((w, h), kw) in enumerate(frames):
@@ -644,4 +924,11 @@ class TestCentroidExtractor:
         with pytest.raises(ValueError):
             extractor.extract(np.zeros((1, 1), dtype=np.float32))
         with pytest.raises(ValueError):
-            extractor.extract(np.zeros((32, 32), dtype=np.float32), deblend="maybe")
+            extractor.extract(np.zeros((32, 32), dtype=np.float32), psf_sigma=0.0)
+        with pytest.raises(ValueError):
+            extractor.extract(np.zeros((32, 32), dtype=np.float32), detection_binning=4)
+        # A failed call leaves the extractor usable.
+        image = self._scene(120, 90, seed=3)
+        assert self._flat(extractor.extract(image)) == self._flat(
+            tetra3rs.extract_centroids(image)
+        )

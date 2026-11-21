@@ -235,19 +235,13 @@ fn test_skyview_fits_solve() {
         // sigma threshold. After local BG subtraction the residual is
         // mostly noise + point sources.
         let extract_config = CentroidExtractionConfig {
-            sigma_threshold: 6.0,
-            min_pixels: 3,
-            max_pixels: 10000,
-            max_centroids: Some(200),
-            sigma_clip_iterations: 5,
-            sigma_clip_factor: 3.0,
-            local_bg_block_size: Some(64),
-            max_elongation: Some(3.0),
-            matched_filter_sigma: None,
             // DSS cutouts at 17.6″/px have a sub-pixel PSF: real stars are
             // geometrically indistinguishable from hot pixels, so the
-            // sharpness gate must be off for this (edge-case) plate scale.
-            max_sharpness: None,
+            // hot-pixel gate must be off for this (edge-case) plate scale.
+            psf_sigma: 0.8,
+            reject_hot_pixels: false,
+            sigma_threshold: 6.0,
+            max_centroids: Some(200),
             ..Default::default()
         };
 
@@ -279,6 +273,7 @@ fn test_skyview_fits_solve() {
                 y: c.y * parity_y,
                 mass: c.mass,
                 cov: c.cov,
+                shape: c.shape,
             })
             .collect();
 
@@ -382,6 +377,7 @@ fn test_skyview_fits_solve() {
                 y: cy,
                 mass: Some(10.0 - mag),
                 cov: None,
+                shape: None,
             })
             .collect();
 

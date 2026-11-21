@@ -67,14 +67,14 @@ hipparcos = ["std"]
 # Leaf-level solver timing instrumentation (thread-local accumulators).
 # Compiles to nothing when disabled. See src/solver/profiling.rs.
 profile = ["std"]
-# Centroid extraction also pulls in numeris's imageproc (used for CCL).
-# The `image` crate needs `std`.
+# Centroid extraction also pulls in numeris's imageproc (the SIMD separable
+# convolution behind the detection image). The `image` crate needs `std`.
 image = ["std", "dep:image", "numeris/imageproc"]
-# Multi-threaded centroid extraction via rayon. Parallelizes the dominant
-# local-background stage (independent block medians + interpolation rows) and
-# the full-image element-wise maps; also enables numeris's rayon imageproc
-# paths (e.g. the matched-filter Gaussian blur). Bit-identical results to the
-# sequential build. Combine with `image`: `--features image,parallel`.
+# Multi-threaded centroid extraction via rayon. Parallelizes the full-image
+# passes, the block statistics and the per-region measurement; also enables
+# numeris's rayon imageproc paths (the detection convolution). Bit-identical
+# results to the sequential build. Combine with `image`:
+# `--features image,parallel`.
 parallel = ["std", "dep:rayon", "numeris/rayon"]
 
 [profile.test]
@@ -103,3 +103,8 @@ required-features = ["image"]
 name = "tess_solve_test"
 path = "tests/tess_solve_test.rs"
 required-features = ["image"]
+
+[[example]]
+name = "centroid_bench"
+required-features = ["image"]
+

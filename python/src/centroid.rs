@@ -4,17 +4,33 @@ use pyo3::prelude::*;
 
 use crate::distortion::extract_distortion;
 
-/// A detected star centroid with position, brightness, and shape.
+/// A detected star centroid with position, brightness, position
+/// covariance, and shape.
 ///
 /// Attributes:
 ///     x: X position in pixels (origin at image center, +X right).
 ///     y: Y position in pixels (origin at image center, +Y down).
-///     brightness: Integrated intensity above background.
-///     cov: 2x2 intensity-weighted covariance matrix [[σxx, σxy], [σxy, σyy]] in pixels².
+///     brightness: Flux above background.
+///     cov: 2x2 covariance of the position, [[σx², σxy], [σxy, σy²]] in
+///         pixels² — how well the centroid is located. The solver folds it
+///         into each star's match tolerance.
+///     shape: 2x2 intensity second moments, [[xx, xy], [xy, yy]] in pixels²
+///         — how big and how round the star is (about σ_psf² on the
+///         diagonal for a round star).
 #[pyclass(name = "Centroid", module = "tetra3rs", frozen, from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyCentroid {
     pub(crate) inner: tetra3::Centroid,
+}
+
+fn matrix2_to_numpy<'py>(py: Python<'py>, m: &tetra3::Matrix2) -> Bound<'py, PyArray2<f64>> {
+    PyArray2::from_owned_array(
+        py,
+        ndarray::array![
+            [m[(0, 0)] as f64, m[(0, 1)] as f64],
+            [m[(1, 0)] as f64, m[(1, 1)] as f64],
+        ],
+    )
 }
 
 #[pymethods]
@@ -24,7 +40,7 @@ impl PyCentroid {
     /// Args:
     ///     x: X position in pixels (origin at image center, +X right).
     ///     y: Y position in pixels (origin at image center, +Y down).
-    ///     brightness: Integrated intensity above background (optional).
+    ///     brightness: Flux above background (optional).
     #[new]
     #[pyo3(signature = (x, y, brightness = None))]
     fn new(x: f32, y: f32, brightness: Option<f32>) -> Self {
@@ -34,6 +50,7 @@ impl PyCentroid {
                 y,
                 mass: brightness,
                 cov: None,
+                shape: None,
             },
         }
     }
@@ -50,30 +67,33 @@ impl PyCentroid {
         self.inner.y
     }
 
-    /// Integrated intensity above background.
+    /// Flux above background.
     #[getter]
     fn brightness(&self) -> Option<f32> {
         self.inner.mass
     }
 
-    /// 2x2 intensity-weighted covariance matrix as a numpy array.
-    /// [[σxx, σxy], [σxy, σyy]] in pixels².
+    /// 2x2 covariance of the centroid position as a numpy array,
+    /// [[σx², σxy], [σxy, σy²]] in pixels² — the position uncertainty from
+    /// the measured background noise (the star's own photon noise is not
+    /// included). None for centroids not produced by extraction.
     #[getter]
     fn cov<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
-        self.inner.cov.map(|m| {
-            PyArray2::from_owned_array(
-                py,
-                ndarray::array![
-                    [m[(0, 0)] as f64, m[(0, 1)] as f64],
-                    [m[(1, 0)] as f64, m[(1, 1)] as f64],
-                ],
-            )
-        })
+        self.inner.cov.map(|m| matrix2_to_numpy(py, &m))
+    }
+
+    /// 2x2 intensity second moments of the detection as a numpy array,
+    /// [[xx, xy], [xy, yy]] in pixels² — its size and roundness (about
+    /// σ_psf² on the diagonal for a round star). None for centroids not
+    /// produced by extraction.
+    #[getter]
+    fn shape<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.inner.shape.map(|m| matrix2_to_numpy(py, &m))
     }
 
     /// Return a new Centroid with position shifted by (dx, dy).
     ///
-    /// Preserves brightness and covariance.
+    /// Preserves brightness, covariance and shape.
     ///
     /// Args:
     ///     dx: X offset in pixels.
@@ -88,6 +108,7 @@ impl PyCentroid {
                 y: self.inner.y + dy,
                 mass: self.inner.mass,
                 cov: self.inner.cov,
+                shape: self.inner.shape,
             },
         }
     }
@@ -96,7 +117,7 @@ impl PyCentroid {
     ///
     /// Takes a distortion model (RadialDistortion or PolynomialDistortion)
     /// and returns a new Centroid at the corrected position.
-    /// Brightness and covariance are preserved.
+    /// Brightness, covariance and shape are preserved.
     ///
     /// Args:
     ///     distortion: A RadialDistortion or PolynomialDistortion model.
@@ -112,6 +133,7 @@ impl PyCentroid {
                 y: yu as f32,
                 mass: self.inner.mass,
                 cov: self.inner.cov,
+                shape: self.inner.shape,
             },
         })
     }
@@ -120,7 +142,7 @@ impl PyCentroid {
     ///
     /// Takes a distortion model (RadialDistortion or PolynomialDistortion)
     /// and returns a new Centroid at the distorted position.
-    /// Brightness and covariance are preserved.
+    /// Brightness, covariance and shape are preserved.
     ///
     /// Args:
     ///     distortion: A RadialDistortion or PolynomialDistortion model.
@@ -136,6 +158,7 @@ impl PyCentroid {
                 y: yd as f32,
                 mass: self.inner.mass,
                 cov: self.inner.cov,
+                shape: self.inner.shape,
             },
         })
     }

@@ -75,6 +75,7 @@ fn golden_dump() {
                             y,
                             mass: Some(10.0 - db.star_catalog.stars()[i].mag),
                             cov: None,
+                            shape: None,
                         });
                     }
                 }
@@ -85,6 +86,7 @@ fn golden_dump() {
                     y: (rng.unit() * 2.0 - 1.0) * half / ps,
                     mass: Some(rng.unit() * 5.0),
                     cov: None,
+                    shape: None,
                 });
             }
             let mut sc = SolveConfig::new(fov * (1.0 + bias), w, w);

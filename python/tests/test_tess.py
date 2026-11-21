@@ -17,6 +17,18 @@ from .conftest import (
     read_fits_image,
 )
 
+# Extraction settings for TESS full-frame images (mirrors `tess_extract_config`
+# in the Rust TESS tests). The PSF is undersampled (sigma ~0.75 px); the field
+# is crowded, so only high-SNR stars are wanted and the background grid is
+# coarse; and saturated stars bleed along columns, so the elongation gate is
+# loosened to keep the mildly bled bright stars the solver's patterns need.
+TESS_EXTRACT = dict(
+    psf_sigma=0.8,
+    sigma_threshold=50.0,
+    bg_block_size=128,
+    max_elongation=6.0,
+)
+
 
 class TestTessMultiImageCalibration:
     """Multi-image tiered calibration on TESS Camera 1 CCD 1."""
@@ -42,15 +54,7 @@ class TestTessMultiImageCalibration:
 
             ext = tetra3rs.extract_centroids(
                 image,
-                sigma_threshold=180.0,
-                min_pixels=3,
-                max_pixels=10000,
-                local_bg_block_size=16,
-                max_elongation=6.0,
-                # Mirror the Rust TESS tests: threshold tuned for the
-                # unfiltered image.
-                matched_filter_sigma=None,
-            )
+**TESS_EXTRACT)
             all_centroids.append(ext.centroids)
             all_headers.append(headers)
 
@@ -165,15 +169,7 @@ class TestTessMultiImageCalibration:
             image = image[:2048, 44:2092].copy()
             ext = tetra3rs.extract_centroids(
                 image,
-                sigma_threshold=180.0,
-                min_pixels=3,
-                max_pixels=10000,
-                local_bg_block_size=16,
-                max_elongation=6.0,
-                # Mirror the Rust TESS tests: threshold tuned for the
-                # unfiltered image.
-                matched_filter_sigma=None,
-            )
+**TESS_EXTRACT)
             all_centroids.append(ext.centroids)
             all_headers.append(headers)
 

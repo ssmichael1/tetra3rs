@@ -14,8 +14,8 @@ use fits::{get_f64, Header};
 use numeris::Vector3;
 use std::time::Instant;
 use tetra3::{
-    extract_centroids_fast, CalibrateConfig, CentroidExtractionConfig, DistortionModelType,
-    FastCentroidConfig, GenerateDatabaseConfig, SolveConfig, SolverDatabase,
+    CalibrateConfig, CentroidExtractionConfig, DistortionModelType, GenerateDatabaseConfig,
+    SolveConfig, SolverDatabase,
 };
 
 /// Trim TESS image to science region: rows 0–2047, columns 44–2091.
@@ -284,18 +284,7 @@ fn test_tess_fits_solve() {
         // ── Extract centroids ──
         // TESS images have high background (~150-200 DN). Saturated stars
         // create elongated blobs, so max_elongation is set high (30.0).
-        let extract_config = CentroidExtractionConfig {
-            sigma_threshold: 150.0,
-            min_pixels: 3,
-            max_pixels: 10000,
-            max_centroids: None,
-            sigma_clip_iterations: 5,
-            sigma_clip_factor: 3.0,
-            local_bg_block_size: Some(128),
-            max_elongation: Some(30.0),
-            matched_filter_sigma: None,
-            ..Default::default()
-        };
+        let extract_config = tess_extract_config();
 
         let extraction = tetra3::extract_centroids_from_raw(
             &clean_pixels,
@@ -391,15 +380,33 @@ fn test_tess_fits_solve() {
     assert_eq!(failed, 0, "{} TESS solve tests failed", failed);
 }
 
-/// Benchmark: fast single-pass centroid path vs. the connected-component path
-/// on real TESS frames — speed, centroid-position agreement, end-to-end solve.
+/// Extraction settings for TESS full-frame images.
+///
+/// TESS is undersampled (21″ pixels, PSF σ ≈ 0.75 px) and its fields are
+/// crowded, so: a narrow PSF, and a threshold well above the noise so that
+/// only stars standing clear of the confusion are kept. The brightest stars
+/// saturate and bleed along columns; the solver needs them, so the
+/// elongation limit is looser than the default — but not off: the longest
+/// bleeds put the center of mass pixels away from the star.
+fn tess_extract_config() -> CentroidExtractionConfig {
+    CentroidExtractionConfig {
+        psf_sigma: 0.8,
+        sigma_threshold: 50.0,
+        bg_block_size: 128,
+        max_elongation: Some(6.0),
+        ..Default::default()
+    }
+}
+
+/// Benchmark: detection at full resolution vs. on the 2×2-binned frame, on
+/// real TESS frames — speed, centroid-position agreement, end-to-end solve.
 ///
 /// `#[ignore]` (timing/diagnostic, not a pass/fail gate). Run with:
-///   cargo test --test tess_solve_test --features image -- --ignored --nocapture bench_fast_vs_ccl
-/// Add `--features image,parallel` to time the multi-threaded blurs.
+///   cargo test --test tess_solve_test --features image -- --ignored --nocapture bench_detection_binning
+/// Add `--features image,parallel` to time the multi-threaded build.
 #[test]
 #[ignore]
-fn bench_fast_vs_ccl_extraction() {
+fn bench_detection_binning() {
     const REPS: u32 = 5;
 
     for tc in TESS_TEST_CASES {
@@ -408,7 +415,7 @@ fn bench_fast_vs_ccl_extraction() {
     let db = build_tess_database();
 
     println!("\n══════════════════════════════════════════════════════════════");
-    println!("Fast single-pass vs. connected-component centroid extraction (best of {REPS})");
+    println!("Full-resolution vs. binned detection (best of {REPS})");
     println!("══════════════════════════════════════════════════════════════");
 
     for tc in TESS_TEST_CASES {
@@ -420,11 +427,7 @@ fn bench_fast_vs_ccl_extraction() {
             pixels,
         } = fits::read_image(&fits_path, 1);
         let image_hdu = &header;
-        let (trimmed, sci_width, sci_height) = trim_tess_science_region(&pixels, naxis1, naxis2);
-        let clean: Vec<f32> = trimmed
-            .iter()
-            .map(|&v| if v.is_finite() { v } else { 0.0 })
-            .collect();
+        let (clean, sci_width, sci_height) = trim_tess_science_region(&pixels, naxis1, naxis2);
 
         // Geometric center of the trimmed science region in full-frame
         // 0-indexed coords: region spans columns [44, 44+sci_width-1], rows
@@ -435,72 +438,6 @@ fn bench_fast_vs_ccl_extraction() {
         let (b_ra, b_dec) = pixel_to_radec(image_hdu, center_x, center_y);
         let true_boresight = radec_to_uvec(b_ra, b_dec);
 
-        let ccl_config = CentroidExtractionConfig {
-            sigma_threshold: 150.0,
-            min_pixels: 3,
-            max_pixels: 10000,
-            local_bg_block_size: Some(128),
-            max_elongation: Some(30.0),
-            ..Default::default()
-        };
-        // Single-pass detector: threshold in noise-σ above a coarse-grid
-        // background (independent of the ~250-DN raw threshold above).
-        let fast_config = FastCentroidConfig {
-            sigma_threshold: 8.0,
-            bg_grid: 128,
-            min_pixels: 3,
-            max_centroids: None,
-            ..Default::default()
-        };
-
-        let best = |f: &dyn Fn() -> usize| -> (f64, usize) {
-            let mut best_ms = f64::INFINITY;
-            let mut n = 0;
-            for _ in 0..REPS {
-                let t = Instant::now();
-                n = f();
-                best_ms = best_ms.min(t.elapsed().as_secs_f64() * 1e3);
-            }
-            (best_ms, n)
-        };
-
-        let ccl = tetra3::extract_centroids_from_raw(&clean, sci_width, sci_height, &ccl_config)
-            .expect("ccl extract");
-        let fast = extract_centroids_fast(&clean, sci_width, sci_height, &fast_config)
-            .expect("fast extract");
-
-        let (ccl_ms, _) = best(&|| {
-            tetra3::extract_centroids_from_raw(&clean, sci_width, sci_height, &ccl_config)
-                .unwrap()
-                .centroids
-                .len()
-        });
-        let (fast_ms, _) = best(&|| {
-            extract_centroids_fast(&clean, sci_width, sci_height, &fast_config)
-                .unwrap()
-                .centroids
-                .len()
-        });
-
-        // Cross-match: nearest CCL centroid to each fast centroid, ≤ 2 px.
-        let mut deltas: Vec<f32> = Vec::new();
-        for f in &fast.centroids {
-            let mut best_d = f32::INFINITY;
-            for c in &ccl.centroids {
-                let d = ((f.x - c.x).powi(2) + (f.y - c.y).powi(2)).sqrt();
-                best_d = best_d.min(d);
-            }
-            if best_d <= 2.0 {
-                deltas.push(best_d);
-            }
-        }
-        deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let (median_d, max_d) = if deltas.is_empty() {
-            (f32::NAN, f32::NAN)
-        } else {
-            (deltas[deltas.len() / 2], *deltas.last().unwrap())
-        };
-
         let solve_config = SolveConfig {
             fov_max_error_rad: Some((2.0_f32).to_radians()),
             match_radius: 0.005,
@@ -509,33 +446,62 @@ fn bench_fast_vs_ccl_extraction() {
             match_max_error: None,
             ..SolveConfig::new((12.0_f32).to_radians(), sci_width, sci_height)
         };
-        let boresight_err_arcmin = |cents: &[tetra3::Centroid]| -> Option<f32> {
-            let sol = db.solve_from_centroids(cents, &solve_config).ok()?;
-            let bs = sol.qicrs2cam.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
-            Some(angular_separation(&bs, &true_boresight).to_degrees() * 60.0)
-        };
-        let ccl_err = boresight_err_arcmin(&ccl.centroids);
-        let fast_err = boresight_err_arcmin(&fast.centroids);
+        let mut extractor = tetra3::CentroidExtractor::new();
+        let mut results = Vec::new();
+        for binning in [1u32, 2] {
+            let config = CentroidExtractionConfig {
+                detection_binning: Some(binning),
+                ..tess_extract_config()
+            };
+            let mut best_ms = f64::INFINITY;
+            let mut res = None;
+            for _ in 0..REPS {
+                let t = Instant::now();
+                res = Some(
+                    extractor
+                        .extract_from_raw(&clean, sci_width, sci_height, &config)
+                        .expect("extract"),
+                );
+                best_ms = best_ms.min(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let res = res.unwrap();
+            let err = db
+                .solve_from_centroids(&res.centroids, &solve_config)
+                .ok()
+                .map(|sol| {
+                    let bs = sol.qicrs2cam.inverse() * Vector3::from_array([0.0, 0.0, 1.0]);
+                    angular_separation(&bs, &true_boresight).to_degrees() * 60.0
+                });
+            println!(
+                "  binning {binning}: {:6.2} ms   {:5} centroids   psf σ {:?}   solve {}",
+                best_ms,
+                res.centroids.len(),
+                res.psf_sigma_estimate,
+                err.map_or("FAIL".into(), |e| format!("{e:.2}' err")),
+            );
+            results.push(res);
+        }
 
-        println!("\n{} ({}×{})", tc.filename, sci_width, sci_height);
+        // Cross-match: nearest full-resolution centroid to each binned one.
+        let mut deltas: Vec<f32> = Vec::new();
+        for b in &results[1].centroids {
+            let mut best_d = f32::INFINITY;
+            for c in &results[0].centroids {
+                best_d = best_d.min(((b.x - c.x).powi(2) + (b.y - c.y).powi(2)).sqrt());
+            }
+            if best_d <= 2.0 {
+                deltas.push(best_d);
+            }
+        }
+        deltas.sort_by(|a, b| a.total_cmp(b));
         println!(
-            "  CCL : {:6.1} ms   {:4} centroids   solve {}",
-            ccl_ms,
-            ccl.centroids.len(),
-            ccl_err.map_or("FAIL".into(), |e| format!("{e:.2}' err")),
-        );
-        println!(
-            "  Fast: {:6.1} ms   {:4} centroids   solve {}",
-            fast_ms,
-            fast.centroids.len(),
-            fast_err.map_or("FAIL".into(), |e| format!("{e:.2}' err")),
-        );
-        println!(
-            "  speedup {:.2}×   |   {} matched ≤2px: median Δ {:.3} px, max {:.3} px",
-            ccl_ms / fast_ms,
+            "  {} ({}×{}): {} matched ≤2px, median Δ {:.4} px, max {:.3} px",
+            tc.filename,
+            sci_width,
+            sci_height,
             deltas.len(),
-            median_d,
-            max_d,
+            deltas.get(deltas.len() / 2).copied().unwrap_or(f32::NAN),
+            deltas.last().copied().unwrap_or(f32::NAN),
         );
     }
     println!("══════════════════════════════════════════════════════════════");
@@ -595,18 +561,7 @@ fn test_tess_distortion_fit_and_center_accuracy() {
             .collect();
 
         // ── Extract centroids ──
-        let extract_config = CentroidExtractionConfig {
-            sigma_threshold: 150.0,
-            min_pixels: 3,
-            max_pixels: 10000,
-            max_centroids: None,
-            sigma_clip_iterations: 5,
-            sigma_clip_factor: 3.0,
-            local_bg_block_size: Some(128),
-            max_elongation: Some(30.0),
-            matched_filter_sigma: None,
-            ..Default::default()
-        };
+        let extract_config = tess_extract_config();
 
         let extraction = tetra3::extract_centroids_from_raw(
             &clean_pixels,
@@ -798,18 +753,7 @@ fn test_tess_multi_image_calibration() {
     );
 
     // ── Extract centroids from all images up front ──
-    let extract_config = CentroidExtractionConfig {
-        sigma_threshold: 180.0,
-        min_pixels: 3,
-        max_pixels: 10000,
-        max_centroids: None,
-        sigma_clip_iterations: 5,
-        sigma_clip_factor: 3.0,
-        local_bg_block_size: Some(16),
-        max_elongation: Some(6.0),
-        matched_filter_sigma: None,
-        ..Default::default()
-    };
+    let extract_config = tess_extract_config();
 
     struct ImageData {
         centroids: Vec<tetra3::Centroid>,

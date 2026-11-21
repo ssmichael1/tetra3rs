@@ -14,7 +14,7 @@
 # PyO3 renders optional-argument defaults in __text_signature__ as `...` (it
 # cannot express the real value), so stubtest sees a runtime default of `...`
 # and flags it as different from the concrete default in the stub
-# (e.g. max_sharpness=0.9, solve_timeout_ms=5000). The concrete defaults are
+# (e.g. max_elongation=3.0, solve_timeout_ms=5000). The concrete defaults are
 # kept deliberately — they drive accurate editor hints and are strictly more
 # informative than `...` — so the mismatch is accepted for these constructors
 # and functions.
@@ -22,7 +22,6 @@ tetra3rs.RadialDistortion.__new__
 tetra3rs.SolverDatabase.generate_from_gaia
 tetra3rs.SolverDatabase.solve_from_centroids
 tetra3rs.extract_centroids
-tetra3rs.extract_centroids_fast
 tetra3rs.CentroidExtractor.extract
 
 # The runtime module defines __all__; the stub omits it. Every public name is

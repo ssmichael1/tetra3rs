@@ -38,8 +38,7 @@ This applies to:
 
 - Input centroids (both `Centroid` objects and numpy arrays)
 - `SolveResult.pixel_to_world()` / `world_to_pixel()` inputs and outputs
-- `ExtractionResult.centroids` returned by `extract_centroids()` and
-  `extract_centroids_fast()`
+- `ExtractionResult.centroids` returned by `extract_centroids()`
 
 !!! note "Centered origin — not a corner origin"
     tetra3rs always uses a **center origin**: the boresight, the gnomonic
@@ -52,8 +51,8 @@ This applies to:
     You only deal with the corner convention at the *input* boundary: if your
     centroids are corner-indexed (e.g. raw detector row/column), subtract
     `((W−1)/2, (H−1)/2)` to convert them to the center origin before passing
-    them to the solver. `extract_centroids()` /
-    `extract_centroids_fast()` already return center-origin coordinates.
+    them to the solver. `extract_centroids()` already returns center-origin
+    coordinates.
 
 !!! warning "Changed in 0.8.0"
     Earlier versions placed the origin at `(W/2, H/2)` — a half-pixel right of

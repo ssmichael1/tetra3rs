@@ -110,8 +110,8 @@
 //!
 //! // Solve from image centroids (pixel coordinates, origin at image center)
 //! let centroids = vec![
-//!     Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None },
-//!     Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None },
+//!     Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None, shape: None },
+//!     Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None, shape: None },
 //!     // ... more centroids ...
 //! ];
 //!
@@ -286,9 +286,8 @@ pub use camera_model::CameraModel;
 pub use centroid::*;
 #[cfg(feature = "image")]
 pub use centroid_extraction::{
-    extract_centroids_fast, extract_centroids_from_image, extract_centroids_from_raw,
-    CentroidExtractionConfig, CentroidExtractionResult, CentroidExtractor, DeblendMode,
-    FastCentroidConfig,
+    extract_centroids_from_image, extract_centroids_from_raw, CentroidExtractionConfig,
+    CentroidExtractionResult, CentroidExtractor,
 };
 pub use distortion::{
     calibrate_camera, num_coeffs, CalibrateConfig, CalibrateResult, Distortion,

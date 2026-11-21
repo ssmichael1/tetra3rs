@@ -25,7 +25,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Multiscale** — supports a range of field-of-view scales in a single database
 - **Proper motion** — propagates catalog star positions to any observation epoch
 - **Compact binary databases** — databases serialize with [postcard](https://docs.rs/postcard) in a portable, lightweight format with no offset-size limit, so wide-FOV-range multiscale databases of any size load cleanly
-- **Centroid extraction** — detect stars from in-memory pixel data with local background subtraction, connected-component labeling, and quadratic sub-pixel peak refinement. Accepts an already-decoded `image::DynamicImage` or a raw `&[f32]` pixel buffer (requires the `image` feature)
+- **Centroid extraction** — detect stars from in-memory pixel data with matched-filter detection against a locally measured background and noise, automatic separation of close pairs, and a Gaussian-windowed sub-pixel centroid measured on the raw pixels, with a position covariance for every star. Accepts an already-decoded `image::DynamicImage` or a raw `&[f32]` pixel buffer (requires the `image` feature)
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit either a SIP polynomial or a standard camera-intrinsics model (free optical center, focal scale, and full Brown-Conrady `k1, k2, k3, p1, p2` — the same parameter set as OpenCV's `calibrateCamera`) from one or more solved images via `calibrate_camera`, with alternating per-image WCS refinement and global sigma-clipped LS fit. Handles mosaic cameras (e.g. TESS) where the optical axis sits far off the detector
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
@@ -116,8 +116,8 @@ let db = SolverDatabase::load_from_file("data/my_database.bin")?;
 
 // Solve from image centroids (pixel coordinates, origin at image center)
 let centroids = vec![
-    Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None },
-    Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None },
+    Centroid { x: 100.0, y: 200.0, mass: Some(50.0), cov: None, shape: None },
+    Centroid { x: -50.0, y: -10.0, mass: Some(45.0), cov: None, shape: None },
     // ...
 ];
 

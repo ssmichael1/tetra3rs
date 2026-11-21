@@ -42,17 +42,14 @@ class TestSkyViewSolve:
         result = tetra3rs.extract_centroids(
             image,
             sigma_threshold=6.0,
-            min_pixels=3,
-            max_pixels=10000,
             max_centroids=200,
-            local_bg_block_size=64,
-            max_elongation=3.0,
             # DSS cutouts at 17.6"/px have a sub-pixel PSF: real stars are
-            # indistinguishable from hot pixels, so the sharpness gate must
-            # be off for this (edge-case) plate scale — and the matched
-            # filter stays off too (mirrors the Rust skyview test).
-            max_sharpness=None,
-            matched_filter_sigma=None,
+            # indistinguishable from hot pixels, so the hot-pixel gate must
+            # be off for this (edge-case) plate scale, and the detection
+            # kernel is the narrowest useful one (mirrors the Rust skyview
+            # test).
+            psf_sigma=0.8,
+            reject_hot_pixels=False,
         )
         assert len(result.centroids) >= 4, (
             f"Only {len(result.centroids)} centroids extracted"

@@ -51,6 +51,7 @@ pub(super) fn preprocess(centroids: &[Centroid], cam: &CameraModel) -> Preproces
             // comparator (not a total order — std may panic); treat as unknown.
             mass: c.mass.filter(|m| m.is_finite()),
             cov: c.cov,
+            shape: c.shape,
         });
         orig_indices.push(idx);
     }
