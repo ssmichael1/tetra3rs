@@ -6,12 +6,12 @@ Only recent releases are listed. Older entries are in this file's git history (`
 
 ### Added
 
-- `no_std` support: `std` is now a (default) cargo feature; `default-features = false, features = ["libm"]` builds the solver, tracking, calibration and database (de)serialization for bare-metal targets — no file I/O and no solve clock (`solve_timeout_ms` ignored, `solve_time_ms` 0). New `SolverDatabase::generate_from_gaia_bytes` and `CameraModel::to_bytes` / `from_bytes`; CI lints the `thumbv7em-none-eabi` build. ([#79](https://github.com/ssmichael1/tetra3rs/pull/79))
+- `no_std` support: `std` is now a (default) cargo feature; `default-features = false, features = ["libm"]` builds the solver, tracking, calibration and database (de)serialization for bare-metal targets — no file I/O and no solve clock (`solve_timeout_ms` ignored, `solve_time_ms` 0). New `SolverDatabase::generate_from_gaia_bytes` and `CameraModel::to_bytes` / `from_bytes`; CI lints the `thumbv7em-none-eabi` build. ([#86](https://github.com/ssmichael1/tetra3rs/pull/86))
 - Python 3.15 wheels (cp315). ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
 
 ### Changed
 
-- **Breaking:** `Error::Io`, `*_from_file` / `save_to_file` and `generate_from_gaia` exist only with the `std` feature; the `image`, `parallel`, `profile` and `hipparcos` features now imply `std`. A dependent that already sets `default-features = false` must add `std` (or `libm`). ([#79](https://github.com/ssmichael1/tetra3rs/pull/79))
+- **Breaking:** `Error::Io`, `*_from_file` / `save_to_file` and `generate_from_gaia` exist only with the `std` feature; the `image`, `parallel`, `profile` and `hipparcos` features now imply `std`. A dependent that already sets `default-features = false` must add `std` (or `libm`). ([#86](https://github.com/ssmichael1/tetra3rs/pull/86))
 - **Breaking:** Python 3.10 support dropped (end-of-life October 2026); wheels are built for 3.11–3.15 and `requires-python` is `>=3.11`. ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
 - Dependencies: `pyo3` 0.30.1, `numpy` (Rust) 0.30.0; `pyo3-log` replaced by a small in-tree `log` → Python `logging` bridge with the same logger names, level caching and `reset_log_cache()` behavior. ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
 - CI: `cibuildwheel` 4.3.1 and current majors of all GitHub Actions (`checkout` v7, `setup-python` v7, `cache` v6, `upload-artifact` v7, `download-artifact` v8, `upload-pages-artifact` v5, `deploy-pages` v5). ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
