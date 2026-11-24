@@ -151,16 +151,22 @@ impl PolynomialDistortion {
     /// in contrast to evaluating a separately-fit inverse polynomial which has
     /// a small "asymmetry" error because a finite-order polynomial cannot
     /// perfectly invert another finite-order polynomial.
+    ///
+    /// Returns `(NaN, NaN)` when the iteration does not converge — the point
+    /// lies outside the region where the polynomial is invertible, so no
+    /// ideal position maps to it. The solver drops non-finite centroids.
     pub fn undistort(&self, x_d: f64, y_d: f64) -> (f64, f64) {
-        const MAX_ITER: usize = 8;
-        const TOL_PX: f64 = 1e-9; // sub-nanopixel residual
+        const MAX_STEPS: usize = 20;
+        const UNDISTORT_TOL_PX: f64 = 1e-9; // sub-nanopixel residual
 
         // Initial guess: pixels are close enough to ideal that x_d ≈ x.
         // (For TESS the worst-case distortion is ~10 px on 2048-wide images.)
         let mut x = x_d;
         let mut y = y_d;
 
-        for _ in 0..MAX_ITER {
+        // One more evaluation than Newton steps, so the last step's result
+        // is checked too.
+        for _ in 0..=MAX_STEPS {
             let u = x / self.scale;
             let v = y / self.scale;
             let (a_val, da_du, da_dv) = eval_poly_with_grad(&self.a_coeffs, self.order, u, v);
@@ -173,8 +179,8 @@ impl PolynomialDistortion {
             // Residual: F(x, y) − (x_d, y_d)
             let rx = fx - x_d;
             let ry = fy - y_d;
-            if rx * rx + ry * ry < TOL_PX * TOL_PX {
-                break;
+            if rx * rx + ry * ry < UNDISTORT_TOL_PX * UNDISTORT_TOL_PX {
+                return (x, y);
             }
 
             // Jacobian: ∂F/∂(x, y).
@@ -185,12 +191,10 @@ impl PolynomialDistortion {
             let j21 = db_du;
             let j22 = 1.0 + db_dv;
             let det = j11 * j22 - j12 * j21;
-            // Singular (or NaN, from non-finite input) Jacobian indicates
-            // degenerate distortion at this point; for any sensible lens the
-            // Jacobian is dominated by the identity. Bail with the latest
-            // iterate — it is still the best estimate. (Deliberately not an
-            // assert: NaN centroids are legal caller input and are filtered
-            // downstream by the solver's finiteness checks.)
+            // Singular (or NaN, from non-finite input) Jacobian: the model is
+            // not invertible here. (Deliberately not an assert: NaN centroids
+            // are legal caller input and are filtered downstream by the
+            // solver's finiteness checks.)
             if !det.is_finite() || det.abs() < 1e-15 {
                 break;
             }
@@ -201,7 +205,7 @@ impl PolynomialDistortion {
             y -= inv_det * (-j21 * rx + j11 * ry);
         }
 
-        (x, y)
+        (f64::NAN, f64::NAN)
     }
 
     /// Check the cross-field invariants that construction normally enforces
@@ -450,6 +454,22 @@ mod tests {
         let (xd, yd) = d.distort(100.0, -200.0);
         assert!((xd - 100.0).abs() < 1e-12);
         assert!((yd + 200.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_undistort_outside_invertible_region_is_nan() {
+        // F(x) = x − s·(x/s)³ peaks at x = s/√3 with F = (2/3)·s/√3 ≈ 394 px
+        // for s = 1024: nothing maps to x_d = 900.
+        let n = num_coeffs(3);
+        let mut a = vec![0.0; n];
+        a[coeff_index(3, 0)] = -1.0;
+        let d = PolynomialDistortion::new(3, 1024.0, a, vec![0.0; n]);
+        let (xu, yu) = d.undistort(900.0, 0.0);
+        assert!(xu.is_nan() && yu.is_nan(), "got ({xu}, {yu})");
+        // Inside the fold the inverse is still exact.
+        let (xd, yd) = d.distort(300.0, 50.0);
+        let (xu, yu) = d.undistort(xd, yd);
+        assert!((xu - 300.0).abs() < 1e-6 && (yu - 50.0).abs() < 1e-6);
     }
 
     #[test]

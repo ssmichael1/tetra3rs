@@ -4,8 +4,8 @@
 //! Split out of the crate-facing module; entry via [`extract_centroids_fast`].
 
 use super::{
-    check_pixel_len, elongation_from_cov, finish_region, par, runs, sort_and_truncate_by_mass,
-    BackgroundGrid, CentroidExtractionResult,
+    check_pixel_len, check_sigma_threshold, elongation_from_cov, finish_region, par, runs,
+    sort_and_truncate_by_mass, BackgroundGrid, CentroidExtractionResult,
 };
 use crate::centroid::Centroid;
 use crate::error::{Error, Result};
@@ -138,12 +138,7 @@ pub fn extract_centroids_fast(
     let w = width as usize;
     let h = height as usize;
     check_pixel_len(pixels.len(), width, height)?;
-    if !(config.sigma_threshold.is_finite() && config.sigma_threshold > 0.0) {
-        return Err(Error::InvalidInput(format!(
-            "sigma_threshold must be finite and positive, got {}",
-            config.sigma_threshold
-        )));
-    }
+    check_sigma_threshold(config.sigma_threshold)?;
     if config.bg_grid == 0 {
         return Err(Error::InvalidInput("bg_grid must be >= 1".into()));
     }
@@ -156,7 +151,11 @@ pub fn extract_centroids_fast(
     let (bg, sigma) = BackgroundGrid::build(pixels, w, h, block, (block / 8).max(1));
     let nx = w.div_ceil(block);
     let k = config.sigma_threshold;
-    let k_sigma = k * sigma;
+    // Never below the rounding error of the interpolated background: on a
+    // noiseless (σ = 0) frame the blend `g0·(1−f) + g1·f` of equal block
+    // medians can land an ulp under the pixel value, and `p > thr` would
+    // then light arbitrary patches of a perfectly flat image.
+    let k_sigma = (k * sigma).max(bg.rounding_margin());
 
     // ── Threshold pass: packed detection bit mask ──
     // Per row: blend the two bracketing grid rows (row-constant half of the
@@ -259,7 +258,15 @@ pub fn extract_centroids_fast(
         let v = |dy: isize, dx: isize| -> f64 {
             let rr = (pr as isize + dy) as usize;
             let cc = (pc as isize + dx) as usize;
-            pixels[rr * w + cc] as f64 - peak_bg
+            // Non-finite neighbours read as background (residual 0), like
+            // the CCL path: a −∞ next to the peak would otherwise make the
+            // sharpness infinite and reject a real star.
+            let p = pixels[rr * w + cc];
+            if p.is_finite() {
+                p as f64 - peak_bg
+            } else {
+                0.0
+            }
         };
 
         // Sharpness gate, peak refinement, and assembly are shared with the

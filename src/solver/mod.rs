@@ -179,10 +179,9 @@ pub struct SolverDatabase {
     /// Original catalog IDs (e.g. HIP number) for each star.
     pub star_catalog_ids: Vec<i64>,
 
-    /// Pattern hash table (open addressing, quadratic probing).
-    /// Each slot packs the 4 star indices, largest edge angle, and a 16-bit
-    /// key hash prefilter into a single cache-friendly struct. Empty slots
-    /// have `star_indices == [0, 0, 0, 0]`.
+    /// Pattern hash table (open addressing, quadratic probing): per
+    /// occupied slot, the 4 star indices, largest edge angle, and a 16-bit
+    /// key hash prefilter. See [`PatternCatalog`] for the storage layout.
     pub pattern_catalog: PatternCatalog,
 
     /// Database generation parameters.
@@ -278,6 +277,13 @@ impl GenerateDatabaseConfig {
         if self.verification_stars_per_fov == 0 {
             return Err(InvalidInput(
                 "verification_stars_per_fov must be >= 1".into(),
+            ));
+        }
+        // Zero of either generates no patterns at all — a database that
+        // loads fine and can never solve.
+        if self.lattice_field_oversampling == 0 || self.patterns_per_lattice_field == 0 {
+            return Err(InvalidInput(
+                "lattice_field_oversampling and patterns_per_lattice_field must be >= 1".into(),
             ));
         }
         if self.catalog_nside == 0 || self.catalog_nside > crate::starcatalog::MAX_NSIDE {
@@ -556,20 +562,6 @@ impl SolveConfig {
         self.camera_model.image_height
     }
 
-    /// Pixel scale in radians per pixel (horizontal): `1 / focal_length_px`.
-    ///
-    /// Returns `0.0` when the camera model is the unconfigured
-    /// `Default::default()` placeholder (zero image width). Crate-internal: the
-    /// `0.0`-means-unconfigured sentinel is an implementation detail (Python
-    /// exposes pixel scale via `CameraModel.pixel_scale`).
-    pub(crate) fn pixel_scale(&self) -> f32 {
-        if self.camera_model.image_width > 0 && self.camera_model.focal_length_px > 0.0 {
-            self.camera_model.pixel_scale() as f32
-        } else {
-            0.0
-        }
-    }
-
     /// Check that this configuration can produce a meaningful solve.
     ///
     /// `solve_from_centroids` runs this first and returns
@@ -825,6 +817,8 @@ mod tests {
         bad(|c| c.pattern_max_error = -0.001);
         bad(|c| c.verification_stars_per_fov = 0); // divide by zero
         bad(|c| c.catalog_nside = 0);
+        bad(|c| c.lattice_field_oversampling = 0); // no lattice → no patterns
+        bad(|c| c.patterns_per_lattice_field = 0);
         bad(|c| c.max_fov_deg = 0.0);
         bad(|c| c.min_fov_deg = Some(40.0)); // > max_fov_deg (30)
     }

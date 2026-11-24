@@ -195,7 +195,7 @@ impl SolverDatabase {
         // rejecting true candidates in catalog-saturated fields where the
         // expected coincidence count is a large fraction of the centroids.
         let half_x = ((fov as f64) / 2.0).tan();
-        let half_y = half_x * (config.image_height() as f64 / config.image_width().max(1) as f64);
+        let half_y = half_x * (config.image_height() as f64 / config.image_width() as f64);
         let margin = match_radius_rad as f64;
         let n_in = nearby_cam_positions
             .iter()
@@ -292,7 +292,7 @@ impl SolverDatabase {
 /// conservative floor); larger for portrait images where the height exceeds
 /// the width-referenced FOV and √2 would under-query the corners.
 pub(super) fn diagonal_factor(config: &SolveConfig) -> f32 {
-    let aspect = config.image_height() as f32 / config.image_width().max(1) as f32;
+    let aspect = config.image_height() as f32 / config.image_width() as f32;
     (1.0 + aspect * aspect).sqrt().max(1.42)
 }
 

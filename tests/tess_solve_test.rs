@@ -7,161 +7,16 @@
 //!
 //! The solver's auto-parity detection handles the CD matrix orientation.
 
+mod fits;
 mod test_data;
 
+use fits::{get_f64, Header};
 use numeris::Vector3;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::time::Instant;
 use tetra3::{
     extract_centroids_fast, CalibrateConfig, CentroidExtractionConfig, DistortionModelType,
     FastCentroidConfig, GenerateDatabaseConfig, SolveConfig, SolverDatabase,
 };
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Minimal FITS reader
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Clone)]
-enum FitsValue {
-    Float(f64),
-    Int(i64),
-    #[allow(dead_code)]
-    Str(String),
-}
-
-struct FitsHdu {
-    headers: HashMap<String, FitsValue>,
-    data_offset: u64,
-    data_len: u64,
-}
-
-fn parse_header_card(card: &[u8; 80]) -> Option<(String, FitsValue)> {
-    let card_str = String::from_utf8_lossy(card);
-    let keyword = card_str[..8].trim().to_string();
-    if keyword.is_empty() || keyword == "COMMENT" || keyword == "HISTORY" || keyword == "END" {
-        return None;
-    }
-    if card_str.len() < 10 || &card_str[8..10] != "= " {
-        return None;
-    }
-    let value_str = card_str[10..].trim();
-    let value = if let Some(rest) = value_str.strip_prefix('\'') {
-        if let Some(end) = rest.find('\'') {
-            FitsValue::Str(rest[..end].trim().to_string())
-        } else {
-            FitsValue::Str(rest.trim().to_string())
-        }
-    } else {
-        let num_part = if let Some(slash) = value_str.find('/') {
-            value_str[..slash].trim()
-        } else {
-            value_str
-        };
-        if let Ok(i) = num_part.parse::<i64>() {
-            FitsValue::Int(i)
-        } else if let Ok(f) = num_part.parse::<f64>() {
-            FitsValue::Float(f)
-        } else {
-            FitsValue::Str(num_part.to_string())
-        }
-    };
-    Some((keyword, value))
-}
-
-fn read_fits_hdus(path: &str) -> Vec<FitsHdu> {
-    let mut file = File::open(path).expect("Failed to open FITS file");
-    let mut hdus = Vec::new();
-    let mut offset: u64 = 0;
-
-    loop {
-        let mut headers = HashMap::new();
-        let mut found_end = false;
-
-        loop {
-            let mut block = [0u8; 2880];
-            if file.read_exact(&mut block).is_err() {
-                return hdus;
-            }
-            offset += 2880;
-            for i in 0..36 {
-                let card: &[u8; 80] = block[i * 80..(i + 1) * 80].try_into().unwrap();
-                let card_str = String::from_utf8_lossy(card);
-                if card_str.starts_with("END") {
-                    found_end = true;
-                    break;
-                }
-                if let Some((k, v)) = parse_header_card(card) {
-                    headers.insert(k, v);
-                }
-            }
-            if found_end {
-                break;
-            }
-        }
-
-        let naxis = match headers.get("NAXIS") {
-            Some(FitsValue::Int(n)) => *n as usize,
-            _ => 0,
-        };
-        let bitpix = match headers.get("BITPIX") {
-            Some(FitsValue::Int(n)) => *n,
-            _ => 8,
-        };
-
-        let mut data_len: u64 = if naxis > 0 {
-            let bytes_per_pixel = bitpix.unsigned_abs() / 8;
-            let mut npixels: u64 = 1;
-            for i in 1..=naxis {
-                let key = format!("NAXIS{}", i);
-                if let Some(FitsValue::Int(n)) = headers.get(&key) {
-                    npixels *= *n as u64;
-                }
-            }
-            npixels * bytes_per_pixel
-        } else {
-            0
-        };
-
-        if let Some(FitsValue::Int(pcount)) = headers.get("PCOUNT") {
-            data_len += *pcount as u64;
-        }
-
-        let data_offset = offset;
-        let padded = data_len.div_ceil(2880) * 2880;
-        offset += padded;
-        file.seek(SeekFrom::Start(offset)).ok();
-
-        hdus.push(FitsHdu {
-            headers,
-            data_offset,
-            data_len,
-        });
-    }
-}
-
-fn get_f64(hdu: &FitsHdu, key: &str) -> Option<f64> {
-    match hdu.headers.get(key) {
-        Some(FitsValue::Float(f)) => Some(*f),
-        Some(FitsValue::Int(i)) => Some(*i as f64),
-        _ => None,
-    }
-}
-
-fn read_f32_image(path: &str, hdu: &FitsHdu) -> Vec<f32> {
-    let mut file = File::open(path).expect("Failed to open FITS file");
-    file.seek(SeekFrom::Start(hdu.data_offset)).unwrap();
-    let npixels = hdu.data_len as usize / 4;
-    let mut buf = vec![0u8; hdu.data_len as usize];
-    file.read_exact(&mut buf).unwrap();
-    let mut pixels = Vec::with_capacity(npixels);
-    for i in 0..npixels {
-        let bytes: [u8; 4] = buf[i * 4..(i + 1) * 4].try_into().unwrap();
-        pixels.push(f32::from_be_bytes(bytes));
-    }
-    pixels
-}
 
 /// Trim TESS image to science region: rows 0–2047, columns 44–2091.
 /// Returns (trimmed_pixels, sci_width, sci_height).
@@ -208,7 +63,7 @@ fn angular_separation(a: &Vector3<f32>, b: &Vector3<f32>) -> f32 {
 
 /// Get a SIP polynomial coefficient from the header (e.g. "A_2_1").
 /// Returns 0.0 if the key is not present.
-fn get_sip_coeff(hdu: &FitsHdu, prefix: &str, p: usize, q: usize) -> f64 {
+fn get_sip_coeff(hdu: &Header, prefix: &str, p: usize, q: usize) -> f64 {
     let key = format!("{}_{}_{}", prefix, p, q);
     get_f64(hdu, &key).unwrap_or(0.0)
 }
@@ -216,15 +71,11 @@ fn get_sip_coeff(hdu: &FitsHdu, prefix: &str, p: usize, q: usize) -> f64 {
 /// Apply SIP distortion correction (forward: pixel → corrected pixel).
 /// u, v are pixel offsets from CRPIX (0-indexed: x - (CRPIX1 - 1)).
 /// Returns (u + f(u,v), v + g(u,v)) where f and g are the SIP polynomials.
-fn apply_sip_forward(hdu: &FitsHdu, u: f64, v: f64) -> (f64, f64) {
-    let a_order = match hdu.headers.get("A_ORDER") {
-        Some(FitsValue::Int(n)) => *n as usize,
-        _ => return (u, v), // no SIP
+fn apply_sip_forward(hdu: &Header, u: f64, v: f64) -> (f64, f64) {
+    let (Some(a_order), Some(b_order)) = (hdu.get_int("A_ORDER"), hdu.get_int("B_ORDER")) else {
+        return (u, v); // no SIP
     };
-    let b_order = match hdu.headers.get("B_ORDER") {
-        Some(FitsValue::Int(n)) => *n as usize,
-        _ => return (u, v),
-    };
+    let (a_order, b_order) = (a_order as usize, b_order as usize);
 
     let mut f = 0.0;
     for p in 0..=a_order {
@@ -252,7 +103,7 @@ fn apply_sip_forward(hdu: &FitsHdu, u: f64, v: f64) -> (f64, f64) {
 /// Compute the RA/Dec (degrees) at a given pixel coordinate in the full-frame
 /// image using the full WCS chain: pixel → SIP → CD matrix → TAN deprojection.
 /// pixel_x, pixel_y are 0-indexed full-frame coordinates.
-fn pixel_to_radec(hdu: &FitsHdu, pixel_x: f64, pixel_y: f64) -> (f64, f64) {
+fn pixel_to_radec(hdu: &Header, pixel_x: f64, pixel_y: f64) -> (f64, f64) {
     // CRPIX is 1-indexed in FITS
     let crpix1 = get_f64(hdu, "CRPIX1").expect("Missing CRPIX1");
     let crpix2 = get_f64(hdu, "CRPIX2").expect("Missing CRPIX2");
@@ -361,24 +212,14 @@ fn test_tess_fits_solve() {
         println!("Testing: {} ({})", tc.filename, tc.description);
 
         // ── Read the FITS file (data is in HDU 1 for TESS) ──
-        let hdus = read_fits_hdus(&fits_path);
-        assert!(
-            hdus.len() >= 2,
-            "Expected at least 2 HDUs in TESS FITS file"
-        );
-
-        let image_hdu = &hdus[1]; // HDU 1 = image extension
-        let naxis1 = match image_hdu.headers.get("NAXIS1") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS1"),
-        };
-        let naxis2 = match image_hdu.headers.get("NAXIS2") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS2"),
-        };
+        let fits::FitsImage {
+            header,
+            width: naxis1,
+            height: naxis2,
+            pixels,
+        } = fits::read_image(&fits_path, 1);
+        let image_hdu = &header;
         println!("  Full image size: {} x {}", naxis1, naxis2);
-
-        let pixels = read_f32_image(&fits_path, image_hdu);
         assert_eq!(pixels.len(), (naxis1 as usize) * (naxis2 as usize));
 
         // Trim to science region (rows 0-2047, cols 44-2091) to remove
@@ -572,17 +413,13 @@ fn bench_fast_vs_ccl_extraction() {
 
     for tc in TESS_TEST_CASES {
         let fits_path = format!("data/tess_test_images/{}", tc.filename);
-        let hdus = read_fits_hdus(&fits_path);
-        let image_hdu = &hdus[1];
-        let naxis1 = match image_hdu.headers.get("NAXIS1") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS1"),
-        };
-        let naxis2 = match image_hdu.headers.get("NAXIS2") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS2"),
-        };
-        let pixels = read_f32_image(&fits_path, image_hdu);
+        let fits::FitsImage {
+            header,
+            width: naxis1,
+            height: naxis2,
+            pixels,
+        } = fits::read_image(&fits_path, 1);
+        let image_hdu = &header;
         let (trimmed, sci_width, sci_height) = trim_tess_science_region(&pixels, naxis1, naxis2);
         let clean: Vec<f32> = trimmed
             .iter()
@@ -736,20 +573,13 @@ fn test_tess_distortion_fit_and_center_accuracy() {
         println!("Testing: {} ({})", tc.filename, tc.description);
 
         // ── Read and prepare image ──
-        let hdus = read_fits_hdus(&fits_path);
-        assert!(hdus.len() >= 2);
-        let image_hdu = &hdus[1];
-
-        let naxis1 = match image_hdu.headers.get("NAXIS1") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS1"),
-        };
-        let naxis2 = match image_hdu.headers.get("NAXIS2") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS2"),
-        };
-
-        let pixels = read_f32_image(&fits_path, image_hdu);
+        let fits::FitsImage {
+            header,
+            width: naxis1,
+            height: naxis2,
+            pixels,
+        } = fits::read_image(&fits_path, 1);
+        let image_hdu = &header;
         let (trimmed_pixels, sci_width, sci_height) =
             trim_tess_science_region(&pixels, naxis1, naxis2);
 
@@ -985,27 +815,20 @@ fn test_tess_multi_image_calibration() {
         centroids: Vec<tetra3::Centroid>,
         sci_width: u32,
         sci_height: u32,
-        image_hdu_headers: HashMap<String, FitsValue>,
+        image_hdu_headers: Header,
         description: &'static str,
     }
 
     let mut images: Vec<ImageData> = Vec::new();
 
     for &(fits_path, description) in same_ccd_images {
-        let hdus = read_fits_hdus(fits_path);
-        assert!(hdus.len() >= 2, "Expected at least 2 HDUs in {}", fits_path);
-        let image_hdu = &hdus[1];
-
-        let naxis1 = match image_hdu.headers.get("NAXIS1") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS1 in {}", fits_path),
-        };
-        let naxis2 = match image_hdu.headers.get("NAXIS2") {
-            Some(FitsValue::Int(n)) => *n as u32,
-            _ => panic!("Missing NAXIS2 in {}", fits_path),
-        };
-
-        let pixels = read_f32_image(fits_path, image_hdu);
+        let fits::FitsImage {
+            header,
+            width: naxis1,
+            height: naxis2,
+            pixels,
+        } = fits::read_image(fits_path, 1);
+        let image_hdu = &header;
         let (trimmed_pixels, sci_width, sci_height) =
             trim_tess_science_region(&pixels, naxis1, naxis2);
 
@@ -1040,7 +863,7 @@ fn test_tess_multi_image_calibration() {
             centroids: extraction.centroids,
             sci_width,
             sci_height,
-            image_hdu_headers: image_hdu.headers.clone(),
+            image_hdu_headers: image_hdu.clone(),
             description,
         });
     }
@@ -1182,11 +1005,7 @@ fn test_tess_multi_image_calibration() {
         let rmse_px = rmse_arcsec / arcsec_per_px;
 
         // Compare center pixel against FITS WCS
-        let hdu_for_wcs = FitsHdu {
-            headers: img.image_hdu_headers.clone(),
-            data_offset: 0,
-            data_len: 0,
-        };
+        let hdu_for_wcs = img.image_hdu_headers.clone();
 
         let (solved_ra, solved_dec) = solution.pixel_to_world(0.0, 0.0);
 

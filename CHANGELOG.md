@@ -17,8 +17,17 @@ Only recent releases are listed. Older entries are in this file's git history (`
 - CI: `cibuildwheel` 4.3.1 and current majors of all GitHub Actions (`checkout` v7, `setup-python` v7, `cache` v6, `upload-artifact` v7, `download-artifact` v8, `upload-pages-artifact` v5, `deploy-pages` v5). ([#77](https://github.com/ssmichael1/tetra3rs/pull/77))
 - Python: the extension declares `gil_used = true`, so a source build on free-threaded Python (3.14t/3.15t) re-enables the GIL instead of running untested without it; no free-threaded wheels are published. ([#78](https://github.com/ssmichael1/tetra3rs/pull/78))
 
+- **Breaking:** `extract_centroids_from_raw` / `_from_image` reject `sigma_threshold <= 0` (the fast path already did). ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- **Breaking:** polynomial distortion fits need `2 * num_coeffs(order)` matched points (was `num_coeffs`, an exactly determined fit). ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- Tests read FITS images with `fitskit`; `BreadthFirstCombinations` no longer keeps a dedup set (same order). ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+
 ### Fixed
 
+- Centroid extraction: the noise σ is floored at the data's quantization step / √12, so integer frames with sub-count noise no longer threshold on the background; `sigma_clip_iterations: 0` still estimates σ; the fast path yields nothing on a constant frame and keeps a star next to a non-finite pixel. ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- Centroid extraction: background blocks with no finite pixel take the mean of their filled neighbours instead of level 0. ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- `undistort` (radial and polynomial) returns `(NaN, NaN)` when Newton does not converge instead of its last iterate. ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- `calibrate_camera` errors instead of returning the radial fit's warm start when the fit never converges, and rejects `max_iterations == 0` and an image size different from the solves'. ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
+- Catalogs: the Hipparcos parser skips non-finite records, the Gaia parser range-checks RA/Dec, and `generate_from_star_list` drops unrepresentable stars and sorts with a total order; zero `lattice_field_oversampling` / `patterns_per_lattice_field` is rejected. ([#83](https://github.com/ssmichael1/tetra3rs/pull/83))
 - Python: the log-level cache is lock-free (`arc-swap`), so a `fork()` that lands while another thread is logging can no longer leave the child's cache permanently locked. ([#78](https://github.com/ssmichael1/tetra3rs/pull/78))
 
 ## 0.14.1 - 2026-11-15

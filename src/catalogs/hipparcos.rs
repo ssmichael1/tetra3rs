@@ -57,7 +57,7 @@ fn parse_hipparcos_star(record: &str) -> Option<HipparcosStar> {
         return None;
     }
 
-    Some(HipparcosStar {
+    let star = HipparcosStar {
         hip: column(bytes, 0..6)?.trim().parse().ok()?,
         ra_rad: column(bytes, 15..28)?.trim().parse().ok()?,
         dec_rad: column(bytes, 29..42)?.trim().parse().ok()?,
@@ -65,7 +65,16 @@ fn parse_hipparcos_star(record: &str) -> Option<HipparcosStar> {
         pm_dec: column(bytes, 60..68)?.trim().parse().ok()?,
         hpmag: column(bytes, 129..136)?.trim().parse().ok()?,
         b_v: column(bytes, 152..158)?.trim().parse().ok()?,
-    })
+    };
+    // Rust's float parser accepts "NaN" and "inf"; such a record is as
+    // unusable as an unparseable one (see the Gaia loader).
+    let finite = star.ra_rad.is_finite()
+        && star.dec_rad.is_finite()
+        && star.pm_ra.is_finite()
+        && star.pm_dec.is_finite()
+        && star.hpmag.is_finite()
+        && star.b_v.is_finite();
+    finite.then_some(star)
 }
 
 /// Load the Hipparcos catalog from an in-memory string.
@@ -119,5 +128,29 @@ mod tests {
         let data = std::fs::read_to_string(fname).expect("Failed to read Hipparcos catalog file");
         let stars = load_hipparcos_catalog(&data);
         assert!(!stars.is_empty());
+    }
+
+    /// A record with the seven parsed columns filled in.
+    fn record(ra: &str, hpmag: &str) -> String {
+        let mut line = vec![b' '; 160];
+        let mut put = |start: usize, text: &str| {
+            line[start..start + text.len()].copy_from_slice(text.as_bytes());
+        };
+        put(0, "1");
+        put(15, ra);
+        put(29, "0.5");
+        put(51, "1.0");
+        put(60, "-2.0");
+        put(129, hpmag);
+        put(152, "0.6");
+        String::from_utf8(line).unwrap()
+    }
+
+    #[test]
+    fn non_finite_fields_are_skipped() {
+        // `str::parse::<f64>` accepts "NaN" and "inf".
+        assert!(parse_hipparcos_star(&record("1.25", "7.1")).is_some());
+        assert!(parse_hipparcos_star(&record("NaN", "7.1")).is_none());
+        assert!(parse_hipparcos_star(&record("1.25", "inf")).is_none());
     }
 }

@@ -90,9 +90,10 @@ rand = "0.10.0"
 rand_distr = "0.6.0"
 env_logger = "0.11"
 ureq = "3"
+fitskit = "0.3.0"
 
 # integration tests use centroid extraction which needs the "image" feature
-# The test itself reads FITS files directly (minimal parser in-test)
+# The tests read their FITS images with `fitskit` (see tests/fits/mod.rs).
 [[test]]
 name = "skyview_solve_test"
 path = "tests/skyview_solve_test.rs"
