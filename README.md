@@ -29,6 +29,7 @@ Given a set of star centroids extracted from a camera image, tetra3rs identifies
 - **Camera model** — unified intrinsics struct (focal length, optical center, parity, distortion) used throughout the pipeline
 - **Distortion calibration** — fit either a SIP polynomial or a standard camera-intrinsics model (free optical center, focal scale, and full Brown-Conrady `k1, k2, k3, p1, p2` — the same parameter set as OpenCV's `calibrateCamera`) from one or more solved images via `calibrate_camera`, with alternating per-image WCS refinement and global sigma-clipped LS fit. Handles mosaic cameras (e.g. TESS) where the optical axis sits far off the detector
 - **WCS output** — solve results include FITS-standard WCS fields (CD matrix, CRVAL) and pixel↔sky coordinate conversion methods
+- **`no_std`** — the solver, tracking, calibration and database (de)serialization build without the standard library for bare-metal targets (`default-features = false, features = ["libm"]`; an allocator is required)
 - **Stellar aberration** — optional correction for the ~20" apparent shift in star positions caused by the observer's barycentric velocity, with a built-in convenience function for Earth's barycentric velocity
 
 ## Installation
@@ -40,6 +41,16 @@ The crate is published on [crates.io](https://crates.io/crates/tetra3) as `tetra
 ```sh
 cargo add tetra3
 ```
+
+#### `no_std`
+
+For bare-metal targets, disable the default `std` feature and take float math from `libm` (an allocator is still required):
+
+```toml
+tetra3 = { version = "0.15", default-features = false, features = ["libm"] }
+```
+
+Without `std` there is no file I/O — load databases and camera models with the `from_bytes` / `to_bytes` methods (`SolverDatabase::generate_from_gaia_bytes` builds a database from in-memory catalog bytes) — and no clock, so `solve_timeout_ms` is ignored; bound the search with `max_patterns_checked`. Centroid extraction (`image`) requires `std`.
 
 ### Python
 

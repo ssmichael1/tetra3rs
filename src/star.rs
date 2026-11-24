@@ -1,3 +1,5 @@
+#[cfg(not(feature = "std"))]
+use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// A "Generic" star type that will be used for star matching
@@ -34,7 +36,7 @@ pub(crate) fn star_from_hipparcos(
     // Hipparcos reference epoch is J1991.25
     const HIPPARCOS_EPOCH_YEAR: f64 = 1991.25;
     // Convert milliarcseconds/year to radians/year
-    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * std::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
+    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * core::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
 
     let (ra, dec) = if let Some(target_year) = epoch_year {
         let dt_years = target_year - HIPPARCOS_EPOCH_YEAR;
@@ -80,7 +82,7 @@ pub(crate) fn star_from_gaia(
     // Gaia DR3 reference epoch is J2016.0
     const GAIA_EPOCH_YEAR: f64 = 2016.0;
     // Gaia proper motions are in mas/yr, same conversion factor
-    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * std::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
+    const MAS_PER_YR_TO_RAD_PER_YR: f64 = 2.0 * core::f64::consts::PI / (3600.0 * 1000.0 * 360.0);
 
     let ra_rad = (star.ra_deg as f64).to_radians();
     let dec_rad = (star.dec_deg as f64).to_radians();

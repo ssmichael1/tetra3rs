@@ -3,6 +3,7 @@
 //! converter), so every star stayed at its J2016.0 position — up to 93″ off
 //! by 2025. Checks two high-proper-motion stars against positions propagated
 //! from the published Gaia DR3 / Hipparcos values.
+#![cfg(feature = "std")] // generate_from_gaia reads the catalog file
 
 mod test_data;
 

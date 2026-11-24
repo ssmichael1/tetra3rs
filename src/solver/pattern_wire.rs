@@ -13,8 +13,9 @@
 //! (Format version 1 was the dense `Vec<PatternEntry>`, decoded field by
 //! field through serde: 70% of a 2 s load for a 127M-slot table.)
 
-use std::borrow::Cow;
-use std::fmt;
+use crate::prelude::*;
+use alloc::borrow::Cow;
+use core::fmt;
 
 use serde::de::{self, SeqAccess, Visitor};
 use serde::ser::SerializeTuple;

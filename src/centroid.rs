@@ -3,6 +3,8 @@
 //! Centroids are the output of the star extraction process and are used as input to the star matching process.
 //!
 
+#[cfg(not(feature = "std"))]
+use crate::prelude::*;
 use crate::Matrix2;
 use crate::Vector3;
 use serde::{Deserialize, Serialize};

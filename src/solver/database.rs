@@ -6,11 +6,12 @@
 //! 3. For each FOV scale, distribute lattice fields over the sky.
 //! 4. In each field, generate 4-star patterns (brightest first) and hash them.
 
-use std::collections::HashSet;
+use crate::collections::HashSet;
+use crate::prelude::*;
 
 use log::{info, warn};
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use serde::Deserialize;
 #[cfg(test)]
@@ -42,11 +43,11 @@ fn num_fields_for_sky(fov_rad: f32) -> usize {
     // Solid angle of a cone with half-angle fov/2: 2π(1 − cos(fov/2))
     // Full sky: 4π steradians
     let half_fov = fov_rad / 2.0;
-    let cone_solid_angle = 2.0 * std::f32::consts::PI * (1.0 - half_fov.cos());
+    let cone_solid_angle = 2.0 * core::f32::consts::PI * (1.0 - half_fov.cos());
     if cone_solid_angle <= 0.0 {
         return 1;
     }
-    let n = (4.0 * std::f32::consts::PI / cone_solid_angle).ceil() as usize;
+    let n = (4.0 * core::f32::consts::PI / cone_solid_angle).ceil() as usize;
     n.max(1)
 }
 
@@ -57,7 +58,7 @@ fn num_fields_for_sky(fov_rad: f32) -> usize {
 pub(super) fn separation_for_density(fov_rad: f32, stars_per_fov: u32) -> f32 {
     // Area of a FOV circle ≈ π(fov/2)². With N uniformly distributed stars,
     // average spacing ≈ (fov/2) * sqrt(π/N).
-    (fov_rad / 2.0) * (std::f32::consts::PI / stars_per_fov as f32).sqrt()
+    (fov_rad / 2.0) * (core::f32::consts::PI / stars_per_fov as f32).sqrt()
 }
 
 /// Generate N approximately-uniform points on the unit sphere using the
@@ -69,7 +70,7 @@ fn fibonacci_sphere_lattice(n: usize) -> Vec<[f32; 3]> {
         // z uniformly spaced from ~+1 to ~-1
         let z = 1.0 - (2.0 * i as f64 + 1.0) / n as f64;
         let r = (1.0 - z * z).sqrt();
-        let theta = 2.0 * std::f64::consts::PI * i as f64 / golden_ratio;
+        let theta = 2.0 * core::f64::consts::PI * i as f64 / golden_ratio;
         let x = r * theta.cos();
         let y = r * theta.sin();
         points.push([x as f32, y as f32, z as f32]);
@@ -83,8 +84,9 @@ impl SolverDatabase {
     /// Generate a solver database from a Hipparcos catalog file.
     ///
     /// This is the main entry point for building a new database from Hipparcos.
-    /// It closely follows tetra3's `generate_database()`.
-    #[cfg(feature = "hipparcos")]
+    /// It closely follows tetra3's `generate_database()`. Requires the `std`
+    /// feature (file I/O).
+    #[cfg(all(feature = "hipparcos", feature = "std"))]
     pub fn generate_from_hipparcos(
         catalog_path: &str,
         config: &GenerateDatabaseConfig,
@@ -112,15 +114,33 @@ impl SolverDatabase {
     ///
     /// Negative source_ids indicate Hipparcos gap-fill stars from the merged
     /// catalog.
+    ///
+    /// Requires the `std` feature (file I/O); [`Self::generate_from_gaia_bytes`]
+    /// is the same thing from an in-memory catalog.
+    #[cfg(feature = "std")]
     pub fn generate_from_gaia(
         catalog_path: &str,
         config: &GenerateDatabaseConfig,
     ) -> crate::Result<Self> {
-        use crate::catalogs::gaia::load_gaia_binary;
+        info!("Loading Gaia catalog from {}", catalog_path);
+        Self::generate_from_gaia_bytes(&std::fs::read(catalog_path)?, config)
+    }
+
+    /// Generate a solver database from the bytes of a Gaia binary catalog
+    /// (the contents of a `.bin` file in the `GDR3` format; see
+    /// [`Self::generate_from_gaia`]).
+    ///
+    /// This is the `no_std` entry point. In practice a `no_std` target will
+    /// more often generate the database on a host, save it, and load the bytes
+    /// with [`Self::from_bytes`] / [`Self::from_vec`].
+    pub fn generate_from_gaia_bytes(
+        catalog: &[u8],
+        config: &GenerateDatabaseConfig,
+    ) -> crate::Result<Self> {
+        use crate::catalogs::gaia::parse_gaia_binary;
         use crate::star::star_from_gaia;
 
-        info!("Loading Gaia catalog from {}", catalog_path);
-        let gaia_stars = load_gaia_binary(catalog_path)?;
+        let gaia_stars = parse_gaia_binary(catalog)?;
         info!("Loaded {} Gaia entries", gaia_stars.len());
 
         let stars: Vec<Star> = gaia_stars
@@ -161,7 +181,7 @@ impl SolverDatabase {
         stars.sort_by(|a, b| {
             a.mag
                 .partial_cmp(&b.mag)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
         });
 
         // Determine magnitude cutoff
@@ -378,7 +398,7 @@ impl SolverDatabase {
         info!(
             "Star table: {} stars ({} bytes)",
             num_stars,
-            num_stars * std::mem::size_of::<Star>()
+            num_stars * core::mem::size_of::<Star>()
         );
         info!(
             "Pattern catalog: {} slots ({} bytes)",
@@ -598,7 +618,9 @@ impl SolverDatabase {
         Ok(db)
     }
 
-    /// Save the database to a file using postcard.
+    /// Save the database to a file using postcard. Requires the `std` feature
+    /// (use [`Self::to_bytes`] otherwise).
+    #[cfg(feature = "std")]
     pub fn save_to_file(&self, path: &str) -> crate::Result<()> {
         let bytes = self.to_bytes()?;
         std::fs::write(path, &bytes)?;
@@ -612,6 +634,10 @@ impl SolverDatabase {
     /// The decoded database is checked with [`Self::validate`], so a corrupt,
     /// truncated, or tampered file fails here with a descriptive
     /// [`crate::Error::InvalidInput`] instead of panicking mid-solve.
+    ///
+    /// Requires the `std` feature (use [`Self::from_bytes`] / [`Self::from_vec`]
+    /// otherwise).
+    #[cfg(feature = "std")]
     pub fn load_from_file(path: &str) -> crate::Result<Self> {
         let db = Self::from_vec(std::fs::read(path)?)?;
         info!(
@@ -668,7 +694,7 @@ impl SolverDatabase {
         }
         let fov_ok = p.max_fov_rad.is_finite()
             && p.max_fov_rad > 0.0
-            && p.max_fov_rad < std::f32::consts::PI
+            && p.max_fov_rad < core::f32::consts::PI
             && p.min_fov_rad.is_finite()
             && p.min_fov_rad > 0.0
             && p.min_fov_rad <= p.max_fov_rad;

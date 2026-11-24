@@ -3,11 +3,13 @@
 //! Provides an approximate Earth barycentric velocity for first-order
 //! stellar aberration correction.
 
+#[cfg(not(feature = "std"))]
+use crate::prelude::*;
 /// Mean orbital speed of Earth in km/s.
 const V_ORB_KM_S: f64 = 29.7859;
 
 /// Obliquity of the ecliptic (J2000), in radians.
-const OBLIQUITY_RAD: f64 = 23.4393 * (std::f64::consts::PI / 180.0);
+const OBLIQUITY_RAD: f64 = 23.4393 * (core::f64::consts::PI / 180.0);
 
 /// Sun's mean ecliptic longitude at J2000.0, in degrees.
 const L0_DEG: f64 = 280.460;

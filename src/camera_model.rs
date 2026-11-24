@@ -17,6 +17,8 @@
 //! tangent plane → multiply by f → apply parity → distort → add crpix → pixel
 //! ```
 
+use crate::prelude::*;
+#[cfg(feature = "std")]
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -58,7 +60,7 @@ impl CameraModel {
     /// builds accepted the garbage.)
     pub fn from_fov(fov_rad: f64, image_width: u32, image_height: u32) -> Self {
         assert!(
-            fov_rad.is_finite() && fov_rad > 0.0 && fov_rad < std::f64::consts::PI,
+            fov_rad.is_finite() && fov_rad > 0.0 && fov_rad < core::f64::consts::PI,
             "from_fov: fov_rad must be in (0, π), got {fov_rad}"
         );
         let f = (image_width as f64 / 2.0) / (fov_rad / 2.0).tan();
@@ -157,10 +159,27 @@ impl CameraModel {
         self.distortion.validate()
     }
 
-    /// Save the camera model to a file using postcard.
+    /// Serialize the camera model to postcard bytes (the encoding
+    /// `save_to_file` writes).
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
+        Ok(postcard::to_allocvec(self)?)
+    }
+
+    /// Decode a camera model from bytes produced by [`Self::to_bytes`] (or a
+    /// `save_to_file` file). The result is checked with [`Self::validate`], so
+    /// corrupt input fails with [`crate::Error::InvalidInput`] instead of
+    /// producing NaN on first use.
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        let model = postcard::from_bytes::<Self>(bytes)?;
+        model.validate()?;
+        Ok(model)
+    }
+
+    /// Save the camera model to a file using postcard. Requires the `std`
+    /// feature; see [`Self::to_bytes`] otherwise.
+    #[cfg(feature = "std")]
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
-        let bytes = postcard::to_allocvec(self)?;
-        std::fs::write(&path, &bytes)?;
+        std::fs::write(&path, self.to_bytes()?)?;
         Ok(())
     }
 
@@ -169,11 +188,12 @@ impl CameraModel {
     /// The decoded model is checked with [`Self::validate`] so a corrupt or
     /// truncated file fails here with [`crate::Error::InvalidInput`] instead
     /// of panicking (or silently producing NaN) on first use.
+    ///
+    /// Requires the `std` feature; without it, read the bytes yourself and use
+    /// [`Self::from_bytes`].
+    #[cfg(feature = "std")]
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
-        let bytes = std::fs::read(&path)?;
-        let model = postcard::from_bytes::<Self>(&bytes)?;
-        model.validate()?;
-        Ok(model)
+        Self::from_bytes(&std::fs::read(&path)?)
     }
 }
 

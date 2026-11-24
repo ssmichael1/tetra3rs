@@ -56,6 +56,15 @@ jobs:
       - name: Clippy (wasm32-unknown-unknown, all features)
         run: cargo clippy -p tetra3 --lib --target wasm32-unknown-unknown --all-features -- -D warnings
 
+      # no_std build. A bare-metal target is the only honest check: on the
+      # host, std is linked transitively (dev-deps → num-traits/std) and the
+      # std inherent float methods resolve even inside a #![no_std] crate.
+      - name: Add thumbv7em target
+        run: rustup target add thumbv7em-none-eabi
+
+      - name: Clippy (no_std, thumbv7em-none-eabi)
+        run: cargo clippy -p tetra3 --lib --no-default-features --features libm --target thumbv7em-none-eabi -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -109,6 +118,11 @@ jobs:
 
       - name: Run unit tests
         run: cargo test --verbose
+
+      # Lib built without `std`: exercises the no_std code paths (clock stub,
+      # byte loaders, B-tree collections) on the host.
+      - name: Run integration tests with the lib's std feature off
+        run: cargo test --no-default-features --features libm --test integration_test
 
       - name: Run SkyView integration test
         run: cargo test --test skyview_solve_test --features image -- --nocapture

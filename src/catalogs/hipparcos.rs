@@ -9,6 +9,7 @@
 //! The file `data/hip2.dat` in this crate is a copy of the catalog
 //! as of 2025-11-15.
 
+use crate::prelude::*;
 /// A star from the Hipparcos catalog.
 ///
 /// Only the fields the solver consumes (position, proper motion, and the
@@ -44,8 +45,8 @@ impl HipparcosStar {
 /// range are not valid UTF-8. Slicing the record as bytes (not `&str`) keeps
 /// a multi-byte character straddling a column boundary from panicking — such
 /// a line is malformed and gets skipped like any other unparseable record.
-fn column(record: &[u8], range: std::ops::Range<usize>) -> Option<&str> {
-    std::str::from_utf8(record.get(range)?).ok()
+fn column(record: &[u8], range: core::ops::Range<usize>) -> Option<&str> {
+    core::str::from_utf8(record.get(range)?).ok()
 }
 
 /// Parse a single Hipparcos catalog record into a `HipparcosStar`.
@@ -72,6 +73,8 @@ pub fn load_hipparcos_catalog(data: &str) -> Vec<HipparcosStar> {
     data.lines().filter_map(parse_hipparcos_star).collect()
 }
 
+/// Requires the `std` feature (file I/O).
+#[cfg(feature = "std")]
 pub fn load_hipparcos_catalog_from_file<P: AsRef<std::path::Path>>(
     path: P,
 ) -> crate::Result<Vec<HipparcosStar>> {

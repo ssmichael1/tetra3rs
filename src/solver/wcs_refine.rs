@@ -23,6 +23,7 @@
 //!    f. Re-associate: project catalog stars to pixel space, match to centroids.
 //!    g. Converge when updates vanish, no outliers rejected, and match set is stable.
 
+use crate::prelude::*;
 use log::debug;
 use numeris::{Matrix3, Vector3};
 
@@ -941,7 +942,7 @@ pub fn wcs_refine(
     let cd = cd_from_theta(theta, ps, parity_flip);
 
     if log::log_enabled!(log::Level::Debug) {
-        final_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        final_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         let p90e = if final_residuals.is_empty() {
             0.0
         } else {
@@ -1150,7 +1151,7 @@ mod tests {
     fn test_tan_project_behind() {
         let crval_ra = 0.0;
         let crval_dec = 0.0;
-        assert!(tan_project(std::f64::consts::PI, 0.0, crval_ra, crval_dec).is_none());
+        assert!(tan_project(core::f64::consts::PI, 0.0, crval_ra, crval_dec).is_none());
     }
 
     #[test]
@@ -1283,7 +1284,7 @@ mod tests {
     #[test]
     fn test_wcs_to_rotation_simple() {
         // True pinhole: ps = 1/f where f = (W/2) / tan(fov/2).
-        let crval_ra = std::f64::consts::FRAC_PI_2;
+        let crval_ra = core::f64::consts::FRAC_PI_2;
         let crval_dec = 0.0;
         let fov_deg = 10.0_f64;
         let image_width = 1000u32;

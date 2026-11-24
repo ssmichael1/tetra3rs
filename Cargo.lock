@@ -1100,11 +1100,12 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "tetra3"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "env_logger",
  "image",
  "log",
+ "num-traits",
  "numeris",
  "postcard",
  "rand",
@@ -1118,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "tetra3-python"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "log",

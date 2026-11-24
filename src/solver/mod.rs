@@ -11,6 +11,7 @@
 //!
 //! Reference: cedar-solve / tetra3 by Gustav Pettersson (ESA) and Steven Rosenthal.
 
+use crate::prelude::*;
 /// Time `$e`, attributing the elapsed nanoseconds (and one operation) to
 /// `$bucket`. With the `profile` feature off this expands to just `$e`.
 macro_rules! timed {
@@ -743,7 +744,7 @@ impl Solution {
     /// [`attitude_cov_rad2`](Self::attitude_cov_rad2). The boresight's
     /// pointing uncertainty is `hypot(σ_ξ, σ_η)`.
     pub fn attitude_sigma_rad(&self) -> [f64; 3] {
-        std::array::from_fn(|i| self.attitude_cov_rad2[i][i].sqrt())
+        core::array::from_fn(|i| self.attitude_cov_rad2[i][i].sqrt())
     }
 
     /// Convert centered pixel coordinates to world coordinates (RA, Dec) in degrees.
@@ -764,7 +765,7 @@ impl Solution {
         let eta = sin_t * xi_cam + cos_t * eta_cam;
         let (ra, dec) =
             wcs_refine::inverse_tan_project(xi, eta, self.crval_rad[0], self.crval_rad[1]);
-        (ra.to_degrees().rem_euclid(360.0), dec.to_degrees())
+        (rem_euclid(ra.to_degrees(), 360.0), dec.to_degrees())
     }
 
     /// Convert world coordinates (RA, Dec in degrees) to centered pixel coordinates.

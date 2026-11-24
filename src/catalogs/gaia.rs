@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
+use crate::prelude::*;
 use log::debug;
-use std::path::Path;
 
 pub struct GaiaStar {
     pub source_id: i64,
@@ -14,17 +14,18 @@ pub struct GaiaStar {
     pub pmdec: f32,
 }
 
-/// Load a Gaia catalog from the binary format.
+/// Parse a Gaia catalog from its binary format, held in memory.
 ///
 /// Binary format spec:
 /// - Header: magic "GDR3" (4 bytes) + version (u32 LE, value 1) + num_stars (u64 LE)
 /// - Per star (36 bytes): source_id (i64 LE) + ra (f64 LE) + dec (f64 LE) + mag (f32 LE) + pmra (f32 LE) + pmdec (f32 LE)
-pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)?;
-    let mut header = [0u8; 16];
-    file.read_exact(&mut header)?;
+///
+/// Trailing bytes after the star block are tolerated (and ignored).
+pub fn parse_gaia_binary(bytes: &[u8]) -> Result<Vec<GaiaStar>> {
+    let header: &[u8; 16] = bytes
+        .get(..16)
+        .and_then(|h| h.try_into().ok())
+        .ok_or_else(|| Error::InvalidCatalog("Gaia binary: truncated header".into()))?;
 
     // Validate magic
     if &header[0..4] != b"GDR3" {
@@ -51,32 +52,29 @@ pub fn load_gaia_binary<P: AsRef<Path>>(path: P) -> Result<Vec<GaiaStar>> {
         })?;
 
     let record_size = 36;
-    // A corrupt/truncated header could claim a huge `num_stars`, driving a
-    // multi-gigabyte allocation (or a capacity-overflow abort) before
-    // `read_exact` gets a chance to fail. Require the star block to match the
-    // file's remaining bytes exactly first.
+    // A corrupt header could claim a huge `num_stars`; check it against the
+    // bytes actually present before sizing anything by it.
     let expected_bytes = num_stars.checked_mul(record_size).ok_or_else(|| {
         Error::InvalidCatalog("Gaia binary: num_stars * record_size overflows".into())
     })?;
-    let data_bytes = file.metadata()?.len().saturating_sub(header.len() as u64);
-    // Require *at least* the claimed star block (guards a truncated header that
-    // would otherwise drive a multi-gigabyte allocation before `read_exact`
-    // fails). Trailing bytes — padding or appended metadata that 0.8 read past
-    // fine — are tolerated: we consume exactly `expected_bytes` below.
-    if data_bytes < expected_bytes as u64 {
+    let data = &bytes[header.len()..];
+    // Require *at least* the claimed star block. Trailing bytes — padding or
+    // appended metadata that 0.8 read past fine — are tolerated: we consume
+    // exactly `expected_bytes` below.
+    if data.len() < expected_bytes {
         return Err(Error::InvalidCatalog(format!(
             "Gaia binary: header claims {num_stars} stars ({expected_bytes} bytes) \
-             but file has only {data_bytes} data bytes"
+             but file has only {} data bytes",
+            data.len()
         )));
     }
-    if data_bytes > expected_bytes as u64 {
+    if data.len() > expected_bytes {
         debug!(
             "Gaia binary: {} trailing byte(s) after the {num_stars}-star block; ignoring",
-            data_bytes - expected_bytes as u64
+            data.len() - expected_bytes
         );
     }
-    let mut buf = vec![0u8; expected_bytes];
-    file.read_exact(&mut buf)?;
+    let buf = &data[..expected_bytes];
 
     let mut stars = Vec::with_capacity(num_stars);
     let mut non_finite = 0usize;

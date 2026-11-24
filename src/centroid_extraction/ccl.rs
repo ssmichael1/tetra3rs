@@ -4,7 +4,8 @@
 //! sub-pixel peak refinement. Split out of the crate-facing module; entry via
 //! [`extract_from_gray`].
 
-use std::borrow::Cow;
+use crate::prelude::*;
+use alloc::borrow::Cow;
 
 use numeris::imageproc::{gaussian_blur_into, BorderMode};
 use numeris::DynMatrix;
@@ -173,7 +174,7 @@ pub(super) fn extract_from_gray(
                     *u = if p.is_finite() { p - *u } else { 0.0 };
                 }
             });
-            filter_input = Some(DynMatrix::from_vec(w, h, std::mem::take(unclamped)));
+            filter_input = Some(DynMatrix::from_vec(w, h, core::mem::take(unclamped)));
             stored_gray = None;
         } else {
             set_len_uninit(clamped, w * h);
@@ -209,7 +210,7 @@ pub(super) fn extract_from_gray(
         if filter_sigma.is_some() {
             set_len_uninit(unclamped, w * h);
             unclamped.copy_from_slice(&gray);
-            filter_input = Some(DynMatrix::from_vec(w, h, std::mem::take(unclamped)));
+            filter_input = Some(DynMatrix::from_vec(w, h, core::mem::take(unclamped)));
         }
         stored_gray = Some(gray);
     }
@@ -759,7 +760,7 @@ impl BlobContext<'_> {
                     }
                 }
             }
-            maxima.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            maxima.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
             let kept = &mut scratch.kept;
             kept.clear();
             for &(_, c, r) in maxima.iter() {

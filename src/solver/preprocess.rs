@@ -2,6 +2,7 @@
 //! inputs, subtract the optical center, undistort, order by brightness, and
 //! build camera-frame unit vectors at a given pixel scale.
 
+use crate::prelude::*;
 use log::debug;
 
 use crate::camera_model::CameraModel;
@@ -112,7 +113,7 @@ pub(super) fn sort_indices_by_brightness(centroids: &[Centroid]) -> Vec<usize> {
     sorted_indices.sort_by(|&a, &b| {
         let ma = centroids[a].mass.unwrap_or(f32::MIN);
         let mb = centroids[b].mass.unwrap_or(f32::MIN);
-        mb.partial_cmp(&ma).unwrap_or(std::cmp::Ordering::Equal)
+        mb.partial_cmp(&ma).unwrap_or(core::cmp::Ordering::Equal)
     });
     sorted_indices
 }

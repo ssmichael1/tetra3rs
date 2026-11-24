@@ -9,6 +9,7 @@ use super::{
 };
 use crate::centroid::Centroid;
 use crate::error::{Error, Result};
+use crate::prelude::*;
 
 // ─── Fast single-pass star-tracker path ─────────────────────────────────────
 

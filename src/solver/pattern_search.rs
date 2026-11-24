@@ -13,6 +13,7 @@
 //! the same verification (`verify.rs`) and refinement (`solve.rs`) stages.
 
 use super::clock::Instant;
+use crate::prelude::*;
 
 use log::debug;
 use numeris::Matrix3;
@@ -358,17 +359,17 @@ impl<'a> PatternSearch<'a> {
 
             // Broadened range for pattern key lookup
             let ratio_min: [f32; NUM_EDGE_RATIOS] =
-                std::array::from_fn(|i| image_ratios[i] - p_max_err);
+                core::array::from_fn(|i| image_ratios[i] - p_max_err);
             let ratio_max: [f32; NUM_EDGE_RATIOS] =
-                std::array::from_fn(|i| image_ratios[i] + p_max_err);
+                core::array::from_fn(|i| image_ratios[i] + p_max_err);
 
             let image_key = compute_pattern_key(&image_ratios, p_bins);
 
             // Compute the range of pattern keys to search
             let key_min: [u32; NUM_EDGE_RATIOS] =
-                std::array::from_fn(|i| (ratio_min[i] * p_bins as f32).max(0.0) as u32);
+                core::array::from_fn(|i| (ratio_min[i] * p_bins as f32).max(0.0) as u32);
             let key_max: [u32; NUM_EDGE_RATIOS] =
-                std::array::from_fn(|i| (ratio_max[i] * p_bins as f32).min(p_bins as f32) as u32);
+                core::array::from_fn(|i| (ratio_max[i] * p_bins as f32).min(p_bins as f32) as u32);
 
             // Build list of candidate pattern keys, sorted by distance from image_key
             pattern_key_list.clear();
@@ -448,7 +449,7 @@ impl<'a> PatternSearch<'a> {
                     // density region) turns to nonsense. Such a candidate can
                     // only waste refinement work or weaken the statistical
                     // gate, never be right; skip it.
-                    if !(fov.is_finite() && fov > 0.0 && fov < std::f32::consts::PI) {
+                    if !(fov.is_finite() && fov > 0.0 && fov < core::f32::consts::PI) {
                         continue;
                     }
 
@@ -479,7 +480,7 @@ impl<'a> PatternSearch<'a> {
                     let (pat_vecs, ps_meas): ([[f32; 3]; 4], f32) = if rebuild {
                         let ps = pixel_scale_from_fov(config.image_width(), fov as f64) as f32;
                         (
-                            std::array::from_fn(|k| {
+                            core::array::from_fn(|k| {
                                 unit_vector_from_pixels(
                                     &centroids[sorted_indices[image_pattern_local[k]]],
                                     ps,
@@ -499,8 +500,8 @@ impl<'a> PatternSearch<'a> {
                     // Catalog pattern is already pre-sorted during database generation.
                     // Build matched vector pairs.
                     let matched_img: [[f32; 3]; 4] =
-                        std::array::from_fn(|i| pat_vecs[img_order[i]]);
-                    let matched_cat: [[f32; 3]; 4] = std::array::from_fn(|i| cat_vecs[i]);
+                        core::array::from_fn(|i| pat_vecs[img_order[i]]);
+                    let matched_cat: [[f32; 3]; 4] = core::array::from_fn(|i| cat_vecs[i]);
 
                     #[cfg(feature = "profile")]
                     profiling::count(buckets::RATIO_PASS, 1);
@@ -634,7 +635,7 @@ fn build_fov_sweep(
             // infinite/huge max_error (which would otherwise stall the
             // `offset += step` accumulation below into an unbounded loop)
             // clamps to the widest sweep that can matter.
-            let max_error = max_error.min(std::f32::consts::PI);
+            let max_error = max_error.min(core::f32::consts::PI);
             // Half-diagonal angle at the estimated FOV (fov is width-referenced).
             let theta_hd = ((fov_estimate as f64 / 2.0).tan() * diag_factor as f64).atan();
             // Second-order ratio-drift coefficient; guarded so a degenerate
@@ -646,7 +647,7 @@ fn build_fov_sweep(
             let mut offset = step;
             // Also stop once the upward branch reaches π: every candidate at
             // such a FOV is rejected later anyway, after a full pattern search.
-            while offset <= max_error && fov_estimate + offset < std::f32::consts::PI {
+            while offset <= max_error && fov_estimate + offset < core::f32::consts::PI {
                 values.push(fov_estimate + offset);
                 if fov_estimate - offset > 0.0 {
                     values.push(fov_estimate - offset);
@@ -748,7 +749,7 @@ mod tests {
         ];
         for (key_min, key_max) in cases {
             let center: [u32; NUM_EDGE_RATIOS] =
-                std::array::from_fn(|i| (key_min[i] + key_max[i]) / 2);
+                core::array::from_fn(|i| (key_min[i] + key_max[i]) / 2);
 
             let mut got: Vec<(u32, [u32; NUM_EDGE_RATIOS])> = Vec::new();
             enumerate_key_range(&key_min, &key_max, &center, &mut got);
@@ -789,7 +790,7 @@ mod tests {
             let values = build_fov_sweep(fov, Some(max_error), 0.003, 1.2);
             assert!(!values.is_empty());
             assert!(
-                values.iter().all(|&v| v > 0.0 && v < std::f32::consts::PI),
+                values.iter().all(|&v| v > 0.0 && v < core::f32::consts::PI),
                 "sweep emitted a FOV outside (0, π)"
             );
             assert!(

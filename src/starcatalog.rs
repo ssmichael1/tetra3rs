@@ -12,7 +12,8 @@
 //!
 //! This keeps search time close to local star density instead of full-catalog size.
 
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use crate::prelude::*;
+use core::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use numeris::Vector3;
 use serde::{Deserialize, Serialize};
@@ -345,7 +346,7 @@ impl StarCatalog {
         }
     }
 
-    fn z_bin_range(n_lat: u32, z_min: f32, z_max: f32) -> std::ops::RangeInclusive<u32> {
+    fn z_bin_range(n_lat: u32, z_min: f32, z_max: f32) -> core::ops::RangeInclusive<u32> {
         let start = Self::z_to_lat_bin(n_lat, z_min);
         let end = Self::z_to_lat_bin(n_lat, z_max);
         start..=end
@@ -423,7 +424,7 @@ fn cone_ra_half_span(dec_lo: f32, dec_hi: f32, dec_c: f32, r: f32) -> f32 {
 }
 
 fn wrap_angle(theta_rad: f32) -> f32 {
-    theta_rad.rem_euclid(TAU)
+    rem_euclid(theta_rad, TAU)
 }
 
 /// ICRS unit vector from (RA, Dec) in radians. Also used by [`Star::uvec`].

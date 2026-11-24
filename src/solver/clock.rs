@@ -20,8 +20,42 @@
 //! [`SolveConfig::solve_timeout_ms`]: super::SolveConfig::solve_timeout_ms
 //! [`SolveConfig::max_patterns_checked`]: super::SolveConfig::max_patterns_checked
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+//!
+//! Without the `std` feature there is no clock at all: [`Instant`] is a
+//! zero-sized stand-in whose `elapsed()` is always zero, so
+//! `solve_timeout_ms` never fires and `solve_time_ms` reads 0. Bound the
+//! search with `max_patterns_checked` on such builds.
+
+#[cfg(all(
+    feature = "std",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 pub(crate) use std::time::Instant;
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(all(feature = "std", target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) use web_time::Instant;
+
+#[cfg(not(feature = "std"))]
+pub(crate) use no_clock::Instant;
+
+#[cfg(not(feature = "std"))]
+mod no_clock {
+    use core::time::Duration;
+
+    /// Clock-less `Instant`: `now()` is a constant and `elapsed()` is always
+    /// zero. See the module docs.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Instant;
+
+    impl Instant {
+        #[inline]
+        pub fn now() -> Self {
+            Instant
+        }
+
+        #[inline]
+        pub fn elapsed(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+}

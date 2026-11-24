@@ -16,6 +16,7 @@
 //! pattern-hash failures from sparse / low-SNR fields.
 
 use super::clock::Instant;
+use crate::prelude::*;
 
 use log::debug;
 use numeris::Vector3;

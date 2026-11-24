@@ -19,6 +19,7 @@
 //! attitude, and apply the sequential multiple-comparison correction.
 
 use super::clock::Instant;
+use crate::prelude::*;
 
 use log::{debug, warn};
 use numeris::{Matrix3, Quaternion, Vector3};
@@ -575,7 +576,7 @@ impl SolverDatabase {
             let ang = cross.norm().atan2(img_v.dot(&cat_v));
             angular_residuals.push(ang);
         }
-        angular_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        angular_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         let rmse = if angular_residuals.is_empty() {
             0.0
         } else {
