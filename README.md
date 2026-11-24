@@ -47,7 +47,7 @@ cargo add tetra3
 For bare-metal targets, disable the default `std` feature and take float math from `libm` (an allocator is still required):
 
 ```toml
-tetra3 = { version = "0.14", default-features = false, features = ["libm"] }
+tetra3 = { version = "0.15", default-features = false, features = ["libm"] }
 ```
 
 Without `std` there is no file I/O — load databases and camera models with the `from_bytes` / `to_bytes` methods (`SolverDatabase::generate_from_gaia_bytes` builds a database from in-memory catalog bytes) — and no clock, so `solve_timeout_ms` is ignored; bound the search with `max_patterns_checked`. Centroid extraction (`image`) requires `std`.

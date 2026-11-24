@@ -54,7 +54,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! tetra3 = { version = "0.14", default-features = false, features = ["libm"] }
+//! tetra3 = { version = "0.15", default-features = false, features = ["libm"] }
 //! ```
 //!
 //! - **Float math** (`sin`, `sqrt`, `ln`, …) comes from the `libm` crate via
